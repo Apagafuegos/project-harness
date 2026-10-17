@@ -10,6 +10,15 @@ publish = false
 
 [workspace.dependencies]
 clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v7"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+rustix = { version = "1", features = ["fs", "process"] }
+thiserror = "2"
+jsonschema = { version = "0.46", default-features = false }
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

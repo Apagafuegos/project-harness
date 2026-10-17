@@ -34,8 +34,9 @@ tests and doctests, a development build, documentation with warnings denied,
 and CLI help/version smoke checks. It can also be invoked from another working
 directory. CI runs the same script with the repository toolchain.
 
-The scaffold has no engine behavior to test yet. Passing checks prove the build
-foundation and CLI entry point, not any model, security, or persistence guarantees.
+The checks exercise J01–J03 storage behavior and the Rust API usage example,
+including the specification journals and injected durability failures. They do
+not prove provider compatibility, workspace tools or sandbox enforcement.
 
 For narrower checks while working:
 
@@ -53,10 +54,11 @@ dependencies, and lints live in the root manifest. Each crate opts into them.
 First-party unsafe code is forbidden; this does not audit dependencies or create
 an execution sandbox.
 
-Clap currently supplies CLI help, version, and argument validation. Tokio,
-Ratatui, Serde, HTTP clients, and storage libraries should be added when their
-first implementation needs them. Avoid unused infrastructure dependencies and
-enable only required features.
+Clap supplies CLI help, version, and argument validation. Storage uses Serde and
+Serde JSON, the bundled JSON Schema validator with remote resolution disabled,
+SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives and typed
+errors. Tempfile is test-only. Tokio, Ratatui and HTTP clients are added when
+their implementations need them. Enable only required features.
 
 Commit `Cargo.lock`. Use `--locked` in routine builds and CI. To intentionally
 change dependencies, edit the manifest or run a targeted `cargo update -p NAME`,
@@ -70,25 +72,26 @@ this locally, set `CARGO_NET_OFFLINE=true` when running the check script.
 
 ## Secrets and runtime data
 
-The scaffold does not read credentials or `.env` files. No API keys are required.
+The current library/CLI do not read credentials or `.env` files. No API keys are required.
 When providers are implemented, document their configuration and opt-in live
 checks. Keep credentials out of Git, fixtures, logs, session entries, context
 snapshots, and tool subprocess environments. Environment inheritance must be
 explicit when process execution is introduced.
 
-RFC-001 proposes a private XDG state root and content-addressed artifacts, with
-strict JSONL durability and recovery rules. The scaffold creates no runtime
-storage. Retention/deletion UI and implementation remain future work.
+The storage library can create a private state root, checksummed journals and
+content-addressed artifacts when explicitly called. The CLI creates no runtime
+storage. See [session storage](session-storage.md) for API usage and limits.
+Retention/deletion UI remains future work.
 
 ## Specification artifacts
 
-[RFC-001](rfcs/001-core-types-state-persistence.md) has a proposed JSON Schema,
-checksummed example journals, and future conformance cases. They add no runtime
-dependencies. The existing Cargo checks do not implement or prove the journal,
-security, or context conformance cases; those tests arrive with each runtime slice.
+[RFC-001](rfcs/001-core-types-state-persistence.md) has a bundled JSON Schema,
+checksummed example journals, and conformance cases. Storage tests validate all
+three examples and their artifacts and cover J01–J03. Runtime, security, model
+and context gates remain future work.
 
 Bubblewrap and Linux namespace support will be prerequisites for external tool
-execution, not for the current documentation/scaffold checks. Do not install or
+execution, not for the current storage/CLI checks. Do not install or
 claim a working sandbox merely because it is the chosen backend.
 
 ## References

@@ -1,8 +1,9 @@
 # Contract 4: Session Storage
 
-Status: Tree-based append-only JSONL is provisionally agreed. Concrete framing,
-durability, schema, and recovery are proposed in
-[RFC-001](../rfcs/001-core-types-state-persistence.md).
+Status: Tree-based append-only JSONL storage is implemented in `harness-core`
+under [decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 tests.
+[RFC-001](../rfcs/001-core-types-state-persistence.md) defines its framing/schema.
+Runtime recovery orchestration and tool execution remain future work.
 
 ## Inputs and output
 
@@ -32,18 +33,20 @@ deltas remain transient in v0.1; completed/partial response snapshots are stored
 - Recovery is deterministic for the same validated history and never blindly
   repeats an action whose external effects may already have happened.
 
-## RFC design
+## Implemented storage design
 
-RFC-001 proposes one checksummed transaction per JSONL line. Each commit includes
-new entries, audit events, and a compare-and-set head update so reconstruction
+The store implements one checksummed transaction per JSONL line. Each commit
+includes new entries, audit events, and a compare-and-set head update so reconstruction
 cannot publish them independently. A header selects schema/session/workspace
 identity and initial model/configuration. Schema validation is necessary but
 not sufficient for semantic consistency.
 
-The RFC defines exact-byte checksums, file/directory sync ordering, writer
-poisoning on I/O failure, explicit quarantined-tail repair, artifact publication,
-command deduplication, and execution uncertainty. These are proposed details,
-not an already proven storage implementation. Cases J01–J03 and R01 gate it.
+The implementation validates exact-byte checksums, file/directory sync ordering,
+writer poisoning on I/O failure, explicit quarantined-tail repair, artifact publication,
+command deduplication, and persisted execution uncertainty. J01–J03 exercise
+these storage behaviors, including injected I/O failures. R01 remains a runtime
+and executor gate; the store never executes a tool. See the
+[usage guide](../session-storage.md) for explicit recovery and platform limits.
 
 Context projection and summarization are a separate [contract 5](context.md).
 SQLite is not an alternative initial store under the agreed v0.1 architecture.

@@ -1,7 +1,8 @@
 # RFC-001 serialization examples
 
-These proposed v1 JSONL journals use real exact-byte SHA-256 checksums. They are
-specification fixtures, not proof of an implemented engine or sandbox.
+These v1 JSONL journals use real exact-byte SHA-256 checksums. Storage tests now
+decode, round-trip and semantically replay all three with their artifacts. They
+remain specification fixtures, not proof of an agent runtime or sandbox.
 
 - [Branching](branching.jsonl): a completed first exchange followed by two sibling
   user branches. The later turns deliberately end before inference. Navigation

@@ -1,7 +1,7 @@
 # Roadmap
 
-Only the scaffold and specification artifacts below exist. Later stages have
-acceptance criteria; they are not implemented features.
+The scaffold, specification artifacts and first headless storage milestone exist.
+Later stages have acceptance criteria; they are not implemented features.
 
 ## 0. Foundation and proposed specification — present
 
@@ -9,20 +9,24 @@ Two-crate Rust workspace, pinned toolchain, dependency lockfile, CLI help/versio
 shared local/CI checks, six provisionally agreed contracts, and the Rust-only
 architecture decisions. RFC-001 proposes concrete types, JSONL transactions,
 state transitions, recovery, and conformance cases, with schema/example journals.
-No engine runtime, sandbox, persistence layer, or TUI is implemented.
+No agent runtime, sandbox, or TUI is implemented.
 
-## 1. Review RFC-001 and implement common types/storage
+## 1. Review RFC-001 and implement common types/storage — implemented
 
-Review the proposed details before implementation or delegating runtime work.
+Storage review and implementation decisions are recorded in
+[decision 0003](decisions/0003-jsonl-storage.md). Review the remaining proposed
+details before implementing runtime work.
 Tree-based JSONL history, selective sandboxing, six independent contracts, and
 sequential tools are already architecture constraints, not choices to reopen
 silently in code.
 
-Implement common IDs/content (including multimodal variants), validated entries,
-journal records, immutable snapshots, and semantic validators. Prove checksums,
+Implemented common IDs/content (including multimodal variants), validated entries,
+journal records, immutable snapshots, and semantic validators. Tests cover checksums,
 head transactions, single-writer locking, sync ordering, artifact publication,
 torn-tail diagnostics/repair, and corruption rejection with fault injection.
-Use RFC cases J01–J03 and serialization fixtures. No real tool effects yet.
+RFC cases J01–J03 and all serialization fixtures run offline. No tool effects
+exist. See [usage and limitations](session-storage.md): blocking storage API,
+explicit recovery commits, local Linux storage, no salvage/export command.
 
 ## 2. Headless mock lifecycle and context inspection
 

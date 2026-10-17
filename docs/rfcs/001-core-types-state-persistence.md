@@ -1,6 +1,8 @@
 # RFC-001: Core Types, State Transitions & Persistence Format
 
-Status: Proposed specification; no runtime implementation.
+Status: Storage details accepted and implemented under
+[decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 behavioral tests.
+Other subsystem details remain proposed; no agent runtime is implemented.
 
 Date: 2026-10-16
 
@@ -10,7 +12,8 @@ Architecture baseline: [decision 0002](../decisions/0002-v01-contracts.md).
 
 This RFC refines the six provisionally agreed contracts into an implementation
 target. MUST, MUST NOT, and SHOULD describe requirements of the future
-implementation. They do not describe features of the current scaffold.
+implementation. Implemented storage behavior and remaining scope are distinguished
+in decision 0003 and the storage usage guide.
 
 The Rust shapes below specify ownership and behavior. Serialization is defined
 by the accompanying [JSON Schema](001/schema/session-v1.schema.json) and the
@@ -808,7 +811,8 @@ cleanup failure holds the session in a blocked/recovery condition, not idle.
 
 ## 8. Conformance requirements
 
-These are implementation gates, not currently passing engine tests. Give each
+These are implementation gates. J01–J03 have storage tests; other cases remain
+future gates. Give each
 case a deterministic test with a fake clock, scripted provider, counted executor,
 fault-injected journal, and temporary local storage. Ordinary CI is offline.
 

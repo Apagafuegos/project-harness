@@ -1,7 +1,9 @@
 # Architecture
 
-Status: Six high-level contracts provisionally agreed. Runtime unimplemented;
-concrete details are proposed in [RFC-001](rfcs/001-core-types-state-persistence.md).
+Status: Six high-level contracts provisionally agreed. Session storage is
+implemented under [decision 0003](decisions/0003-jsonl-storage.md). Orchestration
+remains unimplemented; other details remain proposed in
+[RFC-001](rfcs/001-core-types-state-persistence.md).
 
 ## Engine and client
 
@@ -86,6 +88,10 @@ separately enforced backend and cannot silently become host networking.
 
 ## Implementation status
 
-Only the two-crate scaffold, CLI help/version, tooling, and documentation exist.
-RFC-001 includes machine-readable schema/examples and future conformance cases,
-not an implementation of these guarantees. See the [roadmap](roadmap.md).
+The two-crate workspace includes a blocking headless session store and J01–J03
+behavioral tests: exact-byte checksums, atomic commits/head selection, semantic
+replay, locking, artifact integrity, writer poisoning and explicit tail repair.
+The schema and all three example journals are exercised by tests. See
+[session storage usage](session-storage.md) for API limits. Providers, tools,
+context projection, orchestration and the TUI remain unimplemented; the CLI
+still provides help/version only. See the [roadmap](roadmap.md).

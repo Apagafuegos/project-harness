@@ -10,11 +10,13 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: foundation scaffold.** The workspace builds and the `harness` command
-shows help and version information. Agent execution, provider adapters, tools,
-session storage, context management, and the TUI are not implemented. Six
-high-level contracts are provisionally agreed; RFC-001 proposes their concrete
-types, state transitions, persistence format, and conformance requirements.
+**Status: first headless storage milestone.** `harness-core` implements validated
+session trees, checksummed JSONL transactions, immutable snapshots, private
+content-addressed artifacts, single-writer locking, and explicit torn-tail repair.
+J01–J03 tests cover replay, corruption rejection and injected durability failures.
+The `harness` command still shows only help and version information. Agent
+execution, provider adapters, workspace tools, context projection, and the TUI
+are not implemented. Persisted runtime types/events do not execute an agent.
 
 ## Getting started
 
@@ -33,12 +35,12 @@ cargo run --locked -p harness -- --help
 
 `rust-toolchain.toml` selects Rust **1.99.1**, rustfmt, and Clippy automatically.
 `Cargo.lock` fixes dependency resolution. No API keys, Docker, Node.js, Go, or
-external services are needed for the scaffold or its checks.
+external services are needed for storage tests or the CLI checks.
 
 ## Repository
 
 ```text
-crates/core/       Headless engine library boundary (harness-core)
+crates/core/       Headless session storage library (harness-core)
 crates/cli/        CLI entry point and future Ratatui client (harness)
 docs/             Architecture, contract drafts, decisions, and roadmap
 scripts/check.sh  Shared local/CI checks
@@ -53,8 +55,9 @@ context projection with rolling summaries, authorized trusted Rust file tools,
 and Bubblewrap for every external executable. Tool calls run sequentially.
 The context inspection API belongs to the headless engine from the first slice.
 
-The next step is reviewing RFC-001 before implementation. Then build validated
-core types and persistence, followed by a deterministic mock-provider lifecycle.
-See the [roadmap](docs/roadmap.md) for acceptance criteria.
+See [session storage usage](docs/session-storage.md) and the
+[storage decision](docs/decisions/0003-jsonl-storage.md). The next milestone is a
+deterministic mock-provider lifecycle and headless context inspection, with
+Tokio orchestration over the blocking store. See the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

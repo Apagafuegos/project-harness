@@ -11,6 +11,10 @@ describing a future component is not evidence that it is implemented.
   provisionally agreed JSONL, tree, tool, sandbox, and context choices.
 - [RFC-001](rfcs/001-core-types-state-persistence.md): proposed concrete types,
   state transitions, atomic journal commits, recovery, and conformance cases.
+- [Storage implementation decision](decisions/0003-jsonl-storage.md): accepted
+  storage details, API decisions, and boundaries of the first milestone.
+- [Session storage usage](session-storage.md): implemented Rust API and recovery
+  behavior, with an executable example and conformance-test coverage.
 - [Model provider](contracts/model.md): native APIs, hybrid multimodal content,
   streaming, capabilities, and model switching.
 - [Tools](contracts/tools.md): registry, validation, authorization, sequential calls,
@@ -34,9 +38,10 @@ the reason and consequences in a decision record.
 the architectural constraints in decision 0002. These choices supersede earlier
 options such as SQLite or parallel initial tool execution.
 
-**Proposed RFC details** specify how to implement those boundaries. RFC-001 adds
-reviewable decisions such as atomic commit records, checksums, and approval
-defaults. Its schema and examples are specification artifacts, not a runtime.
+**RFC details** specify how to implement those boundaries. Storage details are
+accepted and tested under decision 0003. Other details, including approval
+defaults and runtime orchestration, remain proposed. Schema/examples alone are
+not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is
 validated only when its behavioral requirements have executable tests; live

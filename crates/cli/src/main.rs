@@ -10,8 +10,9 @@ fn main() -> io::Result<()> {
         .about("A small, inspectable, context-first agent harness")
         .long_about(
             "A small, inspectable, context-first agent harness.\n\n\
-             Foundation scaffold: the engine, model providers, tools, sessions, \
-             and terminal UI are not implemented yet.\n\n\
+             Session storage is implemented in harness-core. Agent execution, \
+             model providers, tools, context projection, and terminal UI are \
+             not implemented yet. This CLI currently provides help/version only.\n\n\
              Start with README.md and docs/README.md in the repository.",
         );
 
