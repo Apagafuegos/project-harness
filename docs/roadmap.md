@@ -1,0 +1,82 @@
+# Roadmap
+
+Only the scaffold and specification artifacts below exist. Later stages have
+acceptance criteria; they are not implemented features.
+
+## 0. Foundation and proposed specification — present
+
+Two-crate Rust workspace, pinned toolchain, dependency lockfile, CLI help/version,
+shared local/CI checks, six provisionally agreed contracts, and the Rust-only
+architecture decisions. RFC-001 proposes concrete types, JSONL transactions,
+state transitions, recovery, and conformance cases, with schema/example journals.
+No engine runtime, sandbox, persistence layer, or TUI is implemented.
+
+## 1. Review RFC-001 and implement common types/storage
+
+Review the proposed details before implementation or delegating runtime work.
+Tree-based JSONL history, selective sandboxing, six independent contracts, and
+sequential tools are already architecture constraints, not choices to reopen
+silently in code.
+
+Implement common IDs/content (including multimodal variants), validated entries,
+journal records, immutable snapshots, and semantic validators. Prove checksums,
+head transactions, single-writer locking, sync ordering, artifact publication,
+torn-tail diagnostics/repair, and corruption rejection with fault injection.
+Use RFC cases J01–J03 and serialization fixtures. No real tool effects yet.
+
+## 2. Headless mock lifecycle and context inspection
+
+Add Tokio, typed commands/events, the provider stream lifecycle, one-turn-per-
+session state machine, cancellation, and a deterministic scripted provider.
+Implement initial branch projection and the inspection API before Ratatui.
+Prove context/report reproducibility, ordered events, usage, partial-response
+handling, bounded buffering, and no execution from incomplete calls.
+
+Use M01–M04, C01, R02, and E01 with mocks/fixtures, without keys or network.
+Native provider differences are represented in types rather than erased.
+
+## 3. Tools, selective security, and recovery
+
+Implement registry validation, sequential scheduling, policy, approvals, and
+opaque authorized operations. Add trusted `read`, `write`, and `edit` with
+secure descriptor-relative access and safe replacement semantics. Persist intent
+before side effects, results before inference, and recover uncertainty explicitly.
+
+Add `bash` only behind the configured Bubblewrap backend with tested mounts,
+network denial, environment filtering, deadlines, bounded output, and descendant
+cleanup. Missing enforcement must fail closed. Run T01–T02, S01–S02, and R01;
+actual Linux security tests are a gate, not an optional successful skip.
+
+## 4. Native providers and rolling compaction
+
+Integrate OpenAI Responses first against current official documentation, with
+native-event fixtures and opt-in live checks. Then add native Anthropic Messages
+without provider-specific branches in orchestration. Prove portable diagnostics,
+opaque-state retention, and safe switching within existing sessions.
+
+Implement automatic/manual rolling summaries behind the strategy interface,
+previews, source manifests, retained recent turns, and inspection diffs. Prove
+C02 and budget failures without rewriting history. Ordinary CI stays offline;
+live inference/summarization checks are separate and explicit.
+
+## 5. Ratatui client
+
+Implement rendering, navigation, streaming, cancellation, approvals, and a
+context inspector over the same headless engine API. Restore terminal state on
+errors/shutdown; handle subscriber lag through coherent snapshots. The TUI must
+not implement provider request building, tool authorization, or execution.
+
+## 6. Context experiments
+
+Expand pin/exclusion controls and evaluate summary strategies on fixed coding
+tasks. Measure requirement retention, modified-file recall, and completion after
+compaction with recorded configuration/input provenance. Do not confuse better
+summaries with lossless memory or workspace rollback.
+
+## Outside v0.1
+
+Subagents, MCP client, plugin runtime, semantic memory, remote workspaces,
+multi-agent orchestration, separate server/JSON-RPC, and filesystem checkpoints.
+Restricted subprocess networking also needs an actual constrained-egress backend
+before the proposed deny-network-only implementation can grant exceptions.
+Pick a license before publishing packages or claiming reuse terms.

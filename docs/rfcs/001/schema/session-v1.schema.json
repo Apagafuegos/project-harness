@@ -1,0 +1,1327 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:project-harness:session-record:v1",
+  "title": "RFC-001 v1 JSONL envelope (proposed)",
+  "$comment": "Structural validation only. RFC-001 additionally requires exact-byte checksums, duplicate-key rejection, role validation, ancestry, head, state, and authorization checks.",
+  "type": "object",
+  "properties": {
+    "record": {
+      "$ref": "#/$defs/record"
+    },
+    "sha256": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "required": [
+    "record",
+    "sha256"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "sha256",
+        "bytes"
+      ],
+      "additionalProperties": false
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "provider_instance": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "provider_instance",
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "call_ref": {
+      "type": "object",
+      "properties": {
+        "response_entry_id": {
+          "$ref": "#/$defs/id"
+        },
+        "call_id": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "response_entry_id",
+        "call_id"
+      ],
+      "additionalProperties": false
+    },
+    "continuation": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "$ref": "#/$defs/model"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "input_fingerprint": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "owner",
+        "schema",
+        "artifact",
+        "input_fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "text": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "image"
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "mime_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "artifact",
+        "mime_type"
+      ],
+      "additionalProperties": false
+    },
+    "audio": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "audio"
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "mime_type": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "artifact",
+        "mime_type"
+      ],
+      "additionalProperties": false
+    },
+    "file": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "file"
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "mime_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "artifact",
+        "mime_type",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "reasoning_summary": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "reasoning_summary"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "tool_call": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "tool_call"
+        },
+        "call_id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "provider_call_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "call_id",
+        "name",
+        "arguments",
+        "provider_call_id"
+      ],
+      "additionalProperties": false
+    },
+    "provider_state": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "provider_state"
+        },
+        "owner": {
+          "$ref": "#/$defs/model"
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "kind",
+        "owner",
+        "schema",
+        "artifact"
+      ],
+      "additionalProperties": false
+    },
+    "block": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/text"
+        },
+        {
+          "$ref": "#/$defs/image"
+        },
+        {
+          "$ref": "#/$defs/audio"
+        },
+        {
+          "$ref": "#/$defs/file"
+        },
+        {
+          "$ref": "#/$defs/reasoning_summary"
+        },
+        {
+          "$ref": "#/$defs/tool_call"
+        },
+        {
+          "$ref": "#/$defs/provider_state"
+        }
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cached_input_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasoning_tokens": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "reasoning_tokens"
+      ],
+      "additionalProperties": false
+    },
+    "model_error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_request",
+            "unsupported_capability",
+            "authentication",
+            "rate_limit",
+            "transport",
+            "provider_failure",
+            "malformed_stream",
+            "limit_exceeded",
+            "context_overflow"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retry_after_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "provider_code",
+        "retry_after_ms"
+      ],
+      "additionalProperties": false
+    },
+    "tool_metadata": {
+      "type": "object",
+      "properties": {
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_truncated": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "enum": [
+            "executor",
+            "runtime",
+            "user_observed",
+            "user_acknowledged_unknown"
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        }
+      },
+      "required": [
+        "exit_code",
+        "duration_ms",
+        "output_truncated",
+        "provenance",
+        "artifacts"
+      ],
+      "additionalProperties": false
+    },
+    "tool_result_value": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "$ref": "#/$defs/call_ref"
+        },
+        "invocation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "invalid_arguments",
+            "denied",
+            "timed_out",
+            "cancelled",
+            "infrastructure_failure",
+            "uncertain"
+          ]
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/tool_metadata"
+        }
+      },
+      "required": [
+        "call",
+        "invocation_id",
+        "status",
+        "content",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    "user_message": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "user_message"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "assistant_response": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "assistant_response"
+        },
+        "response_id": {
+          "$ref": "#/$defs/id"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "finish_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "stop",
+                "tool_calls",
+                "output_limit",
+                "refusal"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/block"
+          }
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/continuation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/model_error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "response_id",
+        "model",
+        "outcome",
+        "finish_reason",
+        "content",
+        "usage",
+        "continuation",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "tool_result": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "tool_result"
+        },
+        "result": {
+          "$ref": "#/$defs/tool_result_value"
+        }
+      },
+      "required": [
+        "kind",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "model_changed": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "model_changed"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "portability": {
+          "enum": [
+            "reject",
+            "omit_optional",
+            "convert_supported"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "model",
+        "portability"
+      ],
+      "additionalProperties": false
+    },
+    "compaction": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "compaction"
+        },
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "covered_entry_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "source_manifest": {
+          "$ref": "#/$defs/artifact"
+        },
+        "supersedes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "uniqueItems": true
+        },
+        "summary": {
+          "type": "string"
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "configuration_fingerprint": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "required": [
+        "kind",
+        "strategy",
+        "strategy_version",
+        "covered_entry_ids",
+        "source_fingerprint",
+        "source_manifest",
+        "supersedes",
+        "summary",
+        "model",
+        "configuration_fingerprint"
+      ],
+      "additionalProperties": false
+    },
+    "entry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/user_message"
+            },
+            {
+              "$ref": "#/$defs/assistant_response"
+            },
+            {
+              "$ref": "#/$defs/tool_result"
+            },
+            {
+              "$ref": "#/$defs/model_changed"
+            },
+            {
+              "$ref": "#/$defs/compaction"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "parent_id",
+        "turn_id",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "head_change": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "enum": [
+            "advance",
+            "navigate",
+            "retain"
+          ]
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "state": {
+      "enum": [
+        "idle",
+        "preparing",
+        "inferring",
+        "processing",
+        "authorizing",
+        "executing",
+        "continuing",
+        "cancelling",
+        "recovering"
+      ]
+    },
+    "turn_started": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "turn_started"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "user_entry_id": {
+          "$ref": "#/$defs/id"
+        },
+        "configuration": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "user_entry_id",
+        "configuration"
+      ],
+      "additionalProperties": false
+    },
+    "state_changed": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "state_changed"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "from": {
+          "$ref": "#/$defs/state"
+        },
+        "to": {
+          "$ref": "#/$defs/state"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "from",
+        "to"
+      ],
+      "additionalProperties": false
+    },
+    "approval_requested": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "approval_requested"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "approval_id": {
+          "$ref": "#/$defs/id"
+        },
+        "call": {
+          "$ref": "#/$defs/call_ref"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "plan": {
+          "$ref": "#/$defs/artifact"
+        },
+        "policy_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "approval_id",
+        "call",
+        "plan_digest",
+        "plan",
+        "policy_revision",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "authorization_decided": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "authorization_decided"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "decision_id": {
+          "$ref": "#/$defs/id"
+        },
+        "call": {
+          "$ref": "#/$defs/call_ref"
+        },
+        "approval_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "plan": {
+          "$ref": "#/$defs/artifact"
+        },
+        "policy_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "allow",
+            "deny"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "decision_id",
+        "call",
+        "approval_id",
+        "plan_digest",
+        "plan",
+        "policy_revision",
+        "decision",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "execution_intent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "execution_intent"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "call": {
+          "$ref": "#/$defs/call_ref"
+        },
+        "decision_id": {
+          "$ref": "#/$defs/id"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "backend": {
+          "enum": [
+            "trusted_fs",
+            "bubblewrap"
+          ]
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "invocation_id",
+        "call",
+        "decision_id",
+        "plan_digest",
+        "backend",
+        "timeout_ms"
+      ],
+      "additionalProperties": false
+    },
+    "execution_uncertain": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "execution_uncertain"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "invocation_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "recovery_resolved": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "recovery_resolved"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "invocation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "result_entry_id": {
+          "$ref": "#/$defs/id"
+        },
+        "resolution": {
+          "enum": [
+            "observed",
+            "acknowledged_unknown"
+          ]
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "invocation_id",
+        "result_entry_id",
+        "resolution",
+        "note"
+      ],
+      "additionalProperties": false
+    },
+    "turn_finished": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "turn_finished"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/id"
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted"
+          ]
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "turn_id",
+        "outcome",
+        "code"
+      ],
+      "additionalProperties": false
+    },
+    "configuration_changed": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "configuration_changed"
+        },
+        "configuration": {
+          "$ref": "#/$defs/artifact"
+        },
+        "policy_revision": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "configuration",
+        "policy_revision"
+      ],
+      "additionalProperties": false
+    },
+    "tail_repaired": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "tail_repaired"
+        },
+        "original_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "valid_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "quarantine_artifact": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "kind",
+        "original_size",
+        "valid_bytes",
+        "quarantine_artifact"
+      ],
+      "additionalProperties": false
+    },
+    "journal_event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/turn_started"
+        },
+        {
+          "$ref": "#/$defs/state_changed"
+        },
+        {
+          "$ref": "#/$defs/approval_requested"
+        },
+        {
+          "$ref": "#/$defs/authorization_decided"
+        },
+        {
+          "$ref": "#/$defs/execution_intent"
+        },
+        {
+          "$ref": "#/$defs/execution_uncertain"
+        },
+        {
+          "$ref": "#/$defs/recovery_resolved"
+        },
+        {
+          "$ref": "#/$defs/turn_finished"
+        },
+        {
+          "$ref": "#/$defs/configuration_changed"
+        },
+        {
+          "$ref": "#/$defs/tail_repaired"
+        }
+      ]
+    },
+    "session_created": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "session_created"
+        },
+        "workspace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "initial_model": {
+          "$ref": "#/$defs/model"
+        },
+        "policy_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configuration": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "kind",
+        "workspace",
+        "initial_model",
+        "policy_revision",
+        "configuration"
+      ],
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "commit"
+        },
+        "command_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "command_fingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "$ref": "#/$defs/head_change"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/entry"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/journal_event"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "command_id",
+        "command_fingerprint",
+        "head",
+        "entries",
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "record_id": {
+          "$ref": "#/$defs/id"
+        },
+        "session_id": {
+          "$ref": "#/$defs/id"
+        },
+        "at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "previous_checksum": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/session_created"
+            },
+            {
+              "$ref": "#/$defs/commit"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "seq",
+        "record_id",
+        "session_id",
+        "at",
+        "previous_checksum",
+        "payload"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
