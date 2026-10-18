@@ -9,7 +9,7 @@ Two-crate Rust workspace, pinned toolchain, dependency lockfile, CLI help/versio
 shared local/CI checks, six provisionally agreed contracts, and the Rust-only
 architecture decisions. RFC-001 proposes concrete types, JSONL transactions,
 state transitions, recovery, and conformance cases, with schema/example journals.
-No agent runtime, sandbox, or TUI is implemented.
+The foundation itself implements no agent runtime, sandbox, or TUI.
 
 ## 1. Review RFC-001 and implement common types/storage — implemented
 
@@ -35,12 +35,13 @@ and events, the one-turn-per-session state machine, provider-event validation,
 cancellation, command deduplication and the view/`seq` resync protocol. It is
 tested against real storage with scenarios, replay and 512 randomized seeds
 ([runtime](runtime.md), [decision 0004](decisions/0004-pure-runtime-core.md)).
-Remaining: the storage worker and Tokio driver (step 3), the provider stream
-trait and scripted mock (step 4), the context builder and report (step 5) and
+Step 3 is implemented: a dedicated worker owns blocking storage, a Tokio driver
+owns the pure core, and `SessionHandle` exposes commands, media, shutdown,
+reopen and subscriptions. Epochs and view resets cover lag and runtime replacement.
+Remaining: the provider stream trait and scripted mock (step 4), the context builder and report (step 5) and
 startup recovery (step 6).
 
-Add Tokio, typed commands/events, the provider stream lifecycle, one-turn-per-
-session state machine, cancellation, and a deterministic scripted provider.
+Add the public provider stream lifecycle and a deterministic scripted provider.
 Implement initial branch projection and the inspection API before Ratatui.
 Prove context/report reproducibility, ordered events, usage, partial-response
 handling, bounded buffering, and no execution from incomplete calls.

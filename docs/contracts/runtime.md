@@ -3,7 +3,7 @@
 Status: Asynchronous state machine, one active turn per session, events, and
 headless operation are provisionally agreed. Concrete API and transitions are
 proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md). The pure
-core of turn handling is implemented; see [runtime](../runtime.md) and
+core and async driver of turn handling are implemented; see [runtime](../runtime.md) and
 [decision 0004](../decisions/0004-pure-runtime-core.md).
 
 ## Inputs and observations
@@ -46,5 +46,6 @@ persistence failures and unresolved execution cannot masquerade as ordinary succ
 RFC cases R01–R02 and E01 cover recovery ordering, turn exclusion, cancellation,
 event lag, and coherent client snapshots. The core's tests cover turn exclusion,
 cancellation during inference and in-flight commits, and coherent views with
-explicit gaps. Approval cancellation, subscriber lag in a real broadcast, and
-recovery (R01, the rest of R02 and E01) need the driver and later steps.
+explicit gaps. The driver also tests subscriber lag in a real broadcast, runtime replacement,
+worker faults and shutdown. Approval cancellation and recovery orchestration
+(R01, the rest of R02 and E01) remain for later steps.

@@ -10,7 +10,7 @@ pub(crate) mod codec;
 mod error;
 mod identity;
 pub(crate) mod io;
-mod state;
+pub(crate) mod state;
 pub(crate) mod store;
 mod types;
 mod validation;

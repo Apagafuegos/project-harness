@@ -304,6 +304,17 @@ fn random_step(
     issued: &mut Vec<(CommandId, String)>,
     scripts: &mut Scripts,
 ) {
+    if d.verification.is_some() && rng.chance(50) {
+        let (token, refs) = d.verification.take().unwrap();
+        let missing = if rng.chance(50) {
+            refs
+        } else {
+            d.root.put_artifact(b"missing").unwrap();
+            Vec::new()
+        };
+        d.step(Input::ArtifactsVerified { token, missing });
+        return;
+    }
     // Cancellation racing a commit in flight is the subtle case; favor it.
     if d.pending.is_some()
         && rng.chance(4)

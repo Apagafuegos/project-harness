@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::session::{CallId, ModelRef, ResponseId, RuntimeState, SessionSnapshot, TurnId, Usage};
 
-use super::types::{EventKind, InferenceId, RuntimeEvent};
+use super::types::{EventKind, InferenceId, RuntimeEpoch, RuntimeEvent};
 
 /// Operational phase as a client sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +62,8 @@ pub struct PartialResponse {
 /// exactly the events with `seq <= event_seq`.
 #[derive(Clone, Debug)]
 pub struct RuntimeView {
+    /// Runtime incarnation.
+    pub epoch: RuntimeEpoch,
     /// Last event reflected; 0 before the first event.
     pub event_seq: u64,
     /// Last published snapshot.
@@ -78,7 +80,8 @@ pub struct RuntimeView {
 /// covers the whole hash chain.
 impl PartialEq for RuntimeView {
     fn eq(&self, other: &Self) -> bool {
-        self.event_seq == other.event_seq
+        self.epoch == other.epoch
+            && self.event_seq == other.event_seq
             && self.snapshot.session_id() == other.snapshot.session_id()
             && self.snapshot.sequence() == other.snapshot.sequence()
             && self.snapshot.checksum() == other.snapshot.checksum()
@@ -119,6 +122,9 @@ impl ClientView {
     /// Apply the next event. Older events are ignored; a gap requires resync.
     pub fn apply(&mut self, event: &RuntimeEvent) -> ApplyOutcome {
         let view = &mut self.0;
+        if event.epoch != view.epoch {
+            return ApplyOutcome::NeedsResync;
+        }
         if event.seq <= view.event_seq {
             return ApplyOutcome::Duplicate;
         }

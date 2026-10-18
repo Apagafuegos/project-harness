@@ -31,9 +31,12 @@ are implemented. Persisting their types/events does not execute those systems.
   change as well as a scheduler change.
 - The first concrete API is blocking `JournalStore`, not the RFC's illustrative
   boxed-future trait. Its transaction is not cancellable halfway through sync.
-  A future Tokio actor must own it on a blocking worker and await durability
-  before acknowledging commands or dispatching effects. No Tokio dependency is
-  added until asynchronous runtime code exists.
+  A named, dedicated `std::thread` now owns it for its whole lifetime, including
+  open/create and drop. It receives bounded Tokio mpsc requests with
+  `blocking_recv` and replies by oneshot only after sync. The Tokio driver never
+  calls `JournalStore` or uses `spawn_blocking`. Poisoned writers answer later
+  appends with `Poisoned`; only reopen clears a fault. Dropping all request
+  senders drains queued work and releases the lock before the exit signal.
 - Public wire structs are construction inputs. The store checks the bundled
   v1 JSON Schema on every serialized transaction and loaded line, including
   required nullable fields, safe-integer bounds and unknown fields. A separate

@@ -35,7 +35,7 @@ pub struct Inspection {
 
 /// Durable, blocking session storage with one exclusive journal-descriptor lock.
 ///
-/// A future async engine should own this store on a blocking worker. Mutations
+/// The async driver owns this store on a dedicated storage thread. Mutations
 /// stage a separate state, validate the bundled schema and semantics, then append,
 /// flush, and sync before publishing. No executor exists in this component.
 #[derive(Debug)]

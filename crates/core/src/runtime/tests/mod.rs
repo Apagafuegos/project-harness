@@ -63,6 +63,7 @@ struct Driver {
     segment: Segment,
     done: Vec<Segment>,
     pending: Option<Pending>,
+    verification: Option<(CommitToken, Vec<ArtifactRef>)>,
     /// Failure to inject into the next completed persist.
     fail: Option<Point>,
     /// A commit whose persist failed with I/O; it may still be durable.
@@ -99,16 +100,18 @@ impl Driver {
         let at: Timestamp = DeterministicEnv::BASE.parse().unwrap();
         let store = JournalStore::create(root.clone(), SessionId::new(), header, at).unwrap();
         let snapshot = store.snapshot();
+        let mut env = DeterministicEnv::new(FIRST_STREAM);
         Self {
             session: snapshot.session_id().clone(),
-            runtime: Runtime::new(snapshot.clone(), config.clone()),
-            env: DeterministicEnv::new(FIRST_STREAM),
+            runtime: Runtime::new(snapshot.clone(), config.clone(), &mut env),
+            env,
             segment: Segment::new(FIRST_STREAM, config, snapshot),
             done: Vec::new(),
             _temp: temp,
             root,
             store: Some(store),
             pending: None,
+            verification: None,
             fail: None,
             failed: None,
             requests: BTreeSet::new(),
@@ -138,6 +141,10 @@ impl Driver {
 
     fn observe(&mut self, effect: &Effect) {
         match effect {
+            Effect::VerifyArtifacts { token, refs } => {
+                assert!(self.pending.is_none() && self.verification.is_none());
+                self.verification = Some((*token, refs.clone()));
+            }
             Effect::Persist {
                 token,
                 commit,
@@ -232,6 +239,14 @@ impl Driver {
 
     /// Execute the pending commit like the storage worker, and answer it.
     fn complete(&mut self) -> bool {
+        if let Some((token, refs)) = self.verification.take() {
+            let missing = refs
+                .into_iter()
+                .filter(|reference| self.root.verify_artifact(reference).is_err())
+                .collect();
+            self.step(Input::ArtifactsVerified { token, missing });
+            return true;
+        }
         let Some(pending) = self.pending.take() else {
             return false;
         };
@@ -308,8 +323,8 @@ impl Driver {
         let snapshot = store.snapshot();
         self.store = Some(store);
         let config = self.segment.config.clone();
-        self.runtime = Runtime::new(snapshot.clone(), config.clone());
         self.env = DeterministicEnv::new(stream);
+        self.runtime = Runtime::new(snapshot.clone(), config.clone(), &mut self.env);
         let segment = std::mem::replace(&mut self.segment, Segment::new(stream, config, snapshot));
         self.done.push(segment);
         self.last_seq = 0;
@@ -372,7 +387,14 @@ impl Driver {
 
 impl Segment {
     fn new(stream: u16, config: RuntimeConfig, initial: SessionSnapshot) -> Self {
-        let views = vec![Runtime::new(initial.clone(), config.clone()).view()];
+        let views = vec![
+            Runtime::new(
+                initial.clone(),
+                config.clone(),
+                &mut DeterministicEnv::new(stream),
+            )
+            .view(),
+        ];
         Self {
             stream,
             config,
@@ -419,7 +441,14 @@ fn check_turns(finished: &Finished) {
             JournalEvent::TurnStarted(start) => {
                 assert!(outcomes.insert(start.turn_id.clone(), 0).is_none());
             }
-            JournalEvent::TurnFinished(end) => *outcomes.get_mut(&end.turn_id).unwrap() += 1,
+            JournalEvent::TurnFinished(end) => {
+                assert_ne!(
+                    end.outcome,
+                    TurnOutcome::Interrupted,
+                    "only recovery interrupts a turn"
+                );
+                *outcomes.get_mut(&end.turn_id).unwrap() += 1;
+            }
             _ => {}
         }
     }
@@ -468,8 +497,8 @@ fn check_resync(finished: &Finished) {
 /// the effects must be byte-identical.
 fn check_replay(finished: &Finished) {
     for segment in &finished.segments {
-        let mut runtime = Runtime::new(segment.initial.clone(), segment.config.clone());
         let mut env = DeterministicEnv::new(segment.stream);
+        let mut runtime = Runtime::new(segment.initial.clone(), segment.config.clone(), &mut env);
         let replayed: Vec<_> = segment
             .inputs
             .iter()
@@ -490,6 +519,7 @@ fn normalized(finished: &Finished) -> Vec<String> {
         .map(|effect| match effect {
             Effect::Emit(RuntimeEvent {
                 seq,
+                epoch: _,
                 kind: EventKind::Committed { ack: a, .. },
             }) => format!("Emit({seq}, Committed({}))", ack(a)),
             Effect::Reply {
@@ -620,4 +650,137 @@ fn client_view_reports_a_skipped_seq_and_ignores_old_events() {
     driver.fire(*driver.timers.iter().next().unwrap());
     driver.settle();
     driver.finish();
+}
+
+#[test]
+fn replacement_epoch_requires_resync_before_comparing_sequence() {
+    let mut driver = Driver::new();
+    driver.start("hello");
+    driver.settle();
+    driver.provider(ProviderEvent::Started);
+    for _ in 0..100 {
+        driver.provider(ProviderEvent::TextDelta {
+            block_index: 0,
+            text: "x".into(),
+        });
+    }
+    let mut client = ClientView::from(driver.runtime.view());
+    assert!(client.view().event_seq > 100);
+    driver.ended();
+    driver.fail_pending(PersistError::Io {
+        message: "failed".into(),
+    });
+    driver.reopen();
+    assert_ne!(client.view().epoch, driver.runtime.view().epoch);
+    let events = driver.step(Input::PublishView);
+    let Effect::Emit(event) = &events[0] else {
+        panic!("phase event missing")
+    };
+    assert_eq!(event.seq, 1);
+    let previous = client.clone();
+    assert_eq!(client.apply(event), ApplyOutcome::NeedsResync);
+    assert_eq!(client, previous);
+    driver.finish();
+}
+
+#[test]
+fn media_verification_attaches_retries_and_rejects_missing_without_writes() {
+    let mut driver = Driver::new();
+    let before = driver.runtime.snapshot().sequence();
+    let content = vec![ContentBlock::Image {
+        artifact: ArtifactRef {
+            sha256: Digest::of(b"unknown"),
+            bytes: 7,
+        },
+        mime_type: "image/png".into(),
+    }];
+    let command = Command::StartTurn {
+        command_id: command_id(1),
+        content,
+    };
+    let first = driver.command(command.clone());
+    let retry = driver.command(command);
+    let busy = driver.command(Command::StartTurn {
+        command_id: command_id(2),
+        content: text("other"),
+    });
+    assert_eq!(driver.rejected(busy), Rejection::Busy);
+    assert!(driver.pending.is_none());
+    driver.settle();
+    assert_eq!(
+        driver.rejected(first),
+        Rejection::Invalid("artifact_missing")
+    );
+    assert_eq!(
+        driver.rejected(retry),
+        Rejection::Invalid("artifact_missing")
+    );
+    assert_eq!(driver.runtime.snapshot().sequence(), before);
+    let artifact = driver.root.put_artifact(b"image").unwrap();
+    let started = driver.command(Command::StartTurn {
+        command_id: command_id(3),
+        content: vec![ContentBlock::Image {
+            artifact,
+            mime_type: "image/png".into(),
+        }],
+    });
+    driver.settle();
+    driver.accepted(started);
+    driver.ended();
+    driver.settle();
+    let finished = driver.finish();
+    check_replay(&finished);
+    check_resync(&finished);
+}
+
+#[test]
+fn media_metadata_is_checked_before_preflight_and_verification_failure_faults_waiters() {
+    let mut driver = Driver::new();
+    let reference = driver.root.put_artifact(b"image").unwrap();
+    for block in [
+        ContentBlock::Image {
+            artifact: reference.clone(),
+            mime_type: String::new(),
+        },
+        ContentBlock::Audio {
+            artifact: reference.clone(),
+            mime_type: String::new(),
+        },
+        ContentBlock::File {
+            artifact: reference.clone(),
+            mime_type: "text/plain".into(),
+            name: String::new(),
+        },
+    ] {
+        let command_id = driver.new_command_id();
+        let request = driver.command(Command::StartTurn {
+            command_id,
+            content: vec![block],
+        });
+        assert_eq!(
+            driver.rejected(request),
+            Rejection::Invalid("invalid_media")
+        );
+        assert!(driver.verification.is_none() && driver.pending.is_none());
+    }
+    let command_id = driver.new_command_id();
+    let command = Command::StartTurn {
+        command_id,
+        content: vec![ContentBlock::Image {
+            artifact: reference,
+            mime_type: "image/png".into(),
+        }],
+    };
+    let first = driver.command(command.clone());
+    let retry = driver.command(command);
+    let (token, _) = driver.verification.take().unwrap();
+    driver.step(Input::PersistFailed {
+        token,
+        error: PersistError::WorkerLost,
+    });
+    assert_eq!(driver.rejected(first), Rejection::Faulted);
+    assert_eq!(driver.rejected(retry), Rejection::Faulted);
+    assert_eq!(driver.runtime.snapshot().sequence(), 0);
+    let finished = driver.finish();
+    check_replay(&finished);
 }

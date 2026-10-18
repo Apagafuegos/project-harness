@@ -27,8 +27,8 @@
 //!     configuration,
 //! };
 //! let mut store = JournalStore::create(root, SessionId::new(), header, Timestamp::now())?;
-//! let mut runtime = Runtime::new(store.snapshot(), RuntimeConfig::default());
 //! let mut env = SystemEnv;
+//! let mut runtime = Runtime::new(store.snapshot(), RuntimeConfig::default(), &mut env);
 //!
 //! let content = vec![ContentBlock::Text { text: "hello".into() }];
 //! let command = Command::StartTurn { command_id: CommandId::new(), content };
@@ -59,14 +59,18 @@
 //! ```
 
 mod core;
+mod driver;
 mod env;
 mod types;
 mod view;
+mod worker;
 
 pub use self::core::Runtime;
+pub use driver::{DriverConfig, SessionHandle, Subscription, SubscriptionItem};
 pub use env::{DeterministicEnv, Env, SystemEnv};
 pub use types::*;
 pub use view::{ApplyOutcome, ClientView, PartialBlock, PartialResponse, Phase, RuntimeView};
+pub use worker::StorageWorker;
 
 #[cfg(test)]
 mod tests;

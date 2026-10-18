@@ -1,6 +1,6 @@
 # 0004: Pure runtime core with a driver
 
-Status: Accepted for Milestone 2, step 2.
+Status: Accepted for Milestone 2, steps 2 and 3.
 
 Date: 2026-10-18
 
@@ -19,9 +19,11 @@ at runtime rather than in tests.
 state machine with the signature
 `step(&mut self, Input, &mut impl Env) -> Vec<Effect>`. It performs no I/O and
 reads no clock. It creates identities only through `Env`, and depends on neither
-Tokio nor any client. A driver (step 3) performs the effects and turns their
-answers into inputs. The core reads storage's facts from the published
-snapshot: pending calls, the model at a head, receipts, used identities and the
+Tokio nor any client. One Tokio driver task is the only production caller of
+`step`; it performs effects and turns their answers into inputs. It runs on the
+caller’s runtime; the library creates no Tokio runtime. A named storage worker
+thread owns the blocking writer, including opening and dropping it. The core
+reads storage's facts from the published snapshot: pending calls, the model at a head, receipts, used identities and the
 recovery requirement. It never re-derives them. Tests run every commit through
 real storage with its oracle on, so drift fails in tests.
 
@@ -41,13 +43,34 @@ it, and checks receipts before busy and recovery. A retry therefore learns the
 durable outcome, including after a lost ack or a restart. A retry while the
 opening commit is in flight attaches to that commit.
 
-**Resync by view and sequence.** A snapshot cannot resync a client because it
-omits the in-flight response. `RuntimeView` pairs the published snapshot with
+**Resync by epoch, view and sequence.** A snapshot cannot resync a client
+because it omits the in-flight response. `RuntimeView` pairs the published snapshot with
 phase, active turn and the bounded partial response at an event sequence. Every
-event carries `seq`, contiguous per runtime. The runtime builds its own view by
-applying each emitted event with the client reducer, `ClientView`, so the view
-reflects exactly the events up to `event_seq`. The step-3 driver must subscribe,
-take the view, and then drop buffered events at or before `view.event_seq`.
+event carries `seq`, contiguous per runtime, and an `epoch` from
+`Env::runtime_epoch()` in `Runtime::new`. Each runtime incarnation has a fresh
+UUIDv7 epoch, even over the same journal. The reducer checks epoch before seq,
+so replacement events cannot be mistaken for old duplicates. The runtime builds
+its own view by applying each emitted event with the client reducer, `ClientView`, so the view
+reflects exactly the events up to `event_seq`. The driver subscribes before
+requesting a view, then discards buffered events already reflected in that view.
+Lag, a sequence gap or an epoch change restarts this protocol. The first item
+and each resync is `Reset(ClientView)`, including the partial response.
+`Input::PublishView` emits the core's current phase after a replacement, even
+when recovery is required; subscribers need not wait for another command.
+
+**Media preflight shares the exclusive slot.** Before C1 the core emits
+`VerifyArtifacts`, waits for `ArtifactsVerified`, and attaches identical retries.
+Other turns remain busy. Missing/invalid media rejects with `artifact_missing`
+without writing. Storage still rechecks artifacts on append. A failure there
+faults the runtime; no uncertain write is retried.
+
+**Shutdown and faults.** Shutdown requests core cancellation, waits for in-flight
+durability and artifact work, drops worker senders, then awaits exit before
+replying. A worker panic or lost reply becomes `WorkerLost`. Infrastructure
+failures outside an append enter the core through `Input::StorageFailed` and
+fault there too. Reopen is allowed only in `Faulted`, drains the old worker and
+opens the same journal on a new worker. It never repairs a torn tail implicitly.
+An unfinished reopened snapshot stays `RecoveryRequired` until step 6.
 
 ## Consequences
 
@@ -55,15 +78,16 @@ take the view, and then drop buffered events at or before `view.event_seq`.
   replaying recorded inputs into a fresh runtime and environment reproduces the
   effects byte for byte.
 - A refusal completes its turn; an output limit fails it with `output_limit`.
-  Only recovery records interrupted turns. Tool calls are answered `denied` with the text
-  `tools_unavailable` until tools exist, because storage results carry no code.
+  Only recovery records interrupted turns. Tool calls are answered `denied`
+  with the text `tools_unavailable` until tools exist, because storage results carry no code.
 - One commit in flight serializes a turn's durability latency. Every commit
   waits for its sync before the next decision, as RFC-001 5.3 requires.
-- The core cannot verify artifacts, so `StartTurn` accepts text only for now.
+- The core delegates media verification to the worker before building C1.
 - `SelectHead` and `SwitchModel` carry no command ID and are not deduplicated.
 - Adding storage-side rules needs no core change unless the core must produce
   new shapes. If it does, the brief's constraint applies: report rather than
-  change `state.rs`.
+  change `state.rs` without explicitly reviewing its validation contract (as
+  the separately committed refusal rule did).
 
 ## Alternatives considered
 

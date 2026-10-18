@@ -39,6 +39,7 @@ pub struct Runtime {
     next_inference: u64,
     next_timer: u64,
     in_flight: Option<InFlight>,
+    verifying: Option<Verification>,
     inference: Option<Inference>,
     /// Inferences started by the active turn; storage does not count them.
     inferences: u32,
@@ -75,6 +76,16 @@ enum Waiter {
     TurnStarted(TurnId),
     HeadSelected,
     ModelSwitched,
+}
+
+/// A media opening command reserves the same exclusive slot as a commit.
+#[derive(Debug)]
+struct Verification {
+    token: CommitToken,
+    command_id: CommandId,
+    fingerprint: Digest,
+    content: Vec<ContentBlock>,
+    waiters: Vec<RequestId>,
 }
 
 /// A requested cancellation, answered once it is durable.
@@ -151,13 +162,14 @@ struct Recorded {
 impl Runtime {
     /// Wrap a published snapshot. Emits nothing; the first input produces the
     /// first effects. A snapshot with unfinished work starts `RecoveryRequired`.
-    pub fn new(snapshot: SessionSnapshot, config: RuntimeConfig) -> Self {
+    pub fn new(snapshot: SessionSnapshot, config: RuntimeConfig, env: &mut impl Env) -> Self {
         let mode = if snapshot.requires_recovery() || snapshot.state() != RuntimeState::Idle {
             Mode::RecoveryRequired
         } else {
             Mode::Ready
         };
         let view = RuntimeView {
+            epoch: env.runtime_epoch(),
             event_seq: 0,
             phase: phase(mode, &snapshot),
             active_turn: snapshot.active_turn().cloned(),
@@ -173,6 +185,7 @@ impl Runtime {
             next_inference: 0,
             next_timer: 0,
             in_flight: None,
+            verifying: None,
             inference: None,
             inferences: 0,
             cancel: None,
@@ -204,6 +217,17 @@ impl Runtime {
     pub fn step(&mut self, input: Input, env: &mut impl Env) -> Vec<Effect> {
         let env: &mut dyn Env = env;
         match input {
+            Input::PublishView => self.emit(EventKind::PhaseChanged {
+                phase: self.phase(),
+                active_turn: self.snapshot().active_turn().cloned(),
+            }),
+            Input::ArtifactsVerified { token, missing } => {
+                self.artifacts_verified(token, missing.is_empty(), env)
+            }
+            Input::StorageFailed { error } if self.mode != Mode::Faulted => {
+                self.fault(FaultCause::Persist(error))
+            }
+            Input::StorageFailed { .. } => {}
             Input::Command { request, command } => self.command(request, command, env),
             Input::Persisted {
                 token,
@@ -214,6 +238,9 @@ impl Runtime {
                 if self.mode != Mode::Faulted {
                     let cause = match &self.in_flight {
                         Some(in_flight) if in_flight.token == token => FaultCause::Persist(error),
+                        _ if self.verifying.as_ref().is_some_and(|v| v.token == token) => {
+                            FaultCause::Persist(error)
+                        }
                         _ => FaultCause::UnexpectedAnswer(token),
                     };
                     self.fault(cause);
@@ -248,7 +275,11 @@ impl Runtime {
         match self.mode {
             Mode::Faulted => Err(Rejection::Faulted),
             Mode::RecoveryRequired => Err(Rejection::RecoveryRequired),
-            Mode::Ready if self.in_flight.is_some() || self.snapshot().active_turn().is_some() => {
+            Mode::Ready
+                if self.in_flight.is_some()
+                    || self.verifying.is_some()
+                    || self.snapshot().active_turn().is_some() =>
+            {
                 Err(Rejection::Busy)
             }
             Mode::Ready => Ok(()),
@@ -297,19 +328,42 @@ impl Runtime {
                 .push((request, Waiter::TurnStarted(turn_id)));
             return None;
         }
+        if let Some(verifying) = &mut self.verifying
+            && verifying.command_id == command_id
+        {
+            if verifying.fingerprint != fingerprint {
+                return Some(Err(Rejection::StaleCommand));
+            }
+            verifying.waiters.push(request);
+            return None;
+        }
         if let Err(rejection) = self.idle_check() {
             return Some(Err(rejection));
         }
         if content.is_empty() {
             return Some(Err(Rejection::Invalid("empty_content")));
         }
-        // Media blocks reference artifacts the pure core cannot verify, and a
-        // missing one would make storage refuse the commit.
-        if !content
-            .iter()
-            .all(|block| matches!(block, ContentBlock::Text { .. }))
-        {
+        if !content.iter().all(|block| {
+            matches!(
+                block,
+                ContentBlock::Text { .. }
+                    | ContentBlock::Image { .. }
+                    | ContentBlock::Audio { .. }
+                    | ContentBlock::File { .. }
+            )
+        }) {
             return Some(Err(Rejection::Invalid("unsupported_content")));
+        }
+        if content.iter().any(|block| match block {
+            ContentBlock::Image { mime_type, .. } | ContentBlock::Audio { mime_type, .. } => {
+                mime_type.is_empty()
+            }
+            ContentBlock::File {
+                mime_type, name, ..
+            } => mime_type.is_empty() || name.is_empty(),
+            _ => false,
+        }) {
+            return Some(Err(Rejection::Invalid("invalid_media")));
         }
         if normalized.len() > self.config.max_user_bytes {
             return Some(Err(Rejection::Invalid("content_too_large")));
@@ -321,6 +375,65 @@ impl Runtime {
         if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
             return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
         }
+        let refs: Vec<_> = content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Image { artifact, .. }
+                | ContentBlock::Audio { artifact, .. }
+                | ContentBlock::File { artifact, .. } => Some(artifact.clone()),
+                _ => None,
+            })
+            .collect();
+        if !refs.is_empty() {
+            self.next_token += 1;
+            let token = CommitToken(self.next_token);
+            self.verifying = Some(Verification {
+                token,
+                command_id,
+                fingerprint,
+                content,
+                waiters: vec![request],
+            });
+            self.out.push(Effect::VerifyArtifacts { token, refs });
+        } else {
+            self.open_turn(command_id, content, fingerprint, vec![request], env);
+        }
+        None
+    }
+
+    fn artifacts_verified(&mut self, token: CommitToken, valid: bool, env: &mut dyn Env) {
+        if self.mode == Mode::Faulted {
+            return;
+        }
+        if self.verifying.as_ref().is_none_or(|v| v.token != token) {
+            return self.fault(FaultCause::UnexpectedAnswer(token));
+        }
+        let verification = self.verifying.take().expect("checked above");
+        if valid {
+            self.open_turn(
+                verification.command_id,
+                verification.content,
+                verification.fingerprint,
+                verification.waiters,
+                env,
+            );
+        } else {
+            for request in verification.waiters {
+                self.reply(request, Err(Rejection::Invalid("artifact_missing")));
+            }
+        }
+    }
+
+    fn open_turn(
+        &mut self,
+        command_id: CommandId,
+        content: Vec<ContentBlock>,
+        fingerprint: Digest,
+        waiters: Vec<RequestId>,
+        env: &mut dyn Env,
+    ) {
+        let snapshot = self.snapshot().clone();
+        let command = json!({ "kind": "start_turn", "content": content });
         let turn_id = env.turn_id();
         let entries = chain(
             &snapshot,
@@ -342,7 +455,10 @@ impl Runtime {
             advancing(&snapshot, entries, events),
             InFlight {
                 token: CommitToken(0),
-                waiters: vec![(request, Waiter::TurnStarted(turn_id.clone()))],
+                waiters: waiters
+                    .into_iter()
+                    .map(|request| (request, Waiter::TurnStarted(turn_id.clone())))
+                    .collect(),
                 opening: Some(Opening {
                     command_id: command_id.clone(),
                     fingerprint,
@@ -354,7 +470,6 @@ impl Runtime {
             Some((command_id, command)),
             env,
         );
-        None
     }
 
     fn cancel(
@@ -560,6 +675,11 @@ impl Runtime {
     /// Stop for good: no retries, no further effects except rejections.
     fn fault(&mut self, cause: FaultCause) {
         self.mode = Mode::Faulted;
+        if let Some(verification) = self.verifying.take() {
+            for request in verification.waiters {
+                self.reply(request, Err(Rejection::Faulted));
+            }
+        }
         if let Some(inference) = self.inference.take() {
             if matches!(inference.status, Stream::Open) {
                 self.out.push(Effect::CancelInference {
@@ -908,7 +1028,7 @@ impl Runtime {
     /// Every decision reads the published snapshot; only what storage cannot
     /// know (the stream, the cancel request, the inference count) is local.
     fn advance(&mut self, env: &mut dyn Env) {
-        if self.mode != Mode::Ready || self.in_flight.is_some() {
+        if self.mode != Mode::Ready || self.in_flight.is_some() || self.verifying.is_some() {
             return;
         }
         let snapshot = self.snapshot().clone();
@@ -1194,6 +1314,7 @@ impl Runtime {
 
     fn emit(&mut self, kind: EventKind) {
         let event = RuntimeEvent {
+            epoch: self.view.view().epoch.clone(),
             seq: self.view.view().event_seq + 1,
             kind,
         };

@@ -32,6 +32,16 @@ pub(crate) struct Io {
 pub(crate) struct TestIo {
     pub fail: Option<Point>,
     pub trace: Vec<Point>,
+    pub threads: Vec<String>,
+    pub gate: Option<Gate>,
+}
+/// Hold one real durability boundary without sleeping on the test runtime.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct Gate {
+    pub point: Point,
+    pub entered: tokio::sync::oneshot::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
 }
 impl Io {
     pub fn check(&self, point: Point) -> Result<()> {
@@ -41,6 +51,20 @@ impl Io {
         {
             let mut state = self.test.lock().unwrap();
             state.trace.push(point);
+            state
+                .threads
+                .push(std::thread::current().name().unwrap_or("unnamed").into());
+            let gate = if state.gate.as_ref().is_some_and(|gate| gate.point == point) {
+                state.gate.take()
+            } else {
+                None
+            };
+            drop(state);
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                let _ = gate.release.recv();
+            }
+            let mut state = self.test.lock().unwrap();
             if state.fail == Some(point) {
                 state.fail = None;
                 return Err(std::io::Error::other("injected storage failure").into());

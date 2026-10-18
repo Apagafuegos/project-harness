@@ -1,0 +1,267 @@
+//! A dedicated thread owns the writer, including opening and dropping it.
+
+use std::{sync::Arc, thread};
+
+use tokio::sync::{mpsc, oneshot};
+
+use crate::session::{
+    ArtifactRef, CommandId, Commit, CommitAck, DataRoot, JournalStore, SessionHeader, SessionId,
+    SessionSnapshot, StoreError, Timestamp,
+};
+
+use super::PersistError;
+
+type AppendResult = Result<(CommitAck, SessionSnapshot), PersistError>;
+
+enum Request {
+    Append {
+        commit: Box<Commit>,
+        command: Option<(CommandId, serde_json::Value)>,
+        at: Timestamp,
+        reply: oneshot::Sender<AppendResult>,
+    },
+    PutArtifact {
+        bytes: Vec<u8>,
+        reply: oneshot::Sender<Result<ArtifactRef, PersistError>>,
+    },
+    VerifyArtifacts {
+        refs: Vec<ArtifactRef>,
+        reply: oneshot::Sender<Result<Vec<ArtifactRef>, PersistError>>,
+    },
+}
+
+/// The request half of the worker. Only driver-owned work retains clones.
+#[derive(Clone)]
+pub(super) struct WorkerSender(mpsc::Sender<Request>);
+
+impl WorkerSender {
+    pub(super) async fn append(
+        &self,
+        commit: Commit,
+        command: Option<(CommandId, serde_json::Value)>,
+        at: Timestamp,
+    ) -> AppendResult {
+        let (reply, receive) = oneshot::channel();
+        self.0
+            .send(Request::Append {
+                commit: Box::new(commit),
+                command,
+                at,
+                reply,
+            })
+            .await
+            .map_err(|_| PersistError::WorkerLost)?;
+        receive.await.unwrap_or(Err(PersistError::WorkerLost))
+    }
+
+    pub(super) async fn put_artifact(&self, bytes: Vec<u8>) -> Result<ArtifactRef, PersistError> {
+        let (reply, receive) = oneshot::channel();
+        self.0
+            .send(Request::PutArtifact { bytes, reply })
+            .await
+            .map_err(|_| PersistError::WorkerLost)?;
+        receive.await.unwrap_or(Err(PersistError::WorkerLost))
+    }
+
+    pub(super) async fn verify(
+        &self,
+        refs: Vec<ArtifactRef>,
+    ) -> Result<Vec<ArtifactRef>, PersistError> {
+        let (reply, receive) = oneshot::channel();
+        self.0
+            .send(Request::VerifyArtifacts { refs, reply })
+            .await
+            .map_err(|_| PersistError::WorkerLost)?;
+        receive.await.unwrap_or(Err(PersistError::WorkerLost))
+    }
+}
+
+/// One named OS thread owns the journal for its entire lifetime.
+/// Dropping every request sender drains queued requests and releases the lock.
+pub struct StorageWorker {
+    pub(super) sender: WorkerSender,
+    pub(super) exited: oneshot::Receiver<()>,
+}
+
+/// Test-only startup switches are applied on the worker, never on Tokio.
+#[derive(Clone, Default)]
+pub(super) struct WorkerOptions {
+    #[cfg(test)]
+    pub without_oracle: bool,
+    #[cfg(test)]
+    pub panic_next: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pub lost_reply_next: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StorageWorker {
+    /// Open on the worker thread itself. Failure leaves no live writer/thread.
+    pub async fn open(
+        root: Arc<DataRoot>,
+        session_id: SessionId,
+    ) -> Result<(Self, SessionSnapshot), PersistError> {
+        Self::start(root, session_id, None, 8, WorkerOptions::default()).await
+    }
+
+    /// Create and sync the header on the worker thread itself.
+    pub async fn create(
+        root: Arc<DataRoot>,
+        session_id: SessionId,
+        header: SessionHeader,
+        at: Timestamp,
+    ) -> Result<(Self, SessionSnapshot), PersistError> {
+        Self::start(
+            root,
+            session_id,
+            Some((header, at)),
+            8,
+            WorkerOptions::default(),
+        )
+        .await
+    }
+
+    pub(super) async fn start(
+        root: Arc<DataRoot>,
+        session_id: SessionId,
+        create: Option<(SessionHeader, Timestamp)>,
+        capacity: usize,
+        options: WorkerOptions,
+    ) -> Result<(Self, SessionSnapshot), PersistError> {
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        let (opened, receive) = oneshot::channel();
+        let (exit, exited) = oneshot::channel();
+        thread::Builder::new()
+            .name(format!("harness-storage-{session_id}"))
+            .spawn(move || {
+                // The receiver, store and file all drop before the exit notification,
+                // including when unwinding. No panic crosses this thread boundary.
+                let run = || run(root, session_id, create, receiver, opened, &options);
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if options.without_oracle {
+                        return crate::session::state::without_oracle(run);
+                    }
+                    run();
+                }));
+                let _ = exit.send(());
+            })
+            .map_err(|error| PersistError::Io {
+                message: error.to_string(),
+            })?;
+        let worker = Self {
+            sender: WorkerSender(sender),
+            exited,
+        };
+        match receive.await.unwrap_or(Err(PersistError::WorkerLost)) {
+            Ok(snapshot) => Ok((worker, snapshot)),
+            Err(error) => {
+                worker.shutdown().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Drain queued operations, drop the writer and await its exit signal.
+    pub async fn shutdown(self) {
+        drop(self.sender);
+        let _ = self.exited.await;
+    }
+}
+
+fn run(
+    root: Arc<DataRoot>,
+    session_id: SessionId,
+    create: Option<(SessionHeader, Timestamp)>,
+    mut requests: mpsc::Receiver<Request>,
+    opened: oneshot::Sender<Result<SessionSnapshot, PersistError>>,
+    options: &WorkerOptions,
+) {
+    let result = match create {
+        Some((header, at)) => JournalStore::create(root.clone(), session_id, header, at),
+        None => JournalStore::open(root.clone(), &session_id),
+    };
+    let mut store = match result {
+        Ok(store) => store,
+        Err(error) => {
+            let _ = opened.send(Err(PersistError::from_store(&error)));
+            return;
+        }
+    };
+    if opened.send(Ok(store.snapshot())).is_err() {
+        return;
+    }
+    let mut poisoned = false;
+    while let Some(request) = requests.blocking_recv() {
+        #[cfg(not(test))]
+        let _ = options;
+        #[cfg(test)]
+        if options
+            .panic_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("injected storage worker panic");
+        }
+        match request {
+            Request::Append {
+                mut commit,
+                command,
+                at,
+                reply,
+            } => {
+                let result = (|| {
+                    if poisoned {
+                        return Err(StoreError::Poisoned);
+                    }
+                    if let Some((id, command)) = command {
+                        store.bind_command(&mut commit, id, &command)?;
+                    }
+                    let ack = store.append(*commit, at)?;
+                    Ok((ack, store.snapshot()))
+                })();
+                if matches!(result, Err(StoreError::Io(_) | StoreError::Poisoned)) {
+                    poisoned = true;
+                }
+                #[cfg(test)]
+                if options
+                    .lost_reply_next
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    drop(reply);
+                    continue;
+                }
+                let _ = reply.send(result.map_err(|error| PersistError::from_store(&error)));
+            }
+            Request::PutArtifact { bytes, reply } => {
+                let result = if poisoned {
+                    Err(StoreError::Poisoned)
+                } else {
+                    root.put_artifact(&bytes)
+                };
+                if matches!(result, Err(StoreError::Io(_))) {
+                    poisoned = true;
+                }
+                let _ = reply.send(result.map_err(|error| PersistError::from_store(&error)));
+            }
+            Request::VerifyArtifacts { refs, reply } => {
+                let result = (|| {
+                    if poisoned {
+                        return Err(StoreError::Poisoned);
+                    }
+                    let mut missing = Vec::new();
+                    for reference in refs {
+                        match root.verify_artifact(&reference) {
+                            Ok(()) => {}
+                            Err(error @ StoreError::Io(_)) => return Err(error),
+                            Err(_) => missing.push(reference),
+                        }
+                    }
+                    Ok(missing)
+                })();
+                if matches!(result, Err(StoreError::Io(_) | StoreError::Poisoned)) {
+                    poisoned = true;
+                }
+                let _ = reply.send(result.map_err(|error| PersistError::from_store(&error)));
+            }
+        }
+    }
+}

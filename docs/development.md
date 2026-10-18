@@ -76,7 +76,8 @@ events after it must reproduce the final view.
 
 `randomized_interleavings_keep_storage_and_events_consistent` runs 512 seeds of
 a SplitMix64 PRNG across threads. Each seed interleaves commands (including
-retries and stale command IDs), scripted streams with occasional corrupt
+retries, stale command IDs and media), PRNG-chosen artifact verification
+answers, scripted streams with occasional corrupt
 events, stale stream IDs, timer firings and injected persist failures. Each run
 is then driven to quiescence. Every started turn must have exactly one
 `turn_finished` in the journal; only a turn stopped by an injected fault may
@@ -86,6 +87,29 @@ failing run prints its seed. Rerun one seed, or run more:
 ```sh
 RUNTIME_SEED=123 cargo test -p harness-core --locked randomized -- --nocapture
 RUNTIME_SEEDS=5000 cargo test --release -p harness-core --locked randomized
+```
+
+### Async driver tests
+
+`runtime/driver/tests.rs` drives `SessionHandle` with a private mpsc provider
+stand-in. Every behavioral test uses
+`#[tokio::test(flavor = "current_thread", start_paused = true)]`,
+`DeterministicEnv`, real worker threads and real temporary journals. No test
+reads the wall clock or sleeps for real. Cancellation timers fire only through
+explicit `tokio::time::advance`; a yielding task prevents automatic time
+advancement while a worker is doing real filesystem I/O. Test-only I/O gates
+hold the worker at a durability boundary and notify the test by oneshot;
+releasing the gate uses a standard channel, never a blocking receive on Tokio.
+The injected I/O trace records worker thread names and sync ordering.
+
+Coverage includes tool loops/limits, cancellation, upload limits and media
+preflight, joining mid-stream, broadcast lag, epoch changes, unacknowledged
+records, torn writes, poison, panic, dropped replies, overload and concurrent
+shutdown during a commit. A torn tail blocks reopen until explicit repair;
+reopen never repairs history or performs step-6 recovery.
+
+```sh
+cargo test -p harness-core --locked runtime::driver::tests
 ```
 
 ## Scaling benchmark
@@ -119,8 +143,29 @@ the cached branch facts and tool-state indexes with the scanning definitions
 they replace, which makes each commit linear in history. The benchmark switches
 it off for its own thread with `state::without_oracle`; every other test keeps it
 on, including each thread of the randomized runtime test. The switch is
-thread-local, so a future storage worker thread must switch it off itself in
-benchmarks.
+thread-local. `WorkerOptions::without_oracle` is a test-only startup hook:
+it wraps the worker's open and entire receive loop in `state::without_oracle`
+on that worker thread. Disabling the oracle on the Tokio/test thread has no
+effect on the worker. Ordinary worker tests leave the hook off and the oracle on.
+
+An additional opt-in benchmark drives 1,000 tool turns through `SessionHandle`
+and compares them to a direct `JournalStore` run of the **same** six-commit
+workload (C1, C2, proposal, unavailable-tool result, C2, stop), with command
+artifacts in both. This differs from the older twelve-commit authorized-tool
+workload above: comparing those directly would mix scheduling cost with
+different storage work. Both benchmark paths disable the oracle on their own
+storage thread. Only opt-in benchmarks measure real monotonic elapsed time;
+behavioral driver tests use virtual time exclusively.
+
+```sh
+TMPDIR=/dev/shm CARGO_NET_OFFLINE=true cargo test --release -p harness-core --locked \
+  session_handle_tool_turn_benchmark -- --ignored --nocapture
+```
+
+On 2026-10-18, Rust 1.99.1, tmpfs: direct store **0.558 ms/turn**;
+`SessionHandle` **0.844 ms/turn**, a **0.286 ms/turn (+51.3%)** delta for the
+driver, channels, extra thread and subscription delivery. This is a local
+measurement without device sync latency, not a production throughput promise.
 
 ## Dependency and toolchain changes
 
@@ -133,8 +178,10 @@ Clap supplies CLI help, version, and argument validation. Storage uses Serde and
 Serde JSON, the bundled JSON Schema validator with remote resolution disabled,
 SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives, typed
 errors and imbl persistent collections for sharing session snapshots. Tempfile
-is test-only. Tokio, Ratatui and HTTP clients are added when their implementations
-need them. Enable only required features.
+is test-only. Tokio is enabled with `default-features = false` and only `rt`,
+`sync`, `time`, `macros`; tests additionally enable `test-util`. No Tokio
+multithread runtime, I/O features or tokio-util are enabled. Ratatui and HTTP
+clients will be added when their implementations need them.
 
 Commit `Cargo.lock`. Use `--locked` in routine builds and CI. To intentionally
 change dependencies, edit the manifest or run a targeted `cargo update -p NAME`,

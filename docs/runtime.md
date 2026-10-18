@@ -1,20 +1,23 @@
 # Runtime core
 
-Status: Milestone 2, step 2 is implemented as `harness_core::runtime`: a pure,
-synchronous state machine tested against real storage. There is no driver,
-provider, context builder or recovery yet, and nothing here runs an agent end
-to end. [Decision 0004](decisions/0004-pure-runtime-core.md) records the design.
+Status: Milestone 2, steps 2 and 3 are implemented as `harness_core::runtime`:
+a pure synchronous state machine, a dedicated storage worker, and a Tokio
+driver/handle with broadcast subscriptions. An internal provider stand-in drives
+tests; the public handle reports a provider failure until the real provider seam
+arrives in step 4. Context building and startup recovery remain future work.
+[Decision 0004](decisions/0004-pure-runtime-core.md) records the design.
 
 ## Shape
 
 ```rust,ignore
-let mut runtime = Runtime::new(snapshot, RuntimeConfig::default()); // emits nothing
+let mut runtime = Runtime::new(snapshot, RuntimeConfig::default(), &mut env); // emits nothing
 let effects: Vec<Effect> = runtime.step(input, &mut env);
 ```
 
 `step` does nothing except what it returns. It performs no file, network or
 channel access, never reads the clock, and creates identities only through
-`Env`: `now()` plus generators for entry, turn, response and call IDs.
+`Env`: `now()` plus generators for runtime epochs, entry, turn, response and
+call IDs.
 `SystemEnv` uses the wall clock and random UUIDv7s. `DeterministicEnv` has a
 fixed time and counter-derived UUIDv7s, with a 12-bit stream number per runtime
 so identities stay unique across a reopen. Taking `&mut self` is equivalent to
@@ -32,7 +35,10 @@ active turn, timers, and a requested cancel.
 | --- | --- | --- |
 | `Command` | `RequestId`, `Command` | Client, through the driver |
 | `Persisted` | `CommitToken`, `CommitAck`, new `SessionSnapshot` | Storage worker, after sync |
-| `PersistFailed` | `CommitToken`, `PersistError::{Rejected{code}, Io{message}}` | Storage worker |
+| `PersistFailed` | `CommitToken`, `PersistError::{Rejected{code}, Io{message}, Poisoned, WorkerLost}` | Storage worker |
+| `ArtifactsVerified` | `CommitToken`, missing/invalid references | Storage worker, before C1 |
+| `StorageFailed` | `PersistError` | Worker exit or failed artifact I/O |
+| `PublishView` | — | Driver attaching a replacement runtime; emits the current phase |
 | `Provider` | `InferenceId`, `ProviderEvent` | Provider stream |
 | `ProviderEnded` | `InferenceId` | Stream closed, with or without `Finished` |
 | `TimerFired` | `TimerId` | Driver timer |
@@ -54,6 +60,7 @@ fragments itself.
 
 | Effect | Carries | Meaning |
 | --- | --- | --- |
+| `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, `at` | Bind the command if present, append, answer |
 | `StartInference` | `InferenceId`, `TurnId`, head, `ModelRef`, `ResponseId` | Open a stream; context projection arrives in step 5 |
 | `CancelInference` | `InferenceId` | Stop the stream; its later events are dropped |
@@ -68,6 +75,7 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
 `HeadSelected { ack }` or `ModelSwitched { ack }`. `Rejection` is `Busy`,
 `RecoveryRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
+The handle can also return `Overloaded` before submission.
 
 `RuntimeConfig` has `max_inferences_per_turn` (32), `max_partial_bytes`
 (4 MiB), `max_user_bytes` (1 MiB) and `cancel_grace` (2 s).
@@ -109,7 +117,7 @@ Other stream endings record the response and finish the turn in one commit:
 | over `max_partial_bytes` | `interrupted` | `turn_finished(failed, response_too_large)` |
 | protocol violation | `failed`, `malformed_stream` error | `turn_finished(failed, malformed_stream)` |
 
-Storage determined two of these sequences:
+Storage determines the tool-answer sequence:
 
 - Tools are unavailable in Milestone 2. Each pending call gets a `ToolResult`
   with status `denied`, no invocation, `runtime` provenance and the text
@@ -134,21 +142,28 @@ those bytes, so the two cannot drift. The order of checks is:
    the original ack and the turn ID from the receipt's `turn_started`. A different
    fingerprint replies `StaleCommand`. This also applies while recovery is
    required.
-3. An opening commit in flight with this command ID: the same fingerprint attaches
+3. An opening commit or media verification in flight with this command ID: the same fingerprint attaches
    the request to that commit, and both requests are answered on its ack. A
    different fingerprint replies `StaleCommand`.
 4. `RecoveryRequired`, then `Busy` (an active turn or any commit in flight).
    Nothing is queued.
-5. `Invalid`: `empty_content`, `unsupported_content`, `content_too_large`,
+5. `Invalid`: `empty_content`, `unsupported_content`, `invalid_media`, `content_too_large`,
    `command_id_in_use` (the UUID already names another journal identity) or
    `head_inside_tool_exchange`.
 
 The `TurnId` comes from `Env` and is never the command's UUID, because storage
 registers both in one identity set. `receipt.commit` links them.
 
-Milestone 2 accepts text blocks only. Media blocks reference artifacts the pure
-core cannot verify, and a missing artifact would make storage refuse the commit
-and fault the session.
+Text, image, audio and file blocks are accepted. Media references are checked
+through `VerifyArtifacts { token, refs }` before C1 is built. `ArtifactsVerified`
+with anything missing or invalid replies `Invalid("artifact_missing")` to every
+attached retry and writes nothing; an empty missing list continues to C1.
+Verification counts as a commit in flight for busy checks and deduplication.
+Empty media MIME types or file names reject with `Invalid("invalid_media")`
+before verification; these fields must satisfy the existing storage schema.
+Reasoning, tool-call and provider-state blocks remain invalid user input.
+Storage verifies media again on append. Artifacts are never deleted by the
+harness; disagreement between preflight and append faults the runtime.
 
 **SelectHead / SwitchModel** need an idle session (no active turn, nothing in
 flight). Otherwise they get `Busy`, `RecoveryRequired` or `Faulted`. Each is one
@@ -213,7 +228,7 @@ Cancellation never claims rollback.
 
 ## Faults
 
-`PersistFailed` of either kind, an answer for a token not in flight, or an
+`PersistFailed` or `StorageFailed`, an answer for a token not in flight, or an
 acknowledgement that does not extend the snapshot moves the core to `Faulted`.
 It then cancels the open stream and armed timer, clears the partial response,
 emits `Fault`, and rejects pending requests and every later command with
@@ -227,7 +242,8 @@ still learns its durable receipt.
 
 ## Events and resync
 
-`RuntimeEvent { seq, kind }`. `seq` starts at 1 for each `Runtime`, increases by
+`RuntimeEvent { epoch, seq, kind }`. `epoch: RuntimeEpoch` is the UUIDv7
+incarnation generated through `Env` when constructing a runtime. `seq` starts at 1 for each `Runtime`, increases by
 exactly one per event, and is unrelated to journal sequences. Kinds:
 
 - `Committed { ack, snapshot }`: one per `Persisted`, with the new snapshot.
@@ -240,30 +256,86 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
   is durable or abandoned by a fault.
 - `Diagnostic` and `Fault`.
 
-`Runtime::view()` returns `RuntimeView { event_seq, snapshot, phase,
+`Runtime::view()` returns `RuntimeView { epoch, event_seq, snapshot, phase,
 active_turn, partial }`. It reflects exactly the events with
 `seq <= event_seq`. The runtime maintains its own view by applying each event
 it emits to a `ClientView`, the same reducer clients use, so the invariant holds
 by construction and is also tested. `partial` is bounded like the response.
 
 `ClientView::from(view)` and `apply(&event)` return `Applied`, `Duplicate` for
-`seq <= event_seq`, or `NeedsResync` for a gap, which leaves the view unchanged.
+`seq <= event_seq`, or `NeedsResync` for a gap or different epoch, which leaves
+the view unchanged. Epoch is checked before sequence, so a new runtime's seq 1
+cannot be dropped as an old event.
 Views compare snapshots by session, sequence and record checksum.
 
-**Requirement on the step-3 driver:**
+## Async handle and worker
 
-1. Subscribe to the broadcast.
-2. Take the view.
-3. Drop buffered events with `seq <= view.event_seq`.
+`SessionHandle::open(root, session_id, DriverConfig)` opens the journal on its
+worker and spawns a driver task on the caller's Tokio runtime.
+`SessionHandle::create(root, session_id, header, config)` creates and syncs a
+new session instead. `root` is an `Arc<DataRoot>` prepared by the caller outside
+async execution. Header configuration artifacts must already be published.
+Cloning a handle is cheap. Dropping every handle also initiates shutdown;
+subscriptions hold only weak command senders and do not keep the driver alive.
 
-On `Lagged`, repeat all three. The driver owns the core in one task and takes
-views only between steps.
+- `command(Command).await -> Result<Accepted, Rejection>` uses `try_send` on
+  the bounded command mailbox. Full returns `Overloaded` at once. A second turn
+  still gets the core's `Busy`; turns are never queued for later execution.
+- `view().await` returns a coherent view taken between steps.
+- `subscribe()` immediately registers a broadcast receiver. `next().await`
+  yields `Some(SubscriptionItem::Reset(ClientView))` first, then contiguous
+  `Event(RuntimeEvent)` items, or `None` after driver shutdown.
+- `put_artifact(Vec<u8>).await -> Result<ArtifactRef, PersistError>` rejects
+  payloads above `max_artifact_bytes` before any I/O. The worker publishes the
+  bytes and replies after artifact file and directory sync. Artifact I/O failure
+  faults the runtime even without a pending append.
+- `shutdown().await` asks the core to cancel any active inference, waits for its
+  timer/terminal commits and all in-flight storage work, drains artifacts, drops
+  worker senders, and awaits worker exit. The lock is released before it
+  returns, including for simultaneous shutdown callers. Immediate open succeeds.
+- `reopen().await -> Result<RuntimeView, PersistError>` requires `Faulted`.
+  It drains and stops the old worker, opens the same journal on a new one, and
+  constructs a new runtime/epoch. Unfinished work stays `RecoveryRequired`.
+  Torn-tail errors are returned without repair; explicit storage repair remains
+  required. No command or uncertain write is automatically retried.
+
+`DriverConfig` defaults: 16 command slots, 64 broadcast slots, 8 worker slots
+(and at most 8 concurrent artifact tasks), 16 MiB artifact uploads, and the
+existing `RuntimeConfig` limits. Channel capacities of zero are clamped to one.
+Artifact task saturation returns `PersistError::Rejected { code: "overloaded" }`.
+Reopen outside `Faulted` returns `Rejected { code: "not_faulted" }`.
+
+The driver uses biased `select!`: persistence/preflight replies first, provider
+events next, timers next, commands last. Worker exit and artifact failure are
+also observed before commands. It maps effects to worker requests, provider
+receivers, sleep tasks and broadcast events; it makes no turn decisions.
+Timers use Tokio deadlines and keep abortable task handles by `TimerId`.
+
+`StorageWorker::open` and `create` open on a named `std::thread`. Only that
+thread calls `JournalStore`; it owns the store until drop. Requests arrive by
+bounded mpsc and `blocking_recv`, with oneshot replies after sync. No
+`spawn_blocking` or Tokio runtime is created. I/O errors poison later appends,
+which still receive `Poisoned`; worker panics and dropped replies become
+`WorkerLost`. Closing all senders drains queued work, drops the store, releases
+the lock and signals exit. Failed opens also await exit before returning.
+
+## Subscription protocol
+
+1. Subscribe to broadcast before asking the driver for its view.
+2. Ask for a view between steps and yield `Reset(ClientView::from(view))`.
+3. Ignore buffered events already reflected by that epoch and sequence.
+4. Apply contiguous events. On broadcast `Lagged`, a different epoch or a gap,
+   resubscribe **before** asking for another view and repeat from step 2.
+
+`Subscription` runs this protocol internally using the shared reducer. The
+partial response is in each reset, so joining or resyncing mid-stream retains
+all text observed so far. Delta history itself is transient; durable session
+history and the current partial response are preserved through resync.
+Reopen feeds `PublishView` to the new core, emitting its phase with the new
+epoch even when recovery prevents a new command.
 
 ## Not implemented yet
 
-- **Step 3:** the storage worker thread, the Tokio driver and broadcast, and
-  subscriber lag handling. The worker must switch off the test-build oracle on
-  its own thread in benchmarks.
 - **Step 4:** the provider `Stream` trait and a scripted mock that expresses
   mid-stream failure and cancellation without wall-clock time.
 - **Step 5:** context projection and its report. `StartInference` names the head
@@ -279,5 +351,9 @@ a temporary directory, with the oracle on. Every scenario runs twice with fresh
 environments and is compared with storage-chosen bytes abstracted. It is also
 replayed from its recorded inputs and must give byte-identical effects. Each run
 checks resync from every recorded view, and checks that reopening the journal
-gives the published snapshot. A randomized test runs 512 seeds. See
+gives the published snapshot. The async driver's tests use a current-thread
+Tokio runtime with paused time, real channels and a dedicated worker. Only
+explicit virtual-time advances fire timers; I/O gates hold durability boundaries
+without real sleeps. They cover lag, mid-stream joins, epoch replacement,
+shutdown, uncertain writes, panic, overload and media. A randomized test runs 512 seeds. See
 [development](development.md#runtime-tests).

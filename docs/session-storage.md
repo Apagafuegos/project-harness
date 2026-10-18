@@ -90,8 +90,9 @@ are available now so the later runtime can use the same representation.
 
 ## Durability and recovery
 
-The API blocks through file/directory synchronization. A future Tokio engine must
-own the store on a blocking worker, awaiting its acknowledgement before effects.
+The API blocks through file/directory synchronization. The async runtime owns
+the store on a dedicated worker thread and awaits its acknowledgement before
+effects. See [runtime](runtime.md) for the async handle and subscriptions.
 Never dispatch a tool from a staged or failed transaction. A journal write/flush/
 sync failure poisons that store: discard it and reopen, without retrying its bytes.
 A complete valid record can replay after a lost acknowledgement. Its command

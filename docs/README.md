@@ -18,7 +18,7 @@ describing a future component is not evidence that it is implemented.
 - [Runtime core decision](decisions/0004-pure-runtime-core.md): accepted pure
   core with a driver, one commit in flight, command dedup and view resync.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
-  cancellation, events and resync; what steps 3–6 add.
+  cancellation, worker/driver, media and resync; what steps 4–6 add.
 - [Model provider](contracts/model.md): native APIs, hybrid multimodal content,
   streaming, capabilities, and model switching.
 - [Tools](contracts/tools.md): registry, validation, authorization, sequential calls,
@@ -44,8 +44,8 @@ options such as SQLite or parallel initial tool execution.
 
 **RFC details** specify how to implement those boundaries. Storage details are
 accepted and tested under decision 0003; the pure runtime core's turn commits
-under decision 0004. Other details, including approval defaults, the async
-driver and recovery orchestration, remain proposed. Schema/examples alone are
+and async worker/driver under decision 0004. Other details, including approval
+defaults, the provider Stream trait and recovery orchestration, remain proposed. Schema/examples alone are
 not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

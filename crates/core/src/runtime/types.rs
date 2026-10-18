@@ -3,8 +3,9 @@
 use std::{fmt, time::Duration};
 
 use crate::session::{
-    CallId, CommandId, Commit, CommitAck, ContentBlock, EntryId, FinishReason, ModelError,
-    ModelRef, ResponseId, SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome, Usage,
+    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, EntryId, FinishReason,
+    ModelError, ModelRef, ResponseId, SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome,
+    Usage,
 };
 
 use super::view::Phase;
@@ -30,6 +31,32 @@ local_id!(
     /// Identifies one driver timer of this runtime. Never journaled.
     TimerId,
 );
+
+/// UUIDv7 identity of one runtime incarnation, never journaled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeEpoch(EntryId);
+
+impl RuntimeEpoch {
+    /// Generate an epoch through the same UUIDv7 source as journal identities.
+    pub fn new() -> Self {
+        Self(EntryId::new())
+    }
+    /// Canonical UUIDv7 representation.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+impl Default for RuntimeEpoch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl TryFrom<String> for RuntimeEpoch {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Ok(Self(value.try_into()?))
+    }
+}
 
 /// Limits that bound one runtime's work. They are not persisted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +90,21 @@ impl Default for RuntimeConfig {
 /// Everything the core reacts to. One input yields one batch of effects.
 #[derive(Clone, Debug)]
 pub enum Input {
+    /// Announce the current phase and epoch after attaching a replacement runtime.
+    PublishView,
+    /// Artifact preflight completed without changing the journal.
+    ArtifactsVerified {
+        /// Token of the preflight in flight.
+        token: CommitToken,
+        /// Missing, unsafe or invalid references; empty means all verified.
+        missing: Vec<ArtifactRef>,
+    },
+    /// Worker exit or an artifact operation failed outside a pending commit.
+    StorageFailed {
+        /// Infrastructure failure; never retried.
+        error: PersistError,
+    },
+
     /// A client command, through the driver.
     Command {
         /// Correlation for the single reply.
@@ -112,7 +154,7 @@ pub enum Command {
     StartTurn {
         /// Journal deduplication key; never reused as the turn's identity.
         command_id: CommandId,
-        /// User content. Milestone 2 accepts text blocks only.
+        /// Text or media content. Media is verified before the opening commit.
         content: Vec<ContentBlock>,
     },
     /// Cancel the active turn.
@@ -133,14 +175,23 @@ pub enum Command {
 }
 
 /// Why a commit was not persisted.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PersistError {
-    /// Storage refused the commit with a stable code. This is a core bug.
+    /// The dedicated worker panicked or dropped a reply. Never retry.
+    #[error("storage_worker_lost")]
+    WorkerLost,
+    /// An earlier I/O failure poisoned this worker until reopen.
+    #[error("writer_poisoned")]
+    Poisoned,
+    /// Storage/open/upload was rejected with a stable code. Rejection of a
+    /// core-generated append is a core bug.
+    #[error("storage rejected: {code}")]
     Rejected {
         /// Storage's code, such as `illegal_state_transition`.
         code: String,
     },
     /// I/O failed; the writer is poisoned or its result is unknown.
+    #[error("storage I/O: {message}")]
     Io {
         /// Operating-system description, without journal content.
         message: String,
@@ -157,9 +208,7 @@ impl PersistError {
                 };
             }
             StoreError::Poisoned => {
-                return Self::Io {
-                    message: "writer_poisoned".into(),
-                };
+                return Self::Poisoned;
             }
             StoreError::Invalid(code) => (*code).to_owned(),
             StoreError::Journal(diagnostic) => diagnostic.code.clone(),
@@ -248,6 +297,14 @@ pub enum ProviderEvent {
 /// Side effects the driver performs. The core does nothing else.
 #[derive(Clone, Debug)]
 pub enum Effect {
+    /// Verify media before building the opening commit.
+    VerifyArtifacts {
+        /// Token echoed by `ArtifactsVerified` (or `PersistFailed`).
+        token: CommitToken,
+        /// References to check through the worker.
+        refs: Vec<ArtifactRef>,
+    },
+
     /// Append one transaction, then answer `Persisted` or `PersistFailed`.
     Persist {
         /// Token for the answer.
@@ -332,6 +389,8 @@ pub enum Accepted {
 /// Why a command was refused. Refused commands change nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rejection {
+    /// The bounded command channel is full; submission never waits for room.
+    Overloaded,
     /// A turn is active or a commit is in flight. Commands are never queued.
     Busy,
     /// The session needs recovery, which this runtime does not perform yet.
@@ -349,6 +408,8 @@ pub enum Rejection {
 /// One broadcast event. `seq` starts at 1 per runtime and has no gaps.
 #[derive(Clone, Debug)]
 pub struct RuntimeEvent {
+    /// Runtime incarnation; compare before sequence numbers.
+    pub epoch: RuntimeEpoch,
     /// Position in this runtime's event stream, unrelated to journal sequence.
     pub seq: u64,
     /// Payload.

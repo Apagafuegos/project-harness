@@ -1,5 +1,7 @@
 //! The only source of time and new identities for the pure core.
 
+use super::RuntimeEpoch;
+
 use crate::session::{CallId, EntryId, ResponseId, Timestamp, TurnId};
 
 /// Time and identity generation. A step reads nothing else from the outside.
@@ -7,6 +9,8 @@ use crate::session::{CallId, EntryId, ResponseId, Timestamp, TurnId};
 /// Every identity must be unique within the journal, across all identity
 /// types and across reopening, because storage keeps them in one set.
 pub trait Env {
+    /// New runtime incarnation. Unique across replacement runtimes.
+    fn runtime_epoch(&mut self) -> RuntimeEpoch;
     /// Timestamp for the next record.
     fn now(&mut self) -> Timestamp;
     /// New tree entry identity.
@@ -24,6 +28,9 @@ pub trait Env {
 pub struct SystemEnv;
 
 impl Env for SystemEnv {
+    fn runtime_epoch(&mut self) -> RuntimeEpoch {
+        RuntimeEpoch::new()
+    }
     fn now(&mut self) -> Timestamp {
         Timestamp::now()
     }
@@ -84,6 +91,9 @@ impl DeterministicEnv {
 }
 
 impl Env for DeterministicEnv {
+    fn runtime_epoch(&mut self) -> RuntimeEpoch {
+        self.next()
+    }
     fn now(&mut self) -> Timestamp {
         self.at.clone()
     }
