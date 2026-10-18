@@ -54,9 +54,8 @@ take the view, and then drop buffered events at or before `view.event_seq`.
 - The lifecycle is tested without Tokio or a provider. Determinism is exact:
   replaying recorded inputs into a fresh runtime and environment reproduces the
   effects byte for byte.
-- Storage shapes the commits. A refusal fails its turn with code `refusal`,
-  because storage completes turns only after `stop`. RFC-001 7.2 expected
-  `completed` with that code. Tool calls are answered `denied` with the text
+- A refusal completes its turn; an output limit fails it with `output_limit`.
+  Only recovery records interrupted turns. Tool calls are answered `denied` with the text
   `tools_unavailable` until tools exist, because storage results carry no code.
 - One commit in flight serializes a turn's durability latency. Every commit
   waits for its sync before the next decision, as RFC-001 5.3 requires.

@@ -1248,14 +1248,13 @@ impl Recorded {
                     completed(*reason, false, Some((TurnOutcome::Completed, None)))
                 }
                 FinishReason::ToolCalls => completed(*reason, true, None),
-                // Storage completes a turn only after `stop`, so a refusal fails it.
                 FinishReason::Refusal => {
-                    completed(*reason, false, Some((TurnOutcome::Failed, Some("refusal"))))
+                    completed(*reason, false, Some((TurnOutcome::Completed, None)))
                 }
                 FinishReason::OutputLimit => completed(
                     *reason,
                     false,
-                    Some((TurnOutcome::Interrupted, Some("output_limit"))),
+                    Some((TurnOutcome::Failed, Some("output_limit"))),
                 ),
             },
             End::Finished {

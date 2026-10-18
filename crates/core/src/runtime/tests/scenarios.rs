@@ -757,7 +757,7 @@ mod bodies {
                 malformed,
                 malformed,
                 malformed,
-                "assistant(completed/outputlimit) inferring>processing finished(interrupted, output_limit)",
+                "assistant(completed/outputlimit) inferring>processing finished(failed, output_limit)",
             ]
         );
         assert!(
@@ -992,8 +992,7 @@ mod bodies {
                 "assistant(failed) finished(failed, rate_limit)",
                 "assistant(failed) finished(failed, malformed_stream)",
                 "assistant(cancelled) finished(cancelled, provider_cancelled)",
-                // Storage completes a turn only after `stop`.
-                "assistant(completed/refusal) inferring>processing finished(failed, refusal)",
+                "assistant(completed/refusal) inferring>processing finished(completed)",
                 "assistant(failed) finished(failed, malformed_stream)",
             ]
         );

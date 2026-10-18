@@ -82,6 +82,12 @@ are implemented. Persisting their types/events does not execute those systems.
   Summary generation, pin policy, context budgets and projection remain future
   work; accepting a stored summary does not validate the quality of its text.
 
+- A completed turn may end at a completed response with finish reason `stop` or
+  `refusal`. All other completion checks remain: no pending calls or unresolved
+  invocations, and state `Processing` or `Continuing`. Output limits fail the
+  turn with `output_limit`; `interrupted` is reserved for recovery. This changes
+  validation only; schema, format and fixture bytes remain unchanged.
+
 ## Consequences
 
 The public API can create/open a session, append validated atomic transactions,

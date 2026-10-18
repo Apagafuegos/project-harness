@@ -977,7 +977,7 @@ impl State {
                             ),
                         "invalid_completed_turn",
                     )?;
-                    require(self.head.as_ref().and_then(|id| self.entries.get(id)).is_some_and(|v| matches!(&v.entry.payload, EntryPayload::AssistantResponse(r) if r.outcome == ResponseOutcome::Completed && r.finish_reason == Some(FinishReason::Stop))), "completion_without_stop")?;
+                    require(self.head.as_ref().and_then(|id| self.entries.get(id)).is_some_and(|v| matches!(&v.entry.payload, EntryPayload::AssistantResponse(r) if r.outcome == ResponseOutcome::Completed && matches!(r.finish_reason, Some(FinishReason::Stop | FinishReason::Refusal)))), "completion_without_stop")?;
                 }
                 if self.has_unresolved() {
                     require(

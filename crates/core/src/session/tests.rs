@@ -1394,6 +1394,45 @@ fn response(store: &mut JournalStore, content: Vec<ContentBlock>, finish: Finish
     store.append(commit, at()).unwrap();
     entry_id
 }
+
+#[test]
+fn completed_turn_accepts_refusal_but_not_output_limit_or_tool_calls() {
+    for reason in [
+        FinishReason::Refusal,
+        FinishReason::OutputLimit,
+        FinishReason::ToolCalls,
+    ] {
+        let (_temp, root, mut store) = fresh();
+        let id = store.snapshot().session_id().clone();
+        store
+            .append(start_turn(&store.snapshot(), "question"), at())
+            .unwrap();
+        let content = if reason == FinishReason::ToolCalls {
+            vec![tool_call(&CallId::new())]
+        } else {
+            vec![ContentBlock::Text {
+                text: "answer".into(),
+            }]
+        };
+        response(&mut store, content, reason);
+        let result = store.append(finish(&store.snapshot(), TurnOutcome::Completed), at());
+        if reason == FinishReason::Refusal {
+            result.unwrap();
+            let snapshot = store.snapshot();
+            drop(store);
+            let reopened = JournalStore::open(root, &id).unwrap();
+            assert_eq!(reopened.snapshot().checksum(), snapshot.checksum());
+            assert_eq!(reopened.snapshot().state(), RuntimeState::Idle);
+        } else {
+            assert!(matches!(
+                result,
+                Err(StoreError::Invalid(
+                    "completion_without_stop" | "unfinished_not_started_proposals"
+                ))
+            ));
+        }
+    }
+}
 fn tool_result(
     snapshot: &SessionSnapshot,
     call: CallRef,

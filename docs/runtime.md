@@ -101,8 +101,8 @@ Other stream endings record the response and finish the turn in one commit:
 
 | Stream ending | Assistant entry | Events |
 | --- | --- | --- |
-| `completed/refusal` | `completed/refusal` | `inferring>processing`, `turn_finished(failed, refusal)` |
-| `completed/output_limit` | `completed/output_limit`, incomplete calls dropped | `inferring>processing`, `turn_finished(interrupted, output_limit)` |
+| `completed/refusal` | `completed/refusal` | `inferring>processing`, `turn_finished(completed)` |
+| `completed/output_limit` | `completed/output_limit`, incomplete calls dropped | `inferring>processing`, `turn_finished(failed, output_limit)` |
 | `failed` with a valid error | `failed`, that error | `turn_finished(failed, <error code>)` |
 | `cancelled` by the provider | `cancelled` | `turn_finished(cancelled, provider_cancelled)` |
 | EOF without `Finished` | `interrupted` | `turn_finished(failed, provider_eof)` |
@@ -111,9 +111,6 @@ Other stream endings record the response and finish the turn in one commit:
 
 Storage determined two of these sequences:
 
-- Storage completes a turn only after a `completed/stop` response
-  (`completion_without_stop`). RFC-001 7.2 says a refusal completes with code
-  `refusal`, so the core records the refusal response and fails the turn.
 - Tools are unavailable in Milestone 2. Each pending call gets a `ToolResult`
   with status `denied`, no invocation, `runtime` provenance and the text
   `tools_unavailable: …`. Storage has no result code field, so the code leads the

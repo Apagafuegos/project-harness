@@ -3,8 +3,7 @@
 Status: Storage details accepted and implemented under
 [decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 behavioral tests.
 The pure runtime core is implemented under
-[decision 0004](../decisions/0004-pure-runtime-core.md), which records where
-storage shaped section 7.2 (refusal fails its turn). Other subsystem details
+[decision 0004](../decisions/0004-pure-runtime-core.md), which records the runtime turn commits. Other subsystem details
 remain proposed; no complete agent runtime is implemented.
 
 Date: 2026-10-16
@@ -749,8 +748,8 @@ The normal path is:
 3. `Inferring -> Processing`: persist the assembled response and its outcome.
    On successful `tool_calls`, enqueue proposals in block order. On a complete
    answer/refusal/output limit, finish with a corresponding visible reason.
-   A normal stop is `completed`; refusal is `completed` with code `refusal`;
-   output limit is `interrupted` with code `output_limit`. Provider failure is
+   A normal stop or refusal is `completed` (no failure code);
+   output limit is `failed` with code `output_limit`. Provider failure is
    `failed`, and cancelled inference is `cancelled`; none execute proposals.
 4. `Processing -> Authorizing`: resolve, validate, and authorize the next call.
    Invalid calls commit a result and move to the next call without an executor.
