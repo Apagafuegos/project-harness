@@ -21,6 +21,11 @@ are implemented. Persisting their types/events does not execute those systems.
 - Snapshots use persistent collections with Arc-shared immutable values. Staging
   a commit and retaining old snapshots share unchanged history, adding O(log n)
   collection memory per update instead of copying the full state.
+- Validation keeps derived per-entry branch facts (pending calls, selected model)
+  and live tool-state indexes (unresolved invocations, invocations by call,
+  unused approvals and decisions), rebuilt on replay, so a commit costs O(log n)
+  regardless of history. Compaction validation and `ancestry()` remain linear in
+  branch length.
 - Journal validation requires each call's execution intent and result to follow
   the previous call's result. Parallel tool scheduling will require a validation
   change as well as a scheduler change.

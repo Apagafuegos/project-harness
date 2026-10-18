@@ -1,4 +1,4 @@
-use super::{codec, io::Point, *};
+use super::{codec, io::Point, state, *};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -172,25 +172,184 @@ fn finished_turn(snapshot: &SessionSnapshot, text: &str) -> Commit {
     commit
 }
 
-#[test]
-#[ignore = "opt-in storage scaling benchmark; performs 10,000 durable commits"]
-fn session_storage_scaling_benchmark() {
-    let (_temp, root, mut store) = fresh();
-    let id = store.snapshot().session_id().clone();
-    let text = "x".repeat(4096);
-    let started = std::time::Instant::now();
-    for _ in 0..10_000 {
-        store
-            .append(finished_turn(&store.snapshot(), &text), at())
-            .unwrap();
+fn transition(snapshot: &SessionSnapshot, from: RuntimeState, to: RuntimeState) -> Commit {
+    audit(
+        snapshot,
+        vec![JournalEvent::StateChanged(StateChanged {
+            turn_id: snapshot.active_turn().unwrap().clone(),
+            from,
+            to,
+        })],
+    )
+}
+
+/// Benchmark workloads, each appended as a single chain from the root.
+#[derive(Clone, Copy, Debug)]
+enum Workload {
+    /// One user entry plus a failed turn per commit, with 4 KiB of text.
+    PlainTurns,
+    /// Complete authorized tool exchanges spread over twelve commits per turn.
+    ToolTurns,
+}
+
+/// Identifiers carried between the separate commits of benchmark tool turns.
+struct ToolTurns {
+    plan: ArtifactRef,
+    step: usize,
+    call: Option<CallRef>,
+    invocation: Option<InvocationId>,
+}
+impl ToolTurns {
+    fn next(&mut self, snapshot: &SessionSnapshot) -> Commit {
+        use RuntimeState::*;
+        let step = self.step;
+        self.step = (step + 1) % 12;
+        match step {
+            0 => start_turn(snapshot, "use one tool"),
+            1 | 9 => transition(snapshot, Preparing, Inferring),
+            2 => {
+                let call_id = CallId::new();
+                let commit = response_commit(
+                    snapshot,
+                    vec![ContentBlock::ToolCall {
+                        call_id: call_id.clone(),
+                        name: "read".into(),
+                        arguments: serde_json::Map::new(),
+                        provider_call_id: None,
+                    }],
+                    FinishReason::ToolCalls,
+                );
+                self.call = Some(CallRef {
+                    response_entry_id: commit.entries[0].id.clone(),
+                    call_id,
+                });
+                commit
+            }
+            3 => transition(snapshot, Processing, Authorizing),
+            4 => {
+                let turn_id = snapshot.active_turn().unwrap().clone();
+                let call = self.call.clone().unwrap();
+                let decision_id = DecisionId::new();
+                let invocation_id = InvocationId::new();
+                self.invocation = Some(invocation_id.clone());
+                audit(
+                    snapshot,
+                    vec![
+                        JournalEvent::AuthorizationDecided(AuthorizationDecided {
+                            turn_id: turn_id.clone(),
+                            decision_id: decision_id.clone(),
+                            call: call.clone(),
+                            approval_id: None,
+                            plan_digest: self.plan.sha256.clone(),
+                            plan: self.plan.clone(),
+                            policy_revision: snapshot.policy_revision().into(),
+                            decision: Decision::Allow,
+                            reason: "benchmark read".into(),
+                        }),
+                        JournalEvent::ExecutionIntent(ExecutionIntent {
+                            turn_id,
+                            invocation_id,
+                            call,
+                            decision_id,
+                            plan_digest: self.plan.sha256.clone(),
+                            backend: ExecutionBackend::TrustedFs,
+                            timeout_ms: 30_000,
+                        }),
+                    ],
+                )
+            }
+            5 => transition(snapshot, Authorizing, Executing),
+            6 => self.tool_result_commit(snapshot),
+            7 => transition(snapshot, Executing, Continuing),
+            8 => transition(snapshot, Continuing, Preparing),
+            10 => response_commit(
+                snapshot,
+                vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+                FinishReason::Stop,
+            ),
+            _ => audit(
+                snapshot,
+                vec![JournalEvent::TurnFinished(TurnFinished {
+                    turn_id: snapshot.active_turn().unwrap().clone(),
+                    outcome: TurnOutcome::Completed,
+                    code: None,
+                })],
+            ),
+        }
     }
-    let append = started.elapsed();
-    drop(store);
-    let started = std::time::Instant::now();
-    let reopened = JournalStore::open(root, &id).unwrap();
-    let reopen = started.elapsed();
-    assert_eq!(reopened.snapshot().sequence(), 10_000);
-    eprintln!("10,000 commits, 4 KiB text each: append={append:?}, reopen={reopen:?}");
+}
+
+impl ToolTurns {
+    /// The executor's successful result for the current call.
+    fn tool_result_commit(&self, snapshot: &SessionSnapshot) -> Commit {
+        tool_result(
+            snapshot,
+            self.call.clone().unwrap(),
+            self.invocation.clone(),
+            ToolStatus::Succeeded,
+            Provenance::Executor,
+        )
+    }
+}
+
+/// Append `commits` commits of a workload, returning each append's duration.
+fn append_workload(
+    root: &DataRoot,
+    store: &mut JournalStore,
+    workload: Workload,
+    commits: usize,
+) -> Vec<std::time::Duration> {
+    let text = "x".repeat(4096);
+    let mut tools = ToolTurns {
+        plan: root.put_artifact(br#"{"plan":"read"}"#).unwrap(),
+        step: 0,
+        call: None,
+        invocation: None,
+    };
+    (0..commits)
+        .map(|_| {
+            let snapshot = store.snapshot();
+            let commit = match workload {
+                Workload::PlainTurns => finished_turn(&snapshot, &text),
+                Workload::ToolTurns => tools.next(&snapshot),
+            };
+            let started = std::time::Instant::now();
+            store.append(commit, at()).unwrap();
+            started.elapsed()
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "opt-in storage scaling benchmark; performs 36,000 durable commits"]
+fn session_storage_scaling_benchmark() {
+    let mean_ms = |durations: &[std::time::Duration]| {
+        durations.iter().sum::<std::time::Duration>().as_secs_f64() * 1e3 / durations.len() as f64
+    };
+    state::without_oracle(|| {
+        for workload in [Workload::PlainTurns, Workload::ToolTurns] {
+            for commits in [1_000, 2_000, 5_000, 10_000] {
+                let (_temp, root, mut store) = fresh();
+                let id = store.snapshot().session_id().clone();
+                let appends = append_workload(&root, &mut store, workload, commits);
+                drop(store);
+                let started = std::time::Instant::now();
+                let reopened = JournalStore::open(root, &id).unwrap();
+                let reopen = started.elapsed();
+                assert_eq!(reopened.snapshot().sequence(), commits as u64);
+                eprintln!(
+                    "{workload:?} N={commits}: append {:.3} ms/commit, last 10% {:.3} ms/commit; \
+                     reopen {:.3} s, {:.3} ms/record",
+                    mean_ms(&appends),
+                    mean_ms(&appends[commits - commits / 10..]),
+                    reopen.as_secs_f64(),
+                    reopen.as_secs_f64() * 1e3 / commits as f64,
+                );
+            }
+        }
+    });
 }
 
 fn assert_shared_entries(before: &SessionSnapshot, after: &SessionSnapshot) {
@@ -1158,61 +1317,63 @@ fn recovery_blocks_navigation_and_never_reexecutes_uncertain_intents() {
     assert!(store.snapshot().unresolved_invocations().is_empty());
 }
 
+fn response_commit(
+    snapshot: &SessionSnapshot,
+    content: Vec<ContentBlock>,
+    finish: FinishReason,
+) -> Commit {
+    let turn = snapshot.active_turn().unwrap().clone();
+    let entry_id = EntryId::new();
+    Commit {
+        command_id: None,
+        command_fingerprint: None,
+        head: HeadChange {
+            from: snapshot.head().cloned(),
+            to: Some(entry_id.clone()),
+            reason: HeadReason::Advance,
+        },
+        entries: vec![Entry {
+            id: entry_id,
+            parent_id: snapshot.head().cloned(),
+            turn_id: Some(turn.clone()),
+            payload: EntryPayload::AssistantResponse(AssistantResponse {
+                response_id: ResponseId::new(),
+                model: snapshot.header().initial_model.clone(),
+                outcome: ResponseOutcome::Completed,
+                finish_reason: Some(finish),
+                content,
+                usage: None,
+                continuation: None,
+                error: None,
+            }),
+        }],
+        events: vec![JournalEvent::StateChanged(StateChanged {
+            turn_id: turn,
+            from: RuntimeState::Inferring,
+            to: RuntimeState::Processing,
+        })],
+    }
+}
 fn response(store: &mut JournalStore, content: Vec<ContentBlock>, finish: FinishReason) -> EntryId {
     let snapshot = store.snapshot();
-    let turn = snapshot.active_turn().unwrap().clone();
     store
         .append(
-            audit(
-                &snapshot,
-                vec![JournalEvent::StateChanged(StateChanged {
-                    turn_id: turn.clone(),
-                    from: RuntimeState::Preparing,
-                    to: RuntimeState::Inferring,
-                })],
-            ),
+            transition(&snapshot, RuntimeState::Preparing, RuntimeState::Inferring),
             at(),
         )
         .unwrap();
-    let snapshot = store.snapshot();
-    let entry_id = EntryId::new();
-    store
-        .append(
-            Commit {
-                command_id: None,
-                command_fingerprint: None,
-                head: HeadChange {
-                    from: snapshot.head().cloned(),
-                    to: Some(entry_id.clone()),
-                    reason: HeadReason::Advance,
-                },
-                entries: vec![Entry {
-                    id: entry_id.clone(),
-                    parent_id: snapshot.head().cloned(),
-                    turn_id: Some(turn.clone()),
-                    payload: EntryPayload::AssistantResponse(AssistantResponse {
-                        response_id: ResponseId::new(),
-                        model: snapshot.header().initial_model.clone(),
-                        outcome: ResponseOutcome::Completed,
-                        finish_reason: Some(finish),
-                        content,
-                        usage: None,
-                        continuation: None,
-                        error: None,
-                    }),
-                }],
-                events: vec![JournalEvent::StateChanged(StateChanged {
-                    turn_id: turn,
-                    from: RuntimeState::Inferring,
-                    to: RuntimeState::Processing,
-                })],
-            },
-            at(),
-        )
-        .unwrap();
+    let commit = response_commit(&store.snapshot(), content, finish);
+    let entry_id = commit.entries[0].id.clone();
+    store.append(commit, at()).unwrap();
     entry_id
 }
-fn runtime_result(snapshot: &SessionSnapshot, call: CallRef) -> Commit {
+fn tool_result(
+    snapshot: &SessionSnapshot,
+    call: CallRef,
+    invocation_id: Option<InvocationId>,
+    status: ToolStatus,
+    provenance: Provenance,
+) -> Commit {
     let id = EntryId::new();
     Commit {
         command_id: None,
@@ -1229,14 +1390,14 @@ fn runtime_result(snapshot: &SessionSnapshot, call: CallRef) -> Commit {
             payload: EntryPayload::ToolResult(ToolResultEntry {
                 result: ToolResult {
                     call,
-                    invocation_id: None,
-                    status: ToolStatus::InvalidArguments,
+                    invocation_id,
+                    status,
                     content: vec![],
                     metadata: ToolMetadata {
                         exit_code: None,
                         duration_ms: None,
                         output_truncated: false,
-                        provenance: Provenance::Runtime,
+                        provenance,
                         artifacts: vec![],
                     },
                 },
@@ -1244,6 +1405,15 @@ fn runtime_result(snapshot: &SessionSnapshot, call: CallRef) -> Commit {
         }],
         events: vec![],
     }
+}
+fn runtime_result(snapshot: &SessionSnapshot, call: CallRef) -> Commit {
+    tool_result(
+        snapshot,
+        call,
+        None,
+        ToolStatus::InvalidArguments,
+        Provenance::Runtime,
+    )
 }
 
 #[test]
@@ -1766,4 +1936,451 @@ fn failed_turns_do_not_displace_the_two_recent_completed_turns_in_compaction() {
         store.append(commit, at()),
         Err(StoreError::Invalid("compaction_unfinished_or_recent_turn"))
     ));
+}
+
+fn tool_call(call_id: &CallId) -> ContentBlock {
+    ContentBlock::ToolCall {
+        call_id: call_id.clone(),
+        name: "read".into(),
+        arguments: serde_json::Map::new(),
+        provider_call_id: None,
+    }
+}
+fn finish(snapshot: &SessionSnapshot, outcome: TurnOutcome) -> Commit {
+    audit(
+        snapshot,
+        vec![JournalEvent::TurnFinished(TurnFinished {
+            turn_id: snapshot.active_turn().unwrap().clone(),
+            outcome,
+            code: None,
+        })],
+    )
+}
+
+/// Append every commit of a fixture to a new live store, with the fixture's
+/// header and timestamps, as if it were being written for the first time.
+/// New records have new checksums, so compaction manifests are rebuilt.
+fn append_fixture(name: &str) -> (tempfile::TempDir, Arc<DataRoot>, JournalStore) {
+    let (temp, root) = environment();
+    load_artifacts(&root);
+    let mut store = None;
+    for record in records(&source(name)) {
+        let at: Timestamp = serde_json::from_value(record["at"].clone()).unwrap();
+        match serde_json::from_value(record["payload"].clone()).unwrap() {
+            RecordPayload::SessionCreated(header) => {
+                store =
+                    Some(JournalStore::create(root.clone(), SessionId::new(), header, at).unwrap());
+            }
+            RecordPayload::Commit(mut commit) => {
+                let store = store.as_mut().unwrap();
+                let snapshot = store.snapshot();
+                for entry in &mut commit.entries {
+                    if let EntryPayload::Compaction(compaction) = &mut entry.payload {
+                        let references = |ids: &[EntryId]| -> Vec<Value> {
+                            ids.iter()
+                                .map(|id| {
+                                    let stored = snapshot.entry(id).unwrap();
+                                    json!({
+                                        "entry_id": id,
+                                        "record_checksum": stored.record_checksum,
+                                        "entry_index": stored.entry_index,
+                                    })
+                                })
+                                .collect()
+                        };
+                        let manifest = json!({
+                            "covered": references(&compaction.covered_entry_ids),
+                            "supersedes": references(&compaction.supersedes),
+                            "configuration_fingerprint": compaction.configuration_fingerprint,
+                        });
+                        compaction.source_manifest = root
+                            .put_artifact(&serde_json::to_vec(&manifest).unwrap())
+                            .unwrap();
+                        compaction.source_fingerprint = compaction.source_manifest.sha256.clone();
+                    }
+                }
+                store.append(commit, at).unwrap();
+            }
+        }
+    }
+    (temp, root, store.unwrap())
+}
+
+#[test]
+fn reopened_branch_facts_and_indexes_equal_the_live_snapshot() {
+    let mut cases = vec![];
+    for name in ["branching", "compaction", "interrupted-execution"] {
+        cases.push((name.to_owned(), append_fixture(name)));
+    }
+    for workload in [Workload::PlainTurns, Workload::ToolTurns] {
+        for commits in [1, 6, 7, 50] {
+            let (temp, root, mut store) = fresh();
+            append_workload(&root, &mut store, workload, commits);
+            cases.push((format!("{workload:?} N={commits}"), (temp, root, store)));
+        }
+    }
+    for (name, (_temp, root, store)) in cases {
+        let live = store.snapshot();
+        drop(store);
+        let reopened = JournalStore::open(root, live.session_id())
+            .unwrap()
+            .snapshot();
+        assert_eq!(reopened.sequence(), live.sequence(), "{name}");
+        assert_eq!(reopened.0.derived(), live.0.derived(), "{name}");
+        assert_eq!(
+            reopened.entries().len(),
+            live.0.derived().branch.len(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn branch_facts_follow_the_queried_branch_across_navigation() {
+    let (_temp, _root, mut store) = fresh();
+    let initial = store.snapshot().header().initial_model.clone();
+    let other = ModelRef {
+        provider_instance: "another".into(),
+        model: "other-model".into(),
+    };
+    // Branch one: a model change, then an exchange with two calls.
+    let change_id = EntryId::new();
+    store
+        .append(
+            Commit {
+                head: HeadChange {
+                    from: None,
+                    to: Some(change_id.clone()),
+                    reason: HeadReason::Advance,
+                },
+                entries: vec![Entry {
+                    id: change_id.clone(),
+                    parent_id: None,
+                    turn_id: None,
+                    payload: EntryPayload::ModelChanged(ModelChanged {
+                        model: other.clone(),
+                        portability: Portability::Reject,
+                    }),
+                }],
+                ..audit(&store.snapshot(), vec![])
+            },
+            at(),
+        )
+        .unwrap();
+    store
+        .append(start_turn(&store.snapshot(), "branch one"), at())
+        .unwrap();
+    store
+        .append(
+            transition(
+                &store.snapshot(),
+                RuntimeState::Preparing,
+                RuntimeState::Inferring,
+            ),
+            at(),
+        )
+        .unwrap();
+    let (first, second) = (CallId::new(), CallId::new());
+    let mut commit = response_commit(
+        &store.snapshot(),
+        vec![tool_call(&first), tool_call(&second)],
+        FinishReason::ToolCalls,
+    );
+    let EntryPayload::AssistantResponse(payload) = &mut commit.entries[0].payload else {
+        unreachable!()
+    };
+    payload.model = other.clone();
+    let one = commit.entries[0].id.clone();
+    store.append(commit, at()).unwrap();
+    let call = |response: &EntryId, call_id: &CallId| CallRef {
+        response_entry_id: response.clone(),
+        call_id: call_id.clone(),
+    };
+    let commit = runtime_result(&store.snapshot(), call(&one, &first));
+    let one_result = commit.entries[0].id.clone();
+    store.append(commit, at()).unwrap();
+    store
+        .append(runtime_result(&store.snapshot(), call(&one, &second)), at())
+        .unwrap();
+    fail_turn(&mut store);
+    let one_end = store.snapshot().head().cloned();
+
+    // Branch two from the root: no model change, one call left open.
+    store
+        .append(navigate(&store.snapshot(), None), at())
+        .unwrap();
+    store
+        .append(start_turn(&store.snapshot(), "branch two"), at())
+        .unwrap();
+    let third = CallId::new();
+    let two = response(&mut store, vec![tool_call(&third)], FinishReason::ToolCalls);
+
+    // The head is inside branch two's exchange; queries on branch one's
+    // entries still describe branch one.
+    let snapshot = store.snapshot();
+    let state = &snapshot.0;
+    assert_eq!(snapshot.head(), Some(&two));
+    assert_eq!(state.pending(Some(&two)).unwrap(), [call(&two, &third)]);
+    assert_eq!(snapshot.model_at(Some(&two)).unwrap(), &initial);
+    assert_eq!(
+        state.pending(Some(&one)).unwrap(),
+        [call(&one, &first), call(&one, &second)]
+    );
+    assert_eq!(
+        state.pending(Some(&one_result)).unwrap(),
+        [call(&one, &second)]
+    );
+    assert!(state.pending(one_end.as_ref()).unwrap().is_empty());
+    for id in [&change_id, &one, &one_result] {
+        assert_eq!(snapshot.model_at(Some(id)).unwrap(), &other);
+    }
+    assert_eq!(snapshot.model_at(None).unwrap(), &initial);
+    assert!(state.pending(None).unwrap().is_empty());
+    assert!(matches!(
+        snapshot.model_at(Some(&EntryId::new())),
+        Err(StoreError::Invalid("unknown_head_or_parent"))
+    ));
+    // Branch two's open call is next; branch one's calls are not.
+    assert!(matches!(
+        store.append(runtime_result(&snapshot, call(&one, &first)), at()),
+        Err(StoreError::Invalid(_))
+    ));
+    store
+        .append(runtime_result(&snapshot, call(&two, &third)), at())
+        .unwrap();
+    fail_turn(&mut store);
+
+    // Navigating back selects branch one's model and an empty exchange.
+    store
+        .append(navigate(&store.snapshot(), one_end.clone()), at())
+        .unwrap();
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.model_at(snapshot.head()).unwrap(), &other);
+    assert!(snapshot.0.pending(snapshot.head()).unwrap().is_empty());
+
+    // Heads inside either exchange remain unselectable.
+    for head in [&one, &one_result] {
+        assert!(matches!(
+            store.append(navigate(&store.snapshot(), Some(head.clone())), at()),
+            Err(StoreError::Invalid("head_inside_tool_exchange"))
+        ));
+    }
+}
+
+#[test]
+fn rejected_commits_publish_no_branch_facts_or_index_entries() {
+    let (_temp, root, mut store) = fresh();
+    let mut tools = ToolTurns {
+        plan: root.put_artifact(br#"{"plan":"read"}"#).unwrap(),
+        step: 0,
+        call: None,
+        invocation: None,
+    };
+    for _ in 0..6 {
+        let commit = tools.next(&store.snapshot());
+        store.append(commit, at()).unwrap();
+    }
+    let before = store.snapshot();
+    let call = tools.call.clone().unwrap();
+    let invocation = tools.invocation.clone().unwrap();
+    assert!(before.0.derived().unresolved.contains(&invocation));
+
+    // The first entry's facts are staged before the second breaks the
+    // result order, so the whole commit must be dropped.
+    let mut commit = tools.next(&before);
+    let first = commit.entries[0].clone();
+    let mut duplicate = first.clone();
+    duplicate.id = EntryId::new();
+    duplicate.parent_id = Some(first.id.clone());
+    commit.entries.push(duplicate.clone());
+    commit.head.to = Some(duplicate.id.clone());
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("orphan_duplicate_or_reordered_result"))
+    ));
+    // A valid result whose commit fails on a later event leaves the
+    // invocation unresolved.
+    let mut commit = tools.tool_result_commit(&before);
+    commit.events.push(
+        transition(&before, RuntimeState::Executing, RuntimeState::Idle)
+            .events
+            .remove(0),
+    );
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("illegal_state_transition"))
+    ));
+    let after = store.snapshot();
+    assert!(Arc::ptr_eq(&before.0, &after.0));
+    assert!(!after.0.derived().branch.contains_key(&first.id));
+    assert!(!after.0.derived().branch.contains_key(&duplicate.id));
+    assert!(after.0.derived().unresolved.contains(&invocation));
+    assert_eq!(after.0.derived(), before.0.derived());
+    assert_eq!(after.0.pending(after.head()).unwrap(), [call]);
+    assert!(!store.is_poisoned());
+}
+
+#[test]
+fn recovery_keeps_invocations_unresolved_until_explicitly_resolved() {
+    let (_temp, root, id) = fixture("interrupted-execution");
+    let mut store = JournalStore::open(root, &id).unwrap();
+    let invocation = store.snapshot().unresolved_invocations()[0].intent.clone();
+    let unresolved = |store: &JournalStore| {
+        store
+            .snapshot()
+            .0
+            .derived()
+            .unresolved
+            .contains(&invocation.invocation_id)
+    };
+    assert!(unresolved(&store));
+    assert!(matches!(
+        store.append(start_turn(&store.snapshot(), "blocked"), at()),
+        Err(StoreError::Invalid("recovery_required"))
+    ));
+    store
+        .append(
+            audit(
+                &store.snapshot(),
+                vec![
+                    JournalEvent::ExecutionUncertain(ExecutionUncertain {
+                        turn_id: invocation.turn_id.clone(),
+                        invocation_id: invocation.invocation_id.clone(),
+                        reason: "process restarted".into(),
+                    }),
+                    JournalEvent::TurnFinished(TurnFinished {
+                        turn_id: invocation.turn_id.clone(),
+                        outcome: TurnOutcome::Interrupted,
+                        code: Some("restart".into()),
+                    }),
+                ],
+            ),
+            at(),
+        )
+        .unwrap();
+    assert!(unresolved(&store));
+    assert!(store.snapshot().requires_recovery());
+    let snapshot = store.snapshot();
+    let mut commit = tool_result(
+        &snapshot,
+        invocation.call.clone(),
+        Some(invocation.invocation_id.clone()),
+        ToolStatus::Uncertain,
+        Provenance::UserAcknowledgedUnknown,
+    );
+    commit.entries[0].turn_id = Some(invocation.turn_id.clone());
+    commit
+        .events
+        .push(JournalEvent::RecoveryResolved(RecoveryResolved {
+            turn_id: invocation.turn_id.clone(),
+            invocation_id: invocation.invocation_id.clone(),
+            result_entry_id: commit.entries[0].id.clone(),
+            resolution: Resolution::AcknowledgedUnknown,
+            note: "outcome remains unknown".into(),
+        }));
+    let mut without_event = commit.clone();
+    without_event.events.clear();
+    assert!(matches!(
+        store.append(without_event, at()),
+        Err(StoreError::Invalid("recovery_result_without_resolution"))
+    ));
+    assert!(unresolved(&store));
+    store.append(commit, at()).unwrap();
+    assert!(!unresolved(&store));
+    assert!(store.snapshot().0.derived().unresolved.is_empty());
+    assert_eq!(store.snapshot().state(), RuntimeState::Idle);
+    store
+        .append(start_turn(&store.snapshot(), "recovered"), at())
+        .unwrap();
+}
+
+#[test]
+fn turn_end_drains_unused_approvals_and_decisions() {
+    let (_temp, root, mut store) = fresh();
+    let plan = root.put_artifact(br#"{"plan":"read"}"#).unwrap();
+    store
+        .append(start_turn(&store.snapshot(), "two calls"), at())
+        .unwrap();
+    let (first, second) = (CallId::new(), CallId::new());
+    let response_id = response(
+        &mut store,
+        vec![tool_call(&first), tool_call(&second)],
+        FinishReason::ToolCalls,
+    );
+    let call = |call_id: &CallId| CallRef {
+        response_entry_id: response_id.clone(),
+        call_id: call_id.clone(),
+    };
+    store
+        .append(
+            transition(
+                &store.snapshot(),
+                RuntimeState::Processing,
+                RuntimeState::Authorizing,
+            ),
+            at(),
+        )
+        .unwrap();
+    let turn_id = store.snapshot().active_turn().unwrap().clone();
+    // The first call's approval is requested but never decided.
+    store
+        .append(
+            audit(
+                &store.snapshot(),
+                vec![JournalEvent::ApprovalRequested(ApprovalRequested {
+                    turn_id: turn_id.clone(),
+                    approval_id: ApprovalId::new(),
+                    call: call(&first),
+                    plan_digest: plan.sha256.clone(),
+                    plan: plan.clone(),
+                    policy_revision: "initial".into(),
+                    expires_at: "2026-10-17T13:00:00Z".parse().unwrap(),
+                })],
+            ),
+            at(),
+        )
+        .unwrap();
+    assert_eq!(store.snapshot().0.derived().unused_approvals.len(), 1);
+    let mut cancelled = runtime_result(&store.snapshot(), call(&first));
+    let EntryPayload::ToolResult(result) = &mut cancelled.entries[0].payload else {
+        unreachable!()
+    };
+    result.result.status = ToolStatus::Cancelled;
+    store.append(cancelled, at()).unwrap();
+    // The second call is denied, so its decision is never used by an intent.
+    store
+        .append(
+            audit(
+                &store.snapshot(),
+                vec![JournalEvent::AuthorizationDecided(AuthorizationDecided {
+                    turn_id,
+                    decision_id: DecisionId::new(),
+                    call: call(&second),
+                    approval_id: None,
+                    plan_digest: plan.sha256.clone(),
+                    plan,
+                    policy_revision: "initial".into(),
+                    decision: Decision::Deny,
+                    reason: "not allowed".into(),
+                })],
+            ),
+            at(),
+        )
+        .unwrap();
+    let mut denied = runtime_result(&store.snapshot(), call(&second));
+    let EntryPayload::ToolResult(result) = &mut denied.entries[0].payload else {
+        unreachable!()
+    };
+    result.result.status = ToolStatus::Denied;
+    store.append(denied, at()).unwrap();
+    let derived = store.snapshot().0.derived();
+    assert_eq!(derived.unused_approvals.len(), 1);
+    assert_eq!(derived.unused_decisions.len(), 1);
+    store
+        .append(finish(&store.snapshot(), TurnOutcome::Failed), at())
+        .unwrap();
+    let derived = store.snapshot().0.derived();
+    assert!(derived.unused_approvals.is_empty());
+    assert!(derived.unused_decisions.is_empty());
+    assert_eq!(store.snapshot().state(), RuntimeState::Idle);
 }

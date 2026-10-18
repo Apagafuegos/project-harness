@@ -141,7 +141,10 @@ selection, portability previews and context budgets are not implemented.
 Physical records, including LF, are limited to 8 MiB with bounded reading and
 serialization. Snapshot indexes reside in memory; transaction validation stages
 a cloned state. Replay currently clones indexes per commit and rechecks referenced
-artifacts. This favors a clear first implementation over large-history performance.
+artifacts. Validation derives per-entry branch facts and live tool-state indexes,
+rebuilt by replay and never persisted, so validating one appended or replayed commit
+costs O(log n) in history length; compaction validation and `ancestry()` remain
+linear in branch length.
 Artifacts can be streamed; `read_artifact` requires a caller-supplied allocation
 limit. Opaque provider bytes must stay out of logs and ordinary prompt text.
 

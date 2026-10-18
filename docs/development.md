@@ -47,6 +47,29 @@ cargo test -p harness-core --locked
 cargo doc --workspace --no-deps --locked --open
 ```
 
+## Scaling benchmark
+
+An opt-in, ignored test measures storage cost against history length. It runs
+two single-chain workloads at 1,000, 2,000, 5,000 and 10,000 commits: plain
+turns (one 4 KiB user entry and a failed turn per commit) and tool turns (a
+complete authorized tool exchange spread over twelve commits per turn). Each run
+prints the mean append time per commit, for the whole run and its last 10%, and
+the reopen time in total and per record. Use a release build:
+
+```sh
+TMPDIR=/dev/shm cargo test --release -p harness-core --locked \
+  session_storage_scaling_benchmark -- --ignored --nocapture
+```
+
+`TMPDIR=/dev/shm` keeps journals on tmpfs, so the figures exclude storage sync
+latency; run once without it to see the on-disk cost. It performs 36,000 durable
+commits and takes a few minutes.
+
+Test builds run an equivalence oracle after every applied record. It compares
+the cached branch facts and tool-state indexes with the scanning definitions
+they replace, which makes each commit linear in history. The benchmark switches
+it off for its own thread with `state::without_oracle`; every other test keeps it on.
+
 ## Dependency and toolchain changes
 
 The workspace uses Rust 2024 and Cargo resolver 3. Shared package metadata,

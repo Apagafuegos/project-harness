@@ -136,8 +136,9 @@ impl SessionSnapshot {
     /// All intents lacking a committed result, across every branch.
     pub fn unresolved_invocations(&self) -> Vec<UnresolvedInvocation> {
         self.0
-            .invocations
-            .values()
+            .unresolved
+            .iter()
+            .map(|id| &self.0.invocations[id])
             .filter(|v| v.result.is_none())
             .map(|v| UnresolvedInvocation {
                 intent: v.intent.clone(),
@@ -160,6 +161,26 @@ pub(crate) struct Invocation {
     uncertain: bool,
     result: Option<EntryId>,
     recovery_resolved: bool,
+}
+impl Invocation {
+    /// Lacks a result, or is uncertain without an explicit recovery resolution.
+    fn unresolved(&self) -> bool {
+        self.result.is_none() || (self.uncertain && !self.recovery_resolved)
+    }
+}
+/// Facts that depend only on an entry's ancestry. Entries are immutable, so
+/// these are computed once from the parent's facts when the entry is inserted.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BranchFacts {
+    /// Calls still awaiting results after this entry, in required order.
+    pending: Arc<[CallRef]>,
+    /// Model in effect at this entry.
+    model: ModelRef,
+}
+/// Internal ordered key for a call; the public `CallRef` is not `Ord`.
+type CallKey = (EntryId, CallId);
+fn key(call: &CallRef) -> CallKey {
+    (call.response_entry_id.clone(), call.call_id.clone())
 }
 #[derive(Clone, Debug)]
 struct Approval {
@@ -191,6 +212,21 @@ pub(crate) struct State {
     approvals: OrdMap<ApprovalId, Approval>,
     decisions: OrdMap<DecisionId, Authorization>,
     inference_response: Option<EntryId>,
+    // Derived state below is staged with the records it indexes and rebuilt by
+    // replay, never persisted. It keeps a commit's validation cost independent
+    // of history length.
+    /// Branch facts of every entry in `entries`.
+    pub(crate) branch: OrdMap<EntryId, Arc<BranchFacts>>,
+    /// Branch facts at the null root.
+    root: Arc<BranchFacts>,
+    /// Invocations for which `Invocation::unresolved` holds.
+    unresolved: OrdSet<InvocationId>,
+    /// The only invocation of each call that has one.
+    invocation_by_call: OrdMap<CallKey, InvocationId>,
+    /// The only unused approval of each call that has one.
+    unused_approvals: OrdMap<CallKey, ApprovalId>,
+    /// Decisions not yet used by an intent or the end of their turn.
+    unused_decisions: OrdSet<DecisionId>,
 }
 
 fn require(condition: bool, code: &'static str) -> Result<()> {
@@ -228,6 +264,15 @@ impl State {
             approvals: OrdMap::new(),
             decisions: OrdMap::new(),
             inference_response: None,
+            branch: OrdMap::new(),
+            root: Arc::new(BranchFacts {
+                pending: Arc::from([]),
+                model: header.initial_model.clone(),
+            }),
+            unresolved: OrdSet::new(),
+            invocation_by_call: OrdMap::new(),
+            unused_approvals: OrdMap::new(),
+            unused_decisions: OrdSet::new(),
         };
         state.unique(record.session_id.as_str())?;
         state.unique(record.record_id.as_str())?;
@@ -237,9 +282,16 @@ impl State {
         require(self.ids.insert(id.to_owned()).is_none(), "duplicate_id")
     }
     fn has_unresolved(&self) -> bool {
-        self.invocations
-            .values()
-            .any(|v| v.result.is_none() || (v.uncertain && !v.recovery_resolved))
+        !self.unresolved.is_empty()
+    }
+    /// Recompute one invocation's membership of `unresolved` from its record.
+    /// Call after every change to that record.
+    fn track(&mut self, id: &InvocationId) {
+        if self.invocations.get(id).is_some_and(Invocation::unresolved) {
+            self.unresolved.insert(id.clone());
+        } else {
+            self.unresolved.remove(id);
+        }
     }
     fn idle(&self) -> Result<()> {
         require(
@@ -266,48 +318,20 @@ impl State {
         entries.reverse();
         Ok(entries)
     }
-    fn model_at(&self, head: Option<&EntryId>) -> Result<&ModelRef> {
-        for stored in self.ancestry(head)?.into_iter().rev() {
-            if let EntryPayload::ModelChanged(change) = &stored.entry.payload {
-                return Ok(&change.model);
-            }
+    fn facts(&self, head: Option<&EntryId>) -> Result<&Arc<BranchFacts>> {
+        match head {
+            None => Ok(&self.root),
+            Some(id) => self
+                .branch
+                .get(id)
+                .ok_or(StoreError::Invalid("unknown_head_or_parent")),
         }
-        Ok(&self.header.initial_model)
     }
-    fn pending(&self, head: Option<&EntryId>) -> Result<Vec<CallRef>> {
-        let mut pending = Vec::new();
-        for stored in self.ancestry(head)? {
-            match &stored.entry.payload {
-                EntryPayload::AssistantResponse(response) => {
-                    require(pending.is_empty(), "inference_inside_tool_exchange")?;
-                    if response.outcome == ResponseOutcome::Completed
-                        && response.finish_reason == Some(FinishReason::ToolCalls)
-                    {
-                        for block in &response.content {
-                            if let ContentBlock::ToolCall { call_id, .. } = block {
-                                pending.push(CallRef {
-                                    response_entry_id: stored.entry.id.clone(),
-                                    call_id: call_id.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-                EntryPayload::ToolResult(result) => {
-                    require(
-                        pending.first() == Some(&result.result.call),
-                        "orphan_duplicate_or_reordered_result",
-                    )?;
-                    pending.remove(0);
-                }
-                EntryPayload::UserMessage(_)
-                | EntryPayload::ModelChanged(_)
-                | EntryPayload::Compaction(_) => {
-                    require(pending.is_empty(), "head_inside_tool_exchange")?;
-                }
-            }
-        }
-        Ok(pending)
+    fn model_at(&self, head: Option<&EntryId>) -> Result<&ModelRef> {
+        Ok(&self.facts(head)?.model)
+    }
+    pub(crate) fn pending(&self, head: Option<&EntryId>) -> Result<&[CallRef]> {
+        Ok(&self.facts(head)?.pending)
     }
     fn call(&self, call: &CallRef, sequence: u64, turn: &TurnId) -> Result<()> {
         let response = self
@@ -338,6 +362,14 @@ impl State {
     }
 
     pub fn apply(&mut self, record: &Record, checksum: Digest) -> Result<()> {
+        self.apply_record(record, checksum)?;
+        #[cfg(test)]
+        if ORACLE.get() {
+            self.check_derived(record);
+        }
+        Ok(())
+    }
+    fn apply_record(&mut self, record: &Record, checksum: Digest) -> Result<()> {
         require(
             record.seq == self.sequence + 1
                 && record.session_id == self.session_id
@@ -420,6 +452,8 @@ impl State {
                 require(self.entries.contains_key(parent), "unknown_parent")?;
             }
             self.entry(entry, record.seq, &starts)?;
+            let facts = step(self.facts(entry.parent_id.as_ref())?, entry)?;
+            self.branch.insert(entry.id.clone(), facts);
             self.entries.insert(
                 entry.id.clone(),
                 Arc::new(StoredEntry {
@@ -437,7 +471,9 @@ impl State {
             self.events
                 .push_back(Arc::new((record.seq, index, event.clone())));
         }
-        self.pending(self.head.as_ref())?;
+        // Every new entry's branch rules were checked by `step`; this guards
+        // that the selected head exists.
+        self.facts(self.head.as_ref())?;
         require(
             self.active_turn.is_none() || self.runtime_state != RuntimeState::Idle,
             "unfinished_idle_turn",
@@ -623,6 +659,7 @@ impl State {
                         "invalid_executed_provenance",
                     )?;
                     invocation.result = Some(entry.id.clone());
+                    self.track(id);
                 } else {
                     require(
                         result.metadata.provenance == Provenance::Runtime
@@ -638,9 +675,9 @@ impl State {
                     )?;
                     require(
                         !self
-                            .invocations
-                            .values()
-                            .any(|v| v.intent.call == result.call && v.result.is_none()),
+                            .invocation_by_call
+                            .get(&key(&result.call))
+                            .is_some_and(|id| self.invocations[id].result.is_none()),
                         "result_omits_intent",
                     )?;
                 }
@@ -722,9 +759,10 @@ impl State {
                 }
                 if change.to == RuntimeState::Executing {
                     require(
-                        self.invocations
-                            .values()
-                            .any(|v| v.result.is_none() && v.intent.turn_id == change.turn_id),
+                        self.unresolved.iter().any(|id| {
+                            let v = &self.invocations[id];
+                            v.result.is_none() && v.intent.turn_id == change.turn_id
+                        }),
                         "executing_without_intent",
                     )?;
                 }
@@ -748,12 +786,11 @@ impl State {
                     "invalid_approval_binding",
                 )?;
                 require(
-                    !self
-                        .approvals
-                        .values()
-                        .any(|a| !a.used && a.request.call == request.call),
+                    !self.unused_approvals.contains_key(&key(&request.call)),
                     "duplicate_pending_approval",
                 )?;
+                self.unused_approvals
+                    .insert(key(&request.call), request.approval_id.clone());
                 self.approvals.insert(
                     request.approval_id.clone(),
                     Approval {
@@ -795,7 +832,9 @@ impl State {
                         )?;
                     }
                     approval.used = true;
+                    self.unused_approvals.remove(&key(&approval.request.call));
                 }
+                self.unused_decisions.insert(decision.decision_id.clone());
                 self.decisions.insert(
                     decision.decision_id.clone(),
                     Authorization {
@@ -813,10 +852,7 @@ impl State {
                 self.next_call(&intent.call, record.seq, &intent.turn_id)?;
                 self.unique(intent.invocation_id.as_str())?;
                 require(
-                    !self
-                        .invocations
-                        .values()
-                        .any(|i| i.intent.call == intent.call),
+                    !self.invocation_by_call.contains_key(&key(&intent.call)),
                     "duplicate_call_invocation",
                 )?;
                 let authorization = self
@@ -840,6 +876,9 @@ impl State {
                     )?;
                 }
                 authorization.used = true;
+                self.unused_decisions.remove(&intent.decision_id);
+                self.invocation_by_call
+                    .insert(key(&intent.call), intent.invocation_id.clone());
                 self.invocations.insert(
                     intent.invocation_id.clone(),
                     Invocation {
@@ -850,6 +889,7 @@ impl State {
                         recovery_resolved: false,
                     },
                 );
+                self.track(&intent.invocation_id);
             }
             JournalEvent::ExecutionUncertain(uncertain) => {
                 let invocation = self
@@ -863,6 +903,7 @@ impl State {
                     "invalid_uncertainty",
                 )?;
                 invocation.uncertain = true;
+                self.track(&uncertain.invocation_id);
                 self.runtime_state = RuntimeState::Recovering;
             }
             JournalEvent::RecoveryResolved(resolution) => {
@@ -904,6 +945,7 @@ impl State {
                     "recovery_resolution_provenance",
                 )?;
                 invocation.recovery_resolved = true;
+                self.track(&resolution.invocation_id);
                 if !self.has_unresolved() && self.active_turn.is_none() {
                     self.runtime_state = RuntimeState::Idle;
                 }
@@ -913,9 +955,9 @@ impl State {
                 let pending = self.pending(self.head.as_ref())?;
                 require(
                     pending.iter().all(|call| {
-                        self.invocations
-                            .values()
-                            .any(|i| i.intent.call == *call && i.result.is_none())
+                        self.invocation_by_call
+                            .get(&key(call))
+                            .is_some_and(|id| self.invocations[id].result.is_none())
                     }),
                     "unfinished_not_started_proposals",
                 )?;
@@ -948,23 +990,11 @@ impl State {
                 } else {
                     RuntimeState::Idle
                 };
-                // OrdMap has no mutable iterator; detach only matching records.
-                let approvals: Vec<_> = self
-                    .approvals
-                    .iter()
-                    .filter(|(_, a)| a.request.turn_id == finished.turn_id)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in approvals {
+                // Only the active turn can hold unused approvals and decisions.
+                for (_, id) in std::mem::take(&mut self.unused_approvals) {
                     self.approvals[&id].used = true;
                 }
-                let decisions: Vec<_> = self
-                    .decisions
-                    .iter()
-                    .filter(|(_, d)| d.decision.turn_id == finished.turn_id)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in decisions {
+                for id in std::mem::take(&mut self.unused_decisions) {
                     self.decisions[&id].used = true;
                 }
             }
@@ -1002,19 +1032,21 @@ impl State {
                 .is_some_and(|span| span.iter().copied().eq(compaction.covered_entry_ids.iter())),
             "compaction_not_contiguous",
         )?;
+        // Completed turns in order of first appearance on the branch.
+        let mut seen = BTreeSet::new();
         let mut completed_turns = Vec::new();
         for stored in &ancestry {
             if let Some(turn) = &stored.entry.turn_id
-                && !completed_turns.contains(turn)
                 && self
                     .turns
                     .get(turn)
                     .is_some_and(|t| t.outcome == Some(TurnOutcome::Completed))
+                && seen.insert(turn)
             {
-                completed_turns.push(turn.clone());
+                completed_turns.push(turn);
             }
         }
-        let recent: BTreeSet<_> = completed_turns.iter().rev().take(2).collect();
+        let recent: BTreeSet<_> = completed_turns.iter().rev().take(2).copied().collect();
         for id in &compaction.covered_entry_ids {
             let source = &self.entries[id].entry;
             if let Some(turn) = &source.turn_id {
@@ -1076,6 +1108,60 @@ impl State {
     }
 }
 
+/// One iteration of the branch walk: the facts after `entry`, given its parent's.
+/// Unchanged facts share the parent's allocation.
+fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
+    match &entry.payload {
+        EntryPayload::AssistantResponse(response) => {
+            require(parent.pending.is_empty(), "inference_inside_tool_exchange")?;
+            if response.outcome != ResponseOutcome::Completed
+                || response.finish_reason != Some(FinishReason::ToolCalls)
+            {
+                return Ok(parent.clone());
+            }
+            let pending: Arc<[CallRef]> = response
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { call_id, .. } => Some(CallRef {
+                        response_entry_id: entry.id.clone(),
+                        call_id: call_id.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect();
+            if pending.is_empty() {
+                return Ok(parent.clone());
+            }
+            Ok(Arc::new(BranchFacts {
+                pending,
+                model: parent.model.clone(),
+            }))
+        }
+        EntryPayload::ToolResult(result) => {
+            require(
+                parent.pending.first() == Some(&result.result.call),
+                "orphan_duplicate_or_reordered_result",
+            )?;
+            Ok(Arc::new(BranchFacts {
+                pending: Arc::from(&parent.pending[1..]),
+                model: parent.model.clone(),
+            }))
+        }
+        EntryPayload::UserMessage(_) | EntryPayload::Compaction(_) => {
+            require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
+            Ok(parent.clone())
+        }
+        EntryPayload::ModelChanged(change) => {
+            require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
+            Ok(Arc::new(BranchFacts {
+                pending: parent.pending.clone(),
+                model: change.model.clone(),
+            }))
+        }
+    }
+}
+
 fn valid_content(content: &[ContentBlock]) -> Result<()> {
     require(
         content.iter().all(|b| {
@@ -1103,4 +1189,156 @@ fn legal_transition(from: RuntimeState, to: RuntimeState) -> bool {
             | (Continuing, Processing | Preparing)
     ) || (to == Cancelling && !matches!(from, Idle | Cancelling | Recovering))
         || (to == Recovering && from != Recovering)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whether test builds check derived state after every applied record.
+    static ORACLE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+/// Run `f` on this thread without the test-build equivalence oracle, as
+/// benchmarks must. The oracle is on by default in every other test.
+#[cfg(test)]
+pub(crate) fn without_oracle<R>(f: impl FnOnce() -> R) -> R {
+    let previous = ORACLE.replace(false);
+    let result = f();
+    ORACLE.set(previous);
+    result
+}
+
+/// Derived state of one snapshot, for comparing live and replayed state.
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) struct Derived {
+    pub branch: OrdMap<EntryId, Arc<BranchFacts>>,
+    pub root: Arc<BranchFacts>,
+    pub unresolved: OrdSet<InvocationId>,
+    pub invocation_by_call: OrdMap<CallKey, InvocationId>,
+    pub unused_approvals: OrdMap<CallKey, ApprovalId>,
+    pub unused_decisions: OrdSet<DecisionId>,
+}
+
+/// The scanning implementations that derived state replaced, kept as an oracle.
+#[cfg(test)]
+impl State {
+    fn walked_model_at(&self, head: Option<&EntryId>) -> Result<&ModelRef> {
+        for stored in self.ancestry(head)?.into_iter().rev() {
+            if let EntryPayload::ModelChanged(change) = &stored.entry.payload {
+                return Ok(&change.model);
+            }
+        }
+        Ok(&self.header.initial_model)
+    }
+    fn walked_pending(&self, head: Option<&EntryId>) -> Result<Vec<CallRef>> {
+        let mut pending = Vec::new();
+        for stored in self.ancestry(head)? {
+            match &stored.entry.payload {
+                EntryPayload::AssistantResponse(response) => {
+                    require(pending.is_empty(), "inference_inside_tool_exchange")?;
+                    if response.outcome == ResponseOutcome::Completed
+                        && response.finish_reason == Some(FinishReason::ToolCalls)
+                    {
+                        for block in &response.content {
+                            if let ContentBlock::ToolCall { call_id, .. } = block {
+                                pending.push(CallRef {
+                                    response_entry_id: stored.entry.id.clone(),
+                                    call_id: call_id.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+                EntryPayload::ToolResult(result) => {
+                    require(
+                        pending.first() == Some(&result.result.call),
+                        "orphan_duplicate_or_reordered_result",
+                    )?;
+                    pending.remove(0);
+                }
+                EntryPayload::UserMessage(_)
+                | EntryPayload::ModelChanged(_)
+                | EntryPayload::Compaction(_) => {
+                    require(pending.is_empty(), "head_inside_tool_exchange")?;
+                }
+            }
+        }
+        Ok(pending)
+    }
+    pub(crate) fn derived(&self) -> Derived {
+        Derived {
+            branch: self.branch.clone(),
+            root: self.root.clone(),
+            unresolved: self.unresolved.clone(),
+            invocation_by_call: self.invocation_by_call.clone(),
+            unused_approvals: self.unused_approvals.clone(),
+            unused_decisions: self.unused_decisions.clone(),
+        }
+    }
+    /// Assert that branch facts and live indexes equal their scanning
+    /// definitions after `record` was applied.
+    fn check_derived(&self, record: &Record) {
+        let mut heads = vec![None, self.head.as_ref()];
+        if let RecordPayload::Commit(commit) = &record.payload {
+            heads.extend(commit.entries.iter().map(|entry| Some(&entry.id)));
+        }
+        for head in heads {
+            assert_eq!(
+                self.pending(head).unwrap(),
+                self.walked_pending(head).unwrap().as_slice(),
+                "pending at {head:?}"
+            );
+            assert_eq!(
+                self.model_at(head).unwrap(),
+                self.walked_model_at(head).unwrap(),
+                "model at {head:?}"
+            );
+        }
+        assert!(self.branch.keys().eq(self.entries.keys()));
+
+        let unresolved: OrdSet<_> = self
+            .invocations
+            .iter()
+            .filter(|(_, v)| v.result.is_none() || (v.uncertain && !v.recovery_resolved))
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(self.unresolved, unresolved);
+        let by_call: OrdMap<_, _> = self
+            .invocations
+            .iter()
+            .map(|(id, v)| (key(&v.intent.call), id.clone()))
+            .collect();
+        assert_eq!(
+            by_call.len(),
+            self.invocations.len(),
+            "invocations per call"
+        );
+        assert_eq!(self.invocation_by_call, by_call);
+        let unused: Vec<_> = self.approvals.iter().filter(|(_, a)| !a.used).collect();
+        let approvals: OrdMap<_, _> = unused
+            .iter()
+            .map(|(id, a)| (key(&a.request.call), (*id).clone()))
+            .collect();
+        assert_eq!(approvals.len(), unused.len(), "unused approvals per call");
+        assert_eq!(self.unused_approvals, approvals);
+        let decisions: OrdSet<_> = self
+            .decisions
+            .iter()
+            .filter(|(_, d)| !d.used)
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(self.unused_decisions, decisions);
+        // `TurnFinished` drains these indexes, so only the active turn holds any.
+        let active = self.active_turn.as_ref();
+        assert!(
+            unused
+                .iter()
+                .all(|(_, a)| Some(&a.request.turn_id) == active)
+        );
+        assert!(
+            self.decisions
+                .values()
+                .filter(|d| !d.used)
+                .all(|d| Some(&d.decision.turn_id) == active)
+        );
+    }
 }
