@@ -43,7 +43,7 @@ let mut transaction = Commit {
         reason: HeadReason::Advance,
     },
     entries: vec![Entry {
-        id: entry_id,
+        id: entry_id.clone(),
         parent_id: before.head().cloned(),
         turn_id: None,
         payload: EntryPayload::ModelChanged(ModelChanged {
@@ -59,6 +59,7 @@ store.bind_command(&mut transaction, command_id.clone(),
 let acknowledgement = store.append(transaction.clone(), Timestamp::now())?;
 assert_eq!(before.entries().len(), 0); // old snapshots remain immutable
 assert_eq!(store.snapshot().entries().len(), 1);
+assert!(store.snapshot().entry(&entry_id).is_some());
 assert_eq!(store.append(transaction, Timestamp::now())?, acknowledgement);
 drop(store); // releases the exclusive journal-descriptor lock
 
@@ -75,6 +76,11 @@ while idle. `retain` appends only audit events. `head.from` is compare-and-set.
 Navigation preserves sibling entries and never changes workspace files or the
 session-wide policy. `ancestry(head)` returns entries in conversation order;
 `model_at(head)` selects the nearest model change on that branch.
+
+Snapshots are cheap to clone and share unchanged history across commits.
+`entry(id)` and `turn(id)` look up individual records; `entries()` and `turns()`
+iterate in identity order, while `events()` iterates in journal order. All three
+iterators report their exact remaining length and support reverse iteration.
 
 Wire structs are construction inputs; schema validation and semantic replay run
 before every append. User entries require a matching `turn_started` and

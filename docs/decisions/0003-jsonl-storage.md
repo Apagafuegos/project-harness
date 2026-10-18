@@ -18,6 +18,12 @@ are implemented. Persisting their types/events does not execute those systems.
 
 ## Decisions resolved during implementation
 
+- Snapshots use persistent collections with Arc-shared immutable values. Staging
+  a commit and retaining old snapshots share unchanged history, adding O(log n)
+  collection memory per update instead of copying the full state.
+- Journal validation requires each call's execution intent and result to follow
+  the previous call's result. Parallel tool scheduling will require a validation
+  change as well as a scheduler change.
 - The first concrete API is blocking `JournalStore`, not the RFC's illustrative
   boxed-future trait. Its transaction is not cancellable halfway through sync.
   A future Tokio actor must own it on a blocking worker and await durability

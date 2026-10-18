@@ -162,6 +162,206 @@ fn fail_turn(store: &mut JournalStore) {
         .unwrap();
 }
 
+fn finished_turn(snapshot: &SessionSnapshot, text: &str) -> Commit {
+    let mut commit = start_turn(snapshot, text);
+    commit.events.push(JournalEvent::TurnFinished(TurnFinished {
+        turn_id: commit.entries[0].turn_id.clone().unwrap(),
+        outcome: TurnOutcome::Failed,
+        code: Some("stopped_before_inference".into()),
+    }));
+    commit
+}
+
+#[test]
+#[ignore = "opt-in storage scaling benchmark; performs 10,000 durable commits"]
+fn session_storage_scaling_benchmark() {
+    let (_temp, root, mut store) = fresh();
+    let id = store.snapshot().session_id().clone();
+    let text = "x".repeat(4096);
+    let started = std::time::Instant::now();
+    for _ in 0..10_000 {
+        store
+            .append(finished_turn(&store.snapshot(), &text), at())
+            .unwrap();
+    }
+    let append = started.elapsed();
+    drop(store);
+    let started = std::time::Instant::now();
+    let reopened = JournalStore::open(root, &id).unwrap();
+    let reopen = started.elapsed();
+    assert_eq!(reopened.snapshot().sequence(), 10_000);
+    eprintln!("10,000 commits, 4 KiB text each: append={append:?}, reopen={reopen:?}");
+}
+
+fn assert_shared_entries(before: &SessionSnapshot, after: &SessionSnapshot) {
+    for (id, entry) in before.entries() {
+        assert!(Arc::ptr_eq(
+            before.entry_arc(id).unwrap(),
+            after.entry_arc(id).unwrap(),
+        ));
+        assert!(std::ptr::eq(entry, after.entry(id).unwrap()));
+    }
+}
+
+#[test]
+fn snapshots_share_entries_across_append_and_reopen() {
+    let (_temp, root, mut store) = fresh();
+    for _ in 0..50 {
+        store
+            .append(finished_turn(&store.snapshot(), "shared history"), at())
+            .unwrap();
+    }
+    let before = store.snapshot().clone();
+    store
+        .append(finished_turn(&before, "one more"), at())
+        .unwrap();
+    assert_eq!(before.entries().len(), 50);
+    assert_eq!(store.snapshot().entries().len(), 51);
+    assert_shared_entries(&before, &store.snapshot());
+    let entry_ids: Vec<_> = before.entries().map(|(id, _)| id).collect();
+    assert!(entry_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        before.entries().rev().map(|(id, _)| id).collect::<Vec<_>>(),
+        entry_ids.into_iter().rev().collect::<Vec<_>>()
+    );
+    let turn_ids: Vec<_> = before.turns().map(|(id, _)| id).collect();
+    assert_eq!(before.turns().len(), 50);
+    assert!(turn_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        before.turns().rev().map(|(id, _)| id).collect::<Vec<_>>(),
+        turn_ids.into_iter().rev().collect::<Vec<_>>()
+    );
+    assert_eq!(before.events().len(), 150);
+    assert_eq!(
+        before.events().rev().collect::<Vec<_>>(),
+        before
+            .events()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+    );
+
+    let id = before.session_id().clone();
+    drop(store);
+    let mut store = JournalStore::open(root, &id).unwrap();
+    let reopened = store.snapshot();
+    store
+        .append(finished_turn(&reopened, "after reopen"), at())
+        .unwrap();
+    assert_eq!(reopened.entries().len(), 51);
+    assert_eq!(store.snapshot().entries().len(), 52);
+    assert_shared_entries(&reopened, &store.snapshot());
+}
+
+#[test]
+fn rejected_commit_preserves_published_snapshot_identity() {
+    let (_temp, _root, mut store) = fresh();
+    store
+        .append(finished_turn(&store.snapshot(), "existing"), at())
+        .unwrap();
+    let before = store.snapshot();
+    let mut commit = finished_turn(&before, "stale");
+    commit.head.from = None;
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::StaleHead)
+    ));
+    assert!(Arc::ptr_eq(&before.0, &store.snapshot().0));
+    assert!(!store.is_poisoned());
+}
+
+#[test]
+fn failed_durability_preserves_snapshot_and_entry_identity() {
+    for point in [Point::Written, Point::Synced] {
+        let (_temp, root, mut store) = fresh();
+        store
+            .append(finished_turn(&store.snapshot(), "existing"), at())
+            .unwrap();
+        let before = store.snapshot();
+        root.io.test.lock().unwrap().fail = Some(point);
+        assert!(matches!(
+            store.append(finished_turn(&before, "unacknowledged"), at()),
+            Err(StoreError::Io(_))
+        ));
+        assert!(Arc::ptr_eq(&before.0, &store.snapshot().0), "{point:?}");
+        assert_shared_entries(&before, &store.snapshot());
+        assert!(store.is_poisoned());
+    }
+}
+
+#[test]
+fn mixed_live_history_equals_replay_including_deduplicated_commands() {
+    let (_temp, root, id) = fixture("branching");
+    let mut store = JournalStore::open(root.clone(), &id).unwrap();
+    let snapshot = store.snapshot();
+    let branch_point = snapshot.ancestry(snapshot.head()).unwrap()[1]
+        .entry
+        .id
+        .clone();
+    store
+        .append(navigate(&snapshot, Some(branch_point)), at())
+        .unwrap();
+    let command_id = CommandId::new();
+    let mut commit = finished_turn(&store.snapshot(), "another sibling");
+    store
+        .bind_command(
+            &mut commit,
+            command_id.clone(),
+            &json!({"kind":"start_turn","text":"another sibling"}),
+        )
+        .unwrap();
+    let acknowledgement = store.append(commit.clone(), at()).unwrap();
+    store
+        .append(navigate(&store.snapshot(), None), at())
+        .unwrap();
+    let before_duplicate = store.snapshot();
+    assert_eq!(store.append(commit.clone(), at()).unwrap(), acknowledgement);
+    assert!(Arc::ptr_eq(&before_duplicate.0, &store.snapshot().0));
+    let live = store.snapshot();
+    drop(store);
+    let mut reopened = JournalStore::open(root, &id).unwrap();
+    let replayed = reopened.snapshot();
+    assert_eq!(replayed.head(), live.head());
+    assert_eq!(replayed.sequence(), live.sequence());
+    assert_eq!(replayed.checksum(), live.checksum());
+    let entry_records = |snapshot: &SessionSnapshot| {
+        snapshot
+            .entries()
+            .map(|(id, stored)| {
+                (
+                    id.clone(),
+                    stored.entry.clone(),
+                    stored.sequence,
+                    stored.record_checksum.clone(),
+                    stored.entry_index,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entry_records(&replayed), entry_records(&live));
+    let turn_records = |snapshot: &SessionSnapshot| {
+        snapshot
+            .turns()
+            .map(|(id, info)| {
+                assert!(std::ptr::eq(snapshot.turn(id).unwrap(), info));
+                (id.clone(), info.user_entry_id.clone(), info.outcome)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(turn_records(&replayed), turn_records(&live));
+    assert_eq!(
+        replayed.events().collect::<Vec<_>>(),
+        live.events().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        replayed.command_receipt(&command_id).unwrap().commit,
+        live.command_receipt(&command_id).unwrap().commit
+    );
+    assert_eq!(reopened.append(commit, at()).unwrap(), acknowledgement);
+    assert!(Arc::ptr_eq(&replayed.0, &reopened.snapshot().0));
+}
+
 #[test]
 fn j01_all_specification_fixtures_round_trip_and_replay() {
     for name in ["branching", "interrupted-execution", "compaction"] {

@@ -56,9 +56,10 @@ an execution sandbox.
 
 Clap supplies CLI help, version, and argument validation. Storage uses Serde and
 Serde JSON, the bundled JSON Schema validator with remote resolution disabled,
-SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives and typed
-errors. Tempfile is test-only. Tokio, Ratatui and HTTP clients are added when
-their implementations need them. Enable only required features.
+SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives, typed
+errors and imbl persistent collections for sharing session snapshots. Tempfile
+is test-only. Tokio, Ratatui and HTTP clients are added when their implementations
+need them. Enable only required features.
 
 Commit `Cargo.lock`. Use `--locked` in routine builds and CI. To intentionally
 change dependencies, edit the manifest or run a targeted `cargo update -p NAME`,

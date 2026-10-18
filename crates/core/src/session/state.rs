@@ -1,10 +1,8 @@
 //! Deterministic, staged semantic replay. No executor or provider is called here.
 
 use super::{error::Result, *};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use imbl::{OrdMap, OrdSet, Vector};
+use std::{collections::BTreeSet, sync::Arc};
 
 /// An immutable tree entry and its exact journal provenance.
 #[derive(Clone, Debug)]
@@ -50,7 +48,8 @@ pub struct UnresolvedInvocation {
     pub uncertainty_recorded: bool,
 }
 
-/// A read-only point-in-time view. Cloning it never exposes staged changes.
+/// A read-only point-in-time view sharing unchanged history across commits.
+/// Cloning it is cheap and never exposes staged changes.
 #[derive(Clone, Debug)]
 pub struct SessionSnapshot(pub(crate) Arc<State>);
 impl SessionSnapshot {
@@ -90,21 +89,41 @@ impl SessionSnapshot {
     pub fn active_turn(&self) -> Option<&TurnId> {
         self.0.active_turn.as_ref()
     }
-    /// All branches, in stable identity order. Use ancestry for conversation order.
-    pub fn entries(&self) -> &BTreeMap<EntryId, StoredEntry> {
-        &self.0.entries
+    /// Look up an immutable entry on any branch.
+    pub fn entry(&self, id: &EntryId) -> Option<&StoredEntry> {
+        self.entry_arc(id).map(Arc::as_ref)
     }
-    /// Known turn outcomes, including those on sibling branches.
-    pub fn turns(&self) -> &BTreeMap<TurnId, TurnInfo> {
-        &self.0.turns
+    pub(crate) fn entry_arc(&self, id: &EntryId) -> Option<&Arc<StoredEntry>> {
+        self.0.entries.get(id)
+    }
+    /// All branches, in stable identity order. Use ancestry for conversation order.
+    pub fn entries(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&EntryId, &StoredEntry)> + DoubleEndedIterator {
+        self.0
+            .entries
+            .iter()
+            .map(|(id, entry)| (id, entry.as_ref()))
+    }
+    /// Look up a known turn, including one on a sibling branch.
+    pub fn turn(&self, id: &TurnId) -> Option<&TurnInfo> {
+        self.0.turns.get(id)
+    }
+    /// Known turn outcomes in stable identity order, including sibling branches.
+    pub fn turns(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&TurnId, &TurnInfo)> + DoubleEndedIterator {
+        self.0.turns.iter()
     }
     /// Globally ordered audit events `(record sequence, event index, event)`.
-    pub fn events(&self) -> &[(u64, usize, JournalEvent)] {
-        &self.0.events
+    pub fn events(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &(u64, usize, JournalEvent)> + DoubleEndedIterator {
+        self.0.events.iter().map(Arc::as_ref)
     }
     /// Persisted command acceptance, including after an acknowledgement was lost.
     pub fn command_receipt(&self, id: &CommandId) -> Option<&CommandReceipt> {
-        self.0.commands.get(id)
+        self.0.commands.get(id).map(Arc::as_ref)
     }
     /// Return ancestors in conversation order, rejecting unknown heads.
     pub fn ancestry(&self, head: Option<&EntryId>) -> Result<Vec<&StoredEntry>> {
@@ -163,14 +182,14 @@ pub(crate) struct State {
     pub policy_revision: String,
     pub runtime_state: RuntimeState,
     pub active_turn: Option<TurnId>,
-    pub entries: BTreeMap<EntryId, StoredEntry>,
-    pub turns: BTreeMap<TurnId, TurnInfo>,
-    pub events: Vec<(u64, usize, JournalEvent)>,
-    pub commands: BTreeMap<CommandId, CommandReceipt>,
-    pub invocations: BTreeMap<InvocationId, Invocation>,
-    ids: BTreeSet<String>,
-    approvals: BTreeMap<ApprovalId, Approval>,
-    decisions: BTreeMap<DecisionId, Authorization>,
+    pub entries: OrdMap<EntryId, Arc<StoredEntry>>,
+    pub turns: OrdMap<TurnId, TurnInfo>,
+    pub events: Vector<Arc<(u64, usize, JournalEvent)>>,
+    pub commands: OrdMap<CommandId, Arc<CommandReceipt>>,
+    pub invocations: OrdMap<InvocationId, Invocation>,
+    ids: OrdSet<String>,
+    approvals: OrdMap<ApprovalId, Approval>,
+    decisions: OrdMap<DecisionId, Authorization>,
     inference_response: Option<EntryId>,
 }
 
@@ -200,14 +219,14 @@ impl State {
             policy_revision: header.policy_revision.clone(),
             runtime_state: RuntimeState::Idle,
             active_turn: None,
-            entries: BTreeMap::new(),
-            turns: BTreeMap::new(),
-            events: Vec::new(),
-            commands: BTreeMap::new(),
-            invocations: BTreeMap::new(),
-            ids: BTreeSet::new(),
-            approvals: BTreeMap::new(),
-            decisions: BTreeMap::new(),
+            entries: OrdMap::new(),
+            turns: OrdMap::new(),
+            events: Vector::new(),
+            commands: OrdMap::new(),
+            invocations: OrdMap::new(),
+            ids: OrdSet::new(),
+            approvals: OrdMap::new(),
+            decisions: OrdMap::new(),
             inference_response: None,
         };
         state.unique(record.session_id.as_str())?;
@@ -215,7 +234,7 @@ impl State {
         Ok(state)
     }
     fn unique(&mut self, id: &str) -> Result<()> {
-        require(self.ids.insert(id.to_owned()), "duplicate_id")
+        require(self.ids.insert(id.to_owned()).is_none(), "duplicate_id")
     }
     fn has_unresolved(&self) -> bool {
         self.invocations
@@ -241,7 +260,7 @@ impl State {
                 .entries
                 .get(id)
                 .ok_or(StoreError::Invalid("unknown_head_or_parent"))?;
-            entries.push(stored);
+            entries.push(stored.as_ref());
             next = stored.entry.parent_id.as_ref();
         }
         entries.reverse();
@@ -403,19 +422,20 @@ impl State {
             self.entry(entry, record.seq, &starts)?;
             self.entries.insert(
                 entry.id.clone(),
-                StoredEntry {
+                Arc::new(StoredEntry {
                     entry: entry.clone(),
                     sequence: record.seq,
                     record_checksum: checksum.clone(),
                     entry_index: index,
-                },
+                }),
             );
         }
         self.head = commit.head.to.clone();
         // Entries and events are atomic, but event order remains semantically significant.
         for (index, event) in commit.events.iter().enumerate() {
             self.event(event, record)?;
-            self.events.push((record.seq, index, event.clone()));
+            self.events
+                .push_back(Arc::new((record.seq, index, event.clone())));
         }
         self.pending(self.head.as_ref())?;
         require(
@@ -437,7 +457,7 @@ impl State {
         if let (Some(id), Some(fingerprint)) = (&commit.command_id, &commit.command_fingerprint) {
             self.commands.insert(
                 id.clone(),
-                CommandReceipt {
+                Arc::new(CommandReceipt {
                     fingerprint: fingerprint.clone(),
                     acknowledgement: CommitAck {
                         sequence: record.seq,
@@ -445,7 +465,7 @@ impl State {
                         head: self.head.clone(),
                     },
                     commit: commit.clone(),
-                },
+                }),
             );
         }
         Ok(())
@@ -928,19 +948,24 @@ impl State {
                 } else {
                     RuntimeState::Idle
                 };
-                for approval in self
+                // OrdMap has no mutable iterator; detach only matching records.
+                let approvals: Vec<_> = self
                     .approvals
-                    .values_mut()
-                    .filter(|a| a.request.turn_id == finished.turn_id)
-                {
-                    approval.used = true;
+                    .iter()
+                    .filter(|(_, a)| a.request.turn_id == finished.turn_id)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in approvals {
+                    self.approvals[&id].used = true;
                 }
-                for decision in self
+                let decisions: Vec<_> = self
                     .decisions
-                    .values_mut()
-                    .filter(|d| d.decision.turn_id == finished.turn_id)
-                {
-                    decision.used = true;
+                    .iter()
+                    .filter(|(_, d)| d.decision.turn_id == finished.turn_id)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in decisions {
+                    self.decisions[&id].used = true;
                 }
             }
             JournalEvent::ConfigurationChanged(configuration) => {
