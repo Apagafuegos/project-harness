@@ -10,13 +10,17 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: first headless storage milestone.** `harness-core` implements validated
-session trees, checksummed JSONL transactions, immutable snapshots, private
-content-addressed artifacts, single-writer locking, and explicit torn-tail repair.
-J01–J03 tests cover replay, corruption rejection and injected durability failures.
-The `harness` command still shows only help and version information. Agent
-execution, provider adapters, workspace tools, context projection, and the TUI
-are not implemented. Persisted runtime types/events do not execute an agent.
+**Status: storage milestone and the pure runtime core.** `harness-core`
+implements validated session trees, checksummed JSONL transactions, immutable
+snapshots, private content-addressed artifacts, single-writer locking, and
+explicit torn-tail repair. J01–J03 tests cover replay, corruption rejection and
+injected durability failures. Its `runtime` module is a pure, synchronous turn
+state machine: typed inputs and effects, one commit in flight, journal-backed
+command deduplication, cancellation and an event-sequence resync view. Every
+commit it emits in tests is appended to real storage. The `harness` command
+still shows only help and version information. No Tokio driver, provider
+adapter, workspace tool, context projection or TUI exists, so nothing runs an
+agent yet.
 
 ## Getting started
 
@@ -40,7 +44,7 @@ external services are needed for storage tests or the CLI checks.
 ## Repository
 
 ```text
-crates/core/       Headless session storage library (harness-core)
+crates/core/       Headless session storage and runtime core (harness-core)
 crates/cli/        CLI entry point and future Ratatui client (harness)
 docs/             Architecture, contract drafts, decisions, and roadmap
 scripts/check.sh  Shared local/CI checks
@@ -55,9 +59,11 @@ context projection with rolling summaries, authorized trusted Rust file tools,
 and Bubblewrap for every external executable. Tool calls run sequentially.
 The context inspection API belongs to the headless engine from the first slice.
 
-See [session storage usage](docs/session-storage.md) and the
-[storage decision](docs/decisions/0003-jsonl-storage.md). The next milestone is a
-deterministic mock-provider lifecycle and headless context inspection, with
-Tokio orchestration over the blocking store. See the [roadmap](docs/roadmap.md).
+See [session storage usage](docs/session-storage.md), the
+[storage decision](docs/decisions/0003-jsonl-storage.md), the
+[runtime core](docs/runtime.md) and its [decision](docs/decisions/0004-pure-runtime-core.md).
+The rest of the milestone adds the Tokio driver over the blocking store, a
+scripted mock provider, headless context inspection and startup recovery. See
+the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

@@ -2,7 +2,10 @@
 
 Status: Storage details accepted and implemented under
 [decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 behavioral tests.
-Other subsystem details remain proposed; no agent runtime is implemented.
+The pure runtime core is implemented under
+[decision 0004](../decisions/0004-pure-runtime-core.md), which records where
+storage shaped section 7.2 (refusal fails its turn). Other subsystem details
+remain proposed; no complete agent runtime is implemented.
 
 Date: 2026-10-16
 

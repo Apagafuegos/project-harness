@@ -6,12 +6,12 @@
 #![doc = include_str!("../../../../docs/session-storage.md")]
 
 mod artifacts;
-mod codec;
+pub(crate) mod codec;
 mod error;
 mod identity;
-mod io;
+pub(crate) mod io;
 mod state;
-mod store;
+pub(crate) mod store;
 mod types;
 mod validation;
 

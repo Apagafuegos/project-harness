@@ -34,9 +34,10 @@ tests and doctests, a development build, documentation with warnings denied,
 and CLI help/version smoke checks. It can also be invoked from another working
 directory. CI runs the same script with the repository toolchain.
 
-The checks exercise J01–J03 storage behavior and the Rust API usage example,
-including the specification journals and injected durability failures. They do
-not prove provider compatibility, workspace tools or sandbox enforcement.
+The checks exercise J01–J03 storage behavior, the runtime core against real
+storage, and the Rust API usage examples, including the specification journals
+and injected durability failures. They do not prove provider compatibility,
+workspace tools or sandbox enforcement.
 
 For narrower checks while working:
 
@@ -47,14 +48,60 @@ cargo test -p harness-core --locked
 cargo doc --workspace --no-deps --locked --open
 ```
 
+## Runtime tests
+
+`crates/core/src/runtime/tests` drives the [runtime core](runtime.md) with a
+synchronous test driver. The driver owns a `Runtime`, a real `JournalStore` in a
+temporary directory with the oracle on, and a `DeterministicEnv`. It runs each
+`Persist` as the storage worker will: `bind_command` when a command is attached,
+then `append`. It answers with `Persisted` or `PersistFailed`. A storage
+rejection fails the test: a commit the core believed legal is drift. Tests feed
+provider events, timer firings and storage failures directly; injected failures
+use the storage I/O failure points. Nothing reads the wall clock.
+
+After every step the driver checks that at most one `Persist` is in flight, that
+no request gets a second reply, and that event `seq` values are contiguous. At
+the end it checks that every request got one reply, then reopens the journal and
+compares the reopened snapshot with the core's last published one. An injected
+I/O failure after a complete write leaves the failed commit durable. In that case
+the reopened journal must be exactly one record ahead and contain that commit.
+For a torn partial write, the inspected valid prefix must equal the published
+snapshot.
+
+Each scenario runs twice with fresh environments, and the effects are compared
+with storage-chosen record IDs and checksums abstracted. The first run's
+recorded inputs are also replayed into a fresh runtime and environment, and the
+effects must be byte-identical (`Debug` output). Every recorded view plus the
+events after it must reproduce the final view.
+
+`randomized_interleavings_keep_storage_and_events_consistent` runs 512 seeds of
+a SplitMix64 PRNG across threads. Each seed interleaves commands (including
+retries and stale command IDs), scripted streams with occasional corrupt
+events, stale stream IDs, timer firings and injected persist failures. Each run
+is then driven to quiescence. Every started turn must have exactly one
+`turn_finished` in the journal; only a turn stopped by an injected fault may
+have none. With `--nocapture` it prints the outcomes and paths it reached. A
+failing run prints its seed. Rerun one seed, or run more:
+
+```sh
+RUNTIME_SEED=123 cargo test -p harness-core --locked randomized -- --nocapture
+RUNTIME_SEEDS=5000 cargo test --release -p harness-core --locked randomized
+```
+
 ## Scaling benchmark
 
 An opt-in, ignored test measures storage cost against history length. It runs
-two single-chain workloads at 1,000, 2,000, 5,000 and 10,000 commits: plain
-turns (one 4 KiB user entry and a failed turn per commit) and tool turns (a
-complete authorized tool exchange spread over twelve commits per turn). Each run
-prints the mean append time per commit, for the whole run and its last 10%, and
-the reopen time in total and per record. Use a release build:
+three single-chain workloads at 1,000, 2,000, 5,000 and 10,000 commits:
+
+- **Plain turns:** one 4 KiB user entry and a failed turn per commit.
+- **Tool turns:** a complete authorized tool exchange spread over twelve
+  commits per turn.
+- **Command tool turns:** tool turns whose opening commit binds a command, as
+  the runtime's `StartTurn` does.
+
+Each run prints the mean append time per commit, for the whole run and its last
+10%, the tool workloads' time per turn, and the reopen time in total and per
+record. Use a release build:
 
 ```sh
 TMPDIR=/dev/shm cargo test --release -p harness-core --locked \
@@ -62,13 +109,18 @@ TMPDIR=/dev/shm cargo test --release -p harness-core --locked \
 ```
 
 `TMPDIR=/dev/shm` keeps journals on tmpfs, so the figures exclude storage sync
-latency; run once without it to see the on-disk cost. It performs 36,000 durable
-commits and takes a few minutes.
+latency; run once without it to see the on-disk cost. It performs 54,000 durable
+commits and takes a few minutes. The command workload's extra cost per turn is the
+command artifact's write, file and directory syncs, and its read-back during
+validation.
 
 Test builds run an equivalence oracle after every applied record. It compares
 the cached branch facts and tool-state indexes with the scanning definitions
 they replace, which makes each commit linear in history. The benchmark switches
-it off for its own thread with `state::without_oracle`; every other test keeps it on.
+it off for its own thread with `state::without_oracle`; every other test keeps it
+on, including each thread of the randomized runtime test. The switch is
+thread-local, so a future storage worker thread must switch it off itself in
+benchmarks.
 
 ## Dependency and toolchain changes
 

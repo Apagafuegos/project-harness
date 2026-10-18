@@ -1,8 +1,9 @@
 # Architecture
 
 Status: Six high-level contracts provisionally agreed. Session storage is
-implemented under [decision 0003](decisions/0003-jsonl-storage.md). Orchestration
-remains unimplemented; other details remain proposed in
+implemented under [decision 0003](decisions/0003-jsonl-storage.md). The pure
+runtime core is implemented under [decision 0004](decisions/0004-pure-runtime-core.md);
+its async driver and recovery are not. Other details remain proposed in
 [RFC-001](rfcs/001-core-types-state-persistence.md).
 
 ## Engine and client
@@ -92,6 +93,11 @@ The two-crate workspace includes a blocking headless session store and J01–J03
 behavioral tests: exact-byte checksums, atomic commits/head selection, semantic
 replay, locking, artifact integrity, writer poisoning and explicit tail repair.
 The schema and all three example journals are exercised by tests. See
-[session storage usage](session-storage.md) for API limits. Providers, tools,
-context projection, orchestration and the TUI remain unimplemented; the CLI
-still provides help/version only. See the [roadmap](roadmap.md).
+[session storage usage](session-storage.md) for API limits.
+
+`harness_core::runtime` is the synchronous core of the agent runtime: one input
+in, effects out, no I/O. It reads lifecycle facts from storage snapshots and is
+tested by appending every commit it emits to a real store. See
+[runtime](runtime.md). The Tokio driver, providers, tools, context projection
+and the TUI remain unimplemented; the CLI still provides help/version only. See
+the [roadmap](roadmap.md).

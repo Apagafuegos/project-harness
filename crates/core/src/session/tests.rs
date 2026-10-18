@@ -184,13 +184,19 @@ fn transition(snapshot: &SessionSnapshot, from: RuntimeState, to: RuntimeState) 
 }
 
 /// Benchmark workloads, each appended as a single chain from the root.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Workload {
     /// One user entry plus a failed turn per commit, with 4 KiB of text.
     PlainTurns,
     /// Complete authorized tool exchanges spread over twelve commits per turn.
     ToolTurns,
+    /// `ToolTurns` whose opening commit binds a command, as the runtime's
+    /// `StartTurn` does: one more artifact write, sync and read-back per turn.
+    ToolTurnsWithCommands,
 }
+
+/// Commits per turn of the tool workloads.
+const TOOL_TURN_COMMITS: usize = 12;
 
 /// Identifiers carried between the separate commits of benchmark tool turns.
 struct ToolTurns {
@@ -203,7 +209,7 @@ impl ToolTurns {
     fn next(&mut self, snapshot: &SessionSnapshot) -> Commit {
         use RuntimeState::*;
         let step = self.step;
-        self.step = (step + 1) % 12;
+        self.step = (step + 1) % TOOL_TURN_COMMITS;
         match step {
             0 => start_turn(snapshot, "use one tool"),
             1 | 9 => transition(snapshot, Preparing, Inferring),
@@ -311,11 +317,20 @@ fn append_workload(
     (0..commits)
         .map(|_| {
             let snapshot = store.snapshot();
-            let commit = match workload {
+            let mut commit = match workload {
                 Workload::PlainTurns => finished_turn(&snapshot, &text),
-                Workload::ToolTurns => tools.next(&snapshot),
+                Workload::ToolTurns | Workload::ToolTurnsWithCommands => tools.next(&snapshot),
             };
             let started = std::time::Instant::now();
+            if workload == Workload::ToolTurnsWithCommands
+                && let Some(JournalEvent::TurnStarted(_)) = commit.events.first()
+            {
+                let command =
+                    json!({"kind":"start_turn","content":[{"kind":"text","text":"use one tool"}]});
+                store
+                    .bind_command(&mut commit, CommandId::new(), &command)
+                    .unwrap();
+            }
             store.append(commit, at()).unwrap();
             started.elapsed()
         })
@@ -323,13 +338,17 @@ fn append_workload(
 }
 
 #[test]
-#[ignore = "opt-in storage scaling benchmark; performs 36,000 durable commits"]
+#[ignore = "opt-in storage scaling benchmark; performs 54,000 durable commits"]
 fn session_storage_scaling_benchmark() {
     let mean_ms = |durations: &[std::time::Duration]| {
         durations.iter().sum::<std::time::Duration>().as_secs_f64() * 1e3 / durations.len() as f64
     };
     state::without_oracle(|| {
-        for workload in [Workload::PlainTurns, Workload::ToolTurns] {
+        for workload in [
+            Workload::PlainTurns,
+            Workload::ToolTurns,
+            Workload::ToolTurnsWithCommands,
+        ] {
             for commits in [1_000, 2_000, 5_000, 10_000] {
                 let (_temp, root, mut store) = fresh();
                 let id = store.snapshot().session_id().clone();
@@ -339,8 +358,16 @@ fn session_storage_scaling_benchmark() {
                 let reopened = JournalStore::open(root, &id).unwrap();
                 let reopen = started.elapsed();
                 assert_eq!(reopened.snapshot().sequence(), commits as u64);
+                let per_turn = if workload == Workload::PlainTurns {
+                    String::new()
+                } else {
+                    format!(
+                        ", {:.3} ms/turn",
+                        mean_ms(&appends) * TOOL_TURN_COMMITS as f64
+                    )
+                };
                 eprintln!(
-                    "{workload:?} N={commits}: append {:.3} ms/commit, last 10% {:.3} ms/commit; \
+                    "{workload:?} N={commits}: append {:.3} ms/commit, last 10% {:.3} ms/commit{per_turn}; \
                      reopen {:.3} s, {:.3} ms/record",
                     mean_ms(&appends),
                     mean_ms(&appends[commits - commits / 10..]),

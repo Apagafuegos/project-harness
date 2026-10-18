@@ -28,7 +28,16 @@ RFC cases J01–J03 and all serialization fixtures run offline. No tool effects
 exist. See [usage and limitations](session-storage.md): blocking storage API,
 explicit recovery commits, local Linux storage, no salvage/export command.
 
-## 2. Headless mock lifecycle and context inspection
+## 2. Headless mock lifecycle and context inspection — in progress
+
+Step 2, the pure runtime core, is implemented: typed commands, inputs, effects
+and events, the one-turn-per-session state machine, provider-event validation,
+cancellation, command deduplication and the view/`seq` resync protocol. It is
+tested against real storage with scenarios, replay and 512 randomized seeds
+([runtime](runtime.md), [decision 0004](decisions/0004-pure-runtime-core.md)).
+Remaining: the storage worker and Tokio driver (step 3), the provider stream
+trait and scripted mock (step 4), the context builder and report (step 5) and
+startup recovery (step 6).
 
 Add Tokio, typed commands/events, the provider stream lifecycle, one-turn-per-
 session state machine, cancellation, and a deterministic scripted provider.

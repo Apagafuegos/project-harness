@@ -147,6 +147,12 @@ impl SessionSnapshot {
             })
             .collect()
     }
+    /// Whether any journal identity (session, record, entry, turn, response,
+    /// call, invocation, approval, decision or command) already uses `id`.
+    /// Storage rejects a commit that reuses one with `duplicate_id`.
+    pub(crate) fn has_identity(&self, id: &str) -> bool {
+        self.0.ids.contains(id)
+    }
     /// A reopened engine must explicitly terminate unfinished work and resolve
     /// uncertain effects before accepting new work. No tool may be replayed.
     pub fn requires_recovery(&self) -> bool {

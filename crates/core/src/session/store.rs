@@ -178,10 +178,7 @@ impl JournalStore {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        if !command.is_object() {
-            return Err(StoreError::Invalid("command_not_object"));
-        }
-        let bytes = codec::bounded_json(command)?;
+        let bytes = normalized_command(command)?;
         let reference = self.root.put_artifact(&bytes)?;
         commit.command_id = Some(id);
         commit.command_fingerprint = Some(reference.sha256);
@@ -301,6 +298,16 @@ impl JournalStore {
         store.append_inner(commit, at, true)?;
         Ok(store)
     }
+}
+
+/// The exact artifact bytes `bind_command` stores for a submitted command. Its
+/// SHA-256 is the commit's `command_fingerprint`, so the runtime fingerprints
+/// commands with this function instead of a second normalization.
+pub(crate) fn normalized_command(command: &serde_json::Value) -> Result<Vec<u8>> {
+    if !command.is_object() {
+        return Err(StoreError::Invalid("command_not_object"));
+    }
+    codec::bounded_json(command)
 }
 
 fn recovery_commit(commit: &Commit) -> bool {
