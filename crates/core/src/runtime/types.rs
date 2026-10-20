@@ -74,16 +74,23 @@ pub struct RuntimeConfig {
     /// How long a cancelled stream may take to confirm before the runtime
     /// records the partial response without it.
     pub cancel_grace: Duration,
+    /// How long an open stream may go without any event. The timer restarts
+    /// after every event; on expiry the stream is released and the response
+    /// recorded as interrupted, failing the turn with `provider_stalled`.
+    pub provider_idle_timeout: Duration,
 }
 
 impl Default for RuntimeConfig {
     /// RFC-001 defaults: 32 inferences and 4 MiB of inline response content.
+    /// The idle timeout is generous because reasoning models can be silent
+    /// for minutes before their first visible event.
     fn default() -> Self {
         Self {
             max_inferences_per_turn: 32,
             max_partial_bytes: 4 * 1024 * 1024,
             max_user_bytes: 1024 * 1024,
             cancel_grace: Duration::from_secs(2),
+            provider_idle_timeout: Duration::from_secs(300),
         }
     }
 }

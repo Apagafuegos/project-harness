@@ -171,6 +171,13 @@ and guessed model-name-based limits are not required in v0.1.
 
 ### 3.2 Normalized events and terminal outcomes
 
+> **Implementation note.** [Decision 0005](../decisions/0005-provider-stream.md)
+> implements this section with the core's `ProviderEvent` rather than
+> `ModelEvent`. Events carry no `response_id`, because a stream belongs to one
+> request, and no engine `call_id`, because the core issues `CallId`s at
+> `ToolCallStarted`. `Finished` is a flat `{ outcome, finish_reason, error }`.
+> The proposal below is kept for reference.
+
 `ModelEvent` is one of: `Started`, `TextDelta`, `ReasoningSummaryDelta`,
 `ToolCallStarted`, `ToolArgumentsDelta`, `ToolCallReady`, `UsageUpdated`, or
 `Finished`. Every event carries `response_id`; block deltas carry a stable

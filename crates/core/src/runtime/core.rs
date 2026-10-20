@@ -104,6 +104,8 @@ struct Inference {
     status: Stream,
     /// The armed cancellation grace timer.
     timer: Option<TimerId>,
+    /// The armed idle timer, while the stream is open.
+    idle: Option<TimerId>,
 }
 
 #[derive(Debug)]
@@ -147,6 +149,8 @@ enum End {
     Malformed(&'static str),
     /// Ended or timed out after a requested cancellation.
     Cancelled,
+    /// No event within `provider_idle_timeout`.
+    Stalled,
 }
 
 /// How a finished stream is recorded.
@@ -503,6 +507,14 @@ impl Runtime {
             .waiters
             .push(request);
         // Stop the stream at once; durable records follow when nothing is in flight.
+        // The grace timer replaces the idle timer while waiting for confirmation.
+        if self
+            .inference
+            .as_ref()
+            .is_some_and(|inference| matches!(inference.status, Stream::Open))
+        {
+            self.disarm_idle();
+        }
         if let Some(inference) = &mut self.inference
             && matches!(inference.status, Stream::Open)
         {
@@ -695,7 +707,7 @@ impl Runtime {
                     inference: inference.id,
                 });
             }
-            if let Some(timer) = inference.timer {
+            for timer in [inference.timer, inference.idle].into_iter().flatten() {
                 self.out.push(Effect::CancelTimer { timer });
             }
             if self.view.view().partial.is_some() {
@@ -733,7 +745,13 @@ impl Runtime {
         }
         let finished = matches!(event, ProviderEvent::Finished { .. });
         match self.status_of(id) {
-            Some(Status::Open) => self.stream_event(id, event, env),
+            Some(Status::Open) => {
+                self.stream_event(id, event, env);
+                // Any event, even one the core rejects, shows the stream is alive.
+                if self.status_of(id) == Some(Status::Open) {
+                    self.arm_idle();
+                }
+            }
             Some(Status::Cancelling) if finished => self.cancel_ended(env),
             _ => self.stale(id),
         }
@@ -994,6 +1012,11 @@ impl Runtime {
         {
             inference.timer = None;
             self.end(End::Cancelled, env);
+        } else if let Some(inference) = &mut self.inference
+            && inference.idle == Some(timer)
+        {
+            inference.idle = None;
+            self.end(End::Stalled, env);
         } else {
             self.emit(EventKind::Diagnostic(RuntimeDiagnostic::StaleTimer {
                 timer,
@@ -1024,6 +1047,7 @@ impl Runtime {
 
     /// The core stops listening: release the stream, then decide what follows.
     fn end(&mut self, end: End, env: &mut dyn Env) {
+        self.disarm_idle();
         let inference = self.inference.as_mut().expect("current inference");
         inference.status = Stream::Ended(end);
         let id = inference.id;
@@ -1134,6 +1158,7 @@ impl Runtime {
             bytes: 0,
             status: Stream::Open,
             timer: None,
+            idle: None,
         });
         self.emit(EventKind::InferenceStarted {
             inference,
@@ -1148,6 +1173,25 @@ impl Runtime {
             model,
             response_id,
         });
+        self.arm_idle();
+    }
+
+    /// Restart the idle timer of the current, open stream.
+    fn arm_idle(&mut self) {
+        self.disarm_idle();
+        self.next_timer += 1;
+        let timer = TimerId(self.next_timer);
+        self.inference.as_mut().expect("current inference").idle = Some(timer);
+        self.out.push(Effect::SetTimer {
+            timer,
+            duration: self.config.provider_idle_timeout,
+        });
+    }
+
+    fn disarm_idle(&mut self) {
+        if let Some(timer) = self.inference.as_mut().and_then(|i| i.idle.take()) {
+            self.out.push(Effect::CancelTimer { timer });
+        }
     }
 
     /// Commit 3: the assistant entry plus whatever its outcome implies.
@@ -1411,6 +1455,11 @@ impl Recorded {
                 ResponseOutcome::Interrupted,
                 TurnOutcome::Failed,
                 Some("provider_eof"),
+            ),
+            End::Stalled => Self::partial(
+                ResponseOutcome::Interrupted,
+                TurnOutcome::Failed,
+                Some("provider_stalled"),
             ),
             End::TooLarge => Self::partial(
                 ResponseOutcome::Interrupted,

@@ -1,6 +1,7 @@
 # 0005: Provider stream seam and scripted mock
 
-Status: Accepted for Milestone 2, step 4.
+Status: Accepted for Milestone 2, step 4. Amended the same day with the loop
+order and the provider idle timeout, before step 5.
 
 Date: 2026-10-20
 
@@ -78,8 +79,36 @@ With no script left, a stream reports a setup failure (`provider_failure`,
 `no_script`). `streams()` records each stream's request, events yielded, and
 whether it was cancelled and dropped.
 
-**Dependencies.** `futures-core` supplies `Stream` and `tokio-util` supplies
-`CancellationToken`, both without default features.
+**Provider events are polled last.** The driver's biased loop polls storage
+replies, then worker exit, timers, artifact failures and the mailbox, and only
+then the stream. Each provider event spends Tokio's cooperative budget
+(`tokio::task::coop::poll_proceed`), so a stream that is always ready still
+makes the driver task yield. Commands therefore arrive between events, and a
+`Cancel` takes effect at the next event boundary. In the test, with 20,000
+deltas ready, no delta was applied between sending the cancel and its effect.
+
+**An idle timeout belongs to the core.** `RuntimeConfig::provider_idle_timeout`
+(default 300 s) bounds the time an open stream may go without any event. The
+core arms a timer with `StartInference`, which also covers setup, and re-arms
+it after every event that leaves the stream open, even one it rejects. A
+cancellation replaces it with the grace timer. On expiry the core releases the
+stream, records the response as `interrupted` and finishes the turn `failed`
+with code `provider_stalled`. Nothing remains to confirm, so it releases rather
+than cancels. The default is generous because reasoning models may stay silent
+for minutes before their first visible event.
+
+**Dependencies.** Both are added in the workspace manifest and used only by
+`harness-core`:
+
+- `futures-core` 0.3, with `default-features = false` and only `std`, for the
+  `Stream` trait. Tokio already depended on it.
+- `tokio-util` 0.7 (0.7.20 locked), with `default-features = false` and no
+  features enabled, for `sync::CancellationToken` and its owned
+  `WaitForCancellationFutureOwned`. That module is unconditional; the codec,
+  io, net, rt and time feature modules stay disabled. It adds `bytes` and
+  `futures-sink` to the lockfile; `pin-project-lite` and `futures-core` were
+  already present. Enable a feature only together with code that needs it,
+  and record it here.
 
 ## Consequences
 
@@ -88,10 +117,14 @@ whether it was cancelled and dropped.
 - Driver tests express cancellation, interruption, setup failure, mid-stream
   failure and malformed output through scripts, without virtual time unless
   the grace period itself is under test.
-- The biased loop still polls provider events before timers and commands, as
-  step 3 chose. A stream that is always ready is consumed before the next
-  command is read, bounded by the core's partial limit. Native adapters wait
-  on I/O between chunks.
+- The loop serves timers and commands before provider events. A `View` or
+  `Cancel` is never delayed by a fast stream, and a deadline that passes while
+  events are ready still fires.
+- Each event re-arms the idle timer, which costs a `CancelTimer` and a
+  `SetTimer`: in the driver, an aborted and a spawned sleep task. A cheaper
+  timer wheel can replace the per-timer tasks if streams make this measurable.
+- A provider silent for longer than `provider_idle_timeout` fails its turn,
+  even if it would later have answered.
 - Step 5 extends `ModelInput`; providers must not assume it stays model-only.
 - Not yet covered from Contract 1's validation gates: native replay state and
   its rejection (M04), deadlines, adapter queue bounds and a native conformance

@@ -387,16 +387,6 @@ impl<E: Env + Send + 'static> Driver<E> {
                     self.worker = None;
                     self.step(Input::StorageFailed { error: PersistError::WorkerLost });
                 }
-                // Pull-driven: the stream produces only when polled here.
-                event = std::future::poll_fn(|cx| {
-                    self.inference.as_mut().expect("guarded").stream.as_mut().poll_next(cx)
-                }), if self.inference.is_some() => {
-                    let inference = self.inference.as_ref().expect("guarded").id;
-                    match event {
-                        Some(event) => self.step(Input::Provider { inference, event }),
-                        None => { self.inference = None; self.step(Input::ProviderEnded { inference }); }
-                    }
-                }
                 Some((epoch, timer)) = self.timer_receive.recv() => {
                     // A fire from a replaced runtime could alias a new `TimerId`.
                     if epoch == *self.runtime.epoch() {
@@ -419,6 +409,24 @@ impl<E: Env + Send + 'static> Driver<E> {
                             self.mailbox_closed = true;
                             self.closing = true;
                         }
+                    }
+                }
+                // Last, so timers and commands (a cancel) are never starved by
+                // a stream that is always ready. Pull-driven: it produces only
+                // when polled here, and each event spends Tokio's coop budget,
+                // so the task yields even if every other branch is idle.
+                event = std::future::poll_fn(|cx| {
+                    let coop = std::task::ready!(tokio::task::coop::poll_proceed(cx));
+                    let event = std::task::ready!(
+                        self.inference.as_mut().expect("guarded").stream.as_mut().poll_next(cx)
+                    );
+                    coop.made_progress();
+                    std::task::Poll::Ready(event)
+                }), if self.inference.is_some() => {
+                    let inference = self.inference.as_ref().expect("guarded").id;
+                    match event {
+                        Some(event) => self.step(Input::Provider { inference, event }),
+                        None => { self.inference = None; self.step(Input::ProviderEnded { inference }); }
                     }
                 }
             }

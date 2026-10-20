@@ -82,7 +82,8 @@ returns `ShuttingDown` for commands it receives while draining; neither reaches
 the core.
 
 `RuntimeConfig` has `max_inferences_per_turn` (32), `max_partial_bytes`
-(4 MiB), `max_user_bytes` (1 MiB) and `cancel_grace` (2 s).
+(4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s) and
+`provider_idle_timeout` (300 s).
 
 ## Durability
 
@@ -118,6 +119,7 @@ Other stream endings record the response and finish the turn in one commit:
 | `failed` with a valid error | `failed`, that error | `turn_finished(failed, <error code>)` |
 | `cancelled` by the provider | `cancelled` | `turn_finished(cancelled, provider_cancelled)` |
 | EOF without `Finished` | `interrupted` | `turn_finished(failed, provider_eof)` |
+| No event within `provider_idle_timeout` | `interrupted` | `turn_finished(failed, provider_stalled)` |
 | over `max_partial_bytes` | `interrupted` | `turn_finished(failed, response_too_large)` |
 | protocol violation | `failed`, `malformed_stream` error | `turn_finished(failed, malformed_stream)` |
 
@@ -218,9 +220,14 @@ invalid ones. It reads no clock and reports `provider_failure`/`no_script` when
 no script is left. `streams()` records each request, the events yielded, and
 whether the stream was cancelled and dropped.
 
+- An idle timer of `provider_idle_timeout` is armed with `StartInference` and
+  re-armed after every event that leaves the stream open. A cancellation
+  replaces it with the grace timer. On expiry the stream is released, the
+  response is recorded `interrupted`, and the turn fails with
+  `provider_stalled`.
 - The core emits `ReleaseInference` exactly once per started stream, when it
   stops listening: at any end, at grace expiry, for a malformed or oversized
-  stream, and on fault. Malformed and oversized streams are released at once,
+  stream, on idle timeout and on fault. Malformed and oversized streams are released at once,
   without a cancellation to confirm.
 - Events for a stream that is not current, or that is cancelled or already
   ended, are dropped. Each drop emits a `StaleProviderEvent` diagnostic with
@@ -337,14 +344,16 @@ existing `RuntimeConfig` limits. Channel capacities of zero are clamped to one.
 Artifact task saturation returns `PersistError::Rejected { code: "overloaded" }`.
 Reopen outside `Faulted` returns `Rejected { code: "not_faulted" }`.
 
-The driver uses biased `select!`: persistence/preflight replies first, provider
-events next, timers next, commands last. For `StartInference` it calls
+The driver uses biased `select!`, in this order: persistence and preflight
+replies, worker exit, timers, artifact failures, commands, and provider events
+last. Each provider event spends Tokio's cooperative budget, so even a stream
+that is always ready makes the task yield, and commands such as `Cancel` are
+served between events. For `StartInference` it calls
 `ModelProvider::stream` with a `ModelRequest { response_id, input: ModelInput
 { model } }` and a fresh cancellation token, and polls the returned stream one
 event at a time; nothing is queued between the stream and the core.
 `CancelInference` cancels the token, and `ReleaseInference` drops the stream.
-Every drop also cancels the token. Worker exit and artifact failure are
-also observed before commands. It maps effects to worker requests, provider
+Every drop also cancels the token. It maps effects to worker requests, provider
 receivers, sleep tasks and broadcast events; it makes no turn decisions.
 Timers use Tokio deadlines and keep abortable task handles by `TimerId`.
 Each fire carries the epoch of the runtime that set it. A new runtime restarts
@@ -404,5 +413,6 @@ shutdown and its drain rejections, uncertain writes, panic, overload, media,
 an injected overlapping storage effect, and a stale timer fire after reopen.
 `ScriptedProvider` scripts cover confirmed cancellation without virtual time,
 a stalled stream released at grace end, setup and mid-stream failure,
-interruption and a malformed stream released at once. A randomized test runs 512 seeds. See
+interruption, a malformed stream released at once, a cancel that preempts
+an always-ready stream, and an idle timeout that restarts on each event. A randomized test runs 512 seeds. See
 [development](development.md#runtime-tests).

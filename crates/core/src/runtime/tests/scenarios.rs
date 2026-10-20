@@ -4,8 +4,13 @@
 use super::*;
 use crate::runtime::tests::scenario;
 
+/// `Started` changes nothing visible; it only restarts the idle timer.
 fn started(d: &mut Driver) {
-    assert!(d.provider(ProviderEvent::Started).is_empty());
+    assert!(matches!(
+        d.provider(ProviderEvent::Started)[..],
+        [Effect::CancelTimer { .. }, Effect::SetTimer { duration, .. }]
+            if duration == d.runtime.config().provider_idle_timeout
+    ));
 }
 fn say(d: &mut Driver, block_index: u32, text: &str) -> Vec<Effect> {
     d.provider(ProviderEvent::TextDelta {
@@ -174,6 +179,7 @@ scenarios!(
     command_retry_while_in_flight_attaches_to_the_opening_commit,
     turn_id_differs_from_command_id_and_the_receipt_links_them,
     stream_ending_without_finished_is_interrupted,
+    provider_idle_timeout_interrupts_a_stalled_stream,
     partial_response_limit_interrupts_the_stream with limited(32, 1000),
     malformed_or_incomplete_tool_calls_are_never_answered,
     io_failure_before_write_faults_with_only_rejections_after,
@@ -678,6 +684,41 @@ mod bodies {
         );
         assert_eq!(texts(&responses(d)[0]), ["cut"]);
         assert_eq!(outcome(d, &turn_of(d, request)), Some(TurnOutcome::Failed));
+    }
+
+    pub fn provider_idle_timeout_interrupts_a_stalled_stream(d: &mut Driver) {
+        let request = begin(d, "slow");
+        let effects = say(d, 0, "so far");
+        // Each event restarts the idle timer.
+        let [
+            ..,
+            Effect::CancelTimer { .. },
+            Effect::SetTimer { timer, duration },
+        ] = effects[..]
+        else {
+            panic!("idle timer not restarted: {effects:?}")
+        };
+        assert_eq!(duration, d.runtime.config().provider_idle_timeout);
+        assert_eq!(d.timers.iter().copied().collect::<Vec<_>>(), [timer]);
+        let effects = d.fire(timer);
+        // The core stops listening: nothing remains to confirm.
+        assert!(has(&effects, |e| matches!(
+            e,
+            Effect::ReleaseInference { .. }
+        )));
+        assert!(!has(&effects, |e| matches!(
+            e,
+            Effect::CancelInference { .. }
+        )));
+        assert_eq!(persists(&effects), 1);
+        d.settle();
+        assert_eq!(
+            shapes(d)[2],
+            "assistant(interrupted) finished(failed, provider_stalled)"
+        );
+        assert_eq!(texts(&responses(d)[0]), ["so far"]);
+        assert_eq!(outcome(d, &turn_of(d, request)), Some(TurnOutcome::Failed));
+        assert!(d.timers.is_empty());
     }
 
     pub fn partial_response_limit_interrupts_the_stream(d: &mut Driver) {

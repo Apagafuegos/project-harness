@@ -639,8 +639,8 @@ async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
     let reopened = fixture.handle.reopen().await.unwrap();
     assert_ne!(reopened.epoch, old.epoch);
 
-    // The new runtime restarts its counters, so its cancel timer is TimerId(1)
-    // again: the same ID the old runtime armed for its cancel.
+    // The new runtime restarts its counters and repeats the same sequence, so
+    // its idle and grace timers reuse the IDs the old runtime armed.
     let Accepted::TurnStarted { turn_id, .. } =
         fixture.handle.command(Fixture::command(3)).await.unwrap()
     else {
@@ -657,7 +657,10 @@ async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
         .unwrap();
     let before = fixture.handle.view().await.unwrap();
     let timers = fixture.handle.timer_sender().await;
-    timers.send((old.epoch.clone(), TimerId(1))).unwrap();
+    // Fire every low ID of the old epoch; one aliases the armed grace timer.
+    for n in 1..=8 {
+        timers.send((old.epoch.clone(), TimerId(n))).unwrap();
+    }
     // Fires are polled before the mailbox, and the worker answers in order: any
     // commit the fire caused is synced before this upload and in the next view.
     fixture.handle.view().await.unwrap();
@@ -996,6 +999,111 @@ async fn scripted_failures_record_their_outcomes_and_release_every_stream() {
     );
     assert_eq!(provider.remaining(), 0);
     assert!(provider.streams().iter().all(|record| record.dropped));
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn cancel_preempts_an_always_ready_stream_within_a_few_events() {
+    const DELTAS: usize = 20_000;
+    let script = Script::new(
+        std::iter::once(Step::Event(ProviderEvent::Started))
+            .chain((0..DELTAS).map(|_| Step::text(0, "x")))
+            .chain([Step::completed(FinishReason::Stop)]),
+    );
+    let (fixture, provider) =
+        Fixture::scripted(DriverConfig::default(), WorkerOptions::default(), [script]).await;
+    let Accepted::TurnStarted { turn_id, .. } =
+        fixture.handle.command(Fixture::command(1)).await.unwrap()
+    else {
+        panic!("start")
+    };
+    // The stream never pends, yet the mailbox is served between its events.
+    fixture
+        .wait(|view| {
+            view.partial.as_ref().is_some_and(
+                |p| matches!(p.blocks.get(&0), Some(PartialBlock::Text(t)) if !t.is_empty()),
+            )
+        })
+        .await;
+    let yielded = provider.streams()[0].yielded;
+    assert!(
+        yielded < DELTAS / 10,
+        "{yielded} events before the first view"
+    );
+    assert!(matches!(
+        fixture.handle.command(Command::Cancel { turn_id }).await,
+        Ok(Accepted::Cancelling { .. })
+    ));
+    let live = fixture.wait(idle).await;
+    let [response] = &responses(&live)[..] else {
+        panic!("one response")
+    };
+    assert_eq!(response.outcome, ResponseOutcome::Cancelled);
+    let [ContentBlock::Text { text }] = &response.content[..] else {
+        panic!("one text block")
+    };
+    // `yielded` counts `Started`; every later delta was dropped as stale.
+    assert!(
+        text.len() < yielded + 3,
+        "{} deltas applied, {yielded} events yielded when the cancel was sent",
+        text.len()
+    );
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn provider_idle_timeout_restarts_on_events_and_fails_a_stalled_turn() {
+    let (release, wait) = oneshot::channel();
+    let config = DriverConfig {
+        runtime: RuntimeConfig {
+            provider_idle_timeout: Duration::from_secs(10),
+            ..RuntimeConfig::default()
+        },
+        ..DriverConfig::default()
+    };
+    let (fixture, provider) = Fixture::scripted(
+        config,
+        WorkerOptions::default(),
+        [Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "a"),
+            Step::Wait(wait),
+            Step::text(0, "b"),
+            Step::Stall,
+        ])],
+    )
+    .await;
+    fixture.handle.command(Fixture::command(1)).await.unwrap();
+    let text = |text: &'static str| {
+        move |view: &RuntimeView| {
+            view.partial
+                .as_ref()
+                .is_some_and(|p| p.blocks.get(&0) == Some(&PartialBlock::Text(text.into())))
+        }
+    };
+    fixture.wait(text("a")).await;
+    let inferring = Phase::Durable(RuntimeState::Inferring);
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(fixture.handle.view().await.unwrap().phase, inferring);
+    // An event at 9 s restarts the timer: nothing fires at 10 s.
+    release.send(()).unwrap();
+    fixture.wait(text("ab")).await;
+    tokio::time::advance(Duration::from_secs(9)).await;
+    assert_eq!(fixture.handle.view().await.unwrap().phase, inferring);
+    assert!(!provider.streams()[0].dropped);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let live = fixture.wait(idle).await;
+    assert_eq!(
+        finishes(&live),
+        [(TurnOutcome::Failed, Some("provider_stalled".into()))]
+    );
+    let [response] = &responses(&live)[..] else {
+        panic!("one response")
+    };
+    assert_eq!(response.outcome, ResponseOutcome::Interrupted);
+    assert_eq!(response.content, [ContentBlock::Text { text: "ab".into() }]);
+    let record = &provider.streams()[0];
+    assert!(record.cancelled && record.dropped);
     fixture.handle.shutdown().await;
 }
 
