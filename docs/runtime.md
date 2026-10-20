@@ -38,6 +38,7 @@ active turn, timers, and a requested cancel.
 | `PersistFailed` | `CommitToken`, `PersistError::{Rejected{code}, Io{message}, Poisoned, WorkerLost}` | Storage worker |
 | `ArtifactsVerified` | `CommitToken`, missing/invalid references | Storage worker, before C1 |
 | `StorageFailed` | `PersistError` | Worker exit or failed artifact I/O |
+| `DriverInvariant` | stable `code` | Driver refused an effect that would break its own invariant |
 | `PublishView` | — | Driver attaching a replacement runtime; emits the current phase |
 | `Provider` | `InferenceId`, `ProviderEvent` | Provider stream |
 | `ProviderEnded` | `InferenceId` | Stream closed, with or without `Finished` |
@@ -75,7 +76,9 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
 `HeadSelected { ack }` or `ModelSwitched { ack }`. `Rejection` is `Busy`,
 `RecoveryRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
-The handle can also return `Overloaded` before submission.
+The handle can also return `Overloaded` before submission, and the driver
+returns `ShuttingDown` for commands it receives while draining; neither reaches
+the core.
 
 `RuntimeConfig` has `max_inferences_per_turn` (32), `max_partial_bytes`
 (4 MiB), `max_user_bytes` (1 MiB) and `cancel_grace` (2 s).
@@ -228,8 +231,10 @@ Cancellation never claims rollback.
 
 ## Faults
 
-`PersistFailed` or `StorageFailed`, an answer for a token not in flight, or an
-acknowledgement that does not extend the snapshot moves the core to `Faulted`.
+`PersistFailed`, `StorageFailed` or `DriverInvariant`, an answer for a token
+not in flight, or an acknowledgement that does not extend the snapshot moves
+the core to `Faulted`. `DriverInvariant { code }` faults with
+`FaultCause::Internal(code)`.
 It then cancels the open stream and armed timer, clears the partial response,
 emits `Fault`, and rejects pending requests and every later command with
 `Faulted`. It never retries. Other inputs then produce no effects. Only a new
@@ -293,6 +298,12 @@ subscriptions hold only weak command senders and do not keep the driver alive.
   timer/terminal commits and all in-flight storage work, drains artifacts, drops
   worker senders, and awaits worker exit. The lock is released before it
   returns, including for simultaneous shutdown callers. Immediate open succeeds.
+  During the drain the mailbox is still read: commands get
+  `Rejection::ShuttingDown`, uploads and reopen get
+  `Rejected { code: "shutting_down" }`, and views are still answered. Messages
+  queued after the loop ends are answered the same way once the worker exits.
+  After the driver has exited, `command` reports `Faulted` because the mailbox
+  is closed.
 - `reopen().await -> Result<RuntimeView, PersistError>` requires `Faulted`.
   It drains and stops the old worker, opens the same journal on a new one, and
   constructs a new runtime/epoch. Unfinished work stays `RecoveryRequired`.
@@ -310,6 +321,15 @@ events next, timers next, commands last. Worker exit and artifact failure are
 also observed before commands. It maps effects to worker requests, provider
 receivers, sleep tasks and broadcast events; it makes no turn decisions.
 Timers use Tokio deadlines and keep abortable task handles by `TimerId`.
+Each fire carries the epoch of the runtime that set it. A new runtime restarts
+`TimerId`s, so the driver drops fires from another epoch instead of letting a
+stale fire end a new runtime's grace period; reopen also aborts leftover timers.
+
+The driver holds one storage slot for `Persist` and `VerifyArtifacts`. The core
+never has two outstanding, but the driver checks the slot in every build. If an
+effect would replace an occupied slot, the driver keeps the existing operation,
+which may already be written, skips the new one and feeds
+`DriverInvariant { code: "storage_overlap" }` to the core.
 
 `StorageWorker::open` and `create` open on a named `std::thread`. Only that
 thread calls `JournalStore`; it owns the store until drop. Requests arrive by
@@ -341,6 +361,7 @@ epoch even when recovery prevents a new command.
 - **Step 5:** context projection and its report. `StartInference` names the head
   and model only.
 - **Step 6:** startup recovery. `RecoveryRequired` only rejects commands today.
+  Explicit torn-tail repair through the handle also belongs here.
 - Also later: approvals, compaction, configuration changes, real tools and
   providers.
 
@@ -355,5 +376,6 @@ gives the published snapshot. The async driver's tests use a current-thread
 Tokio runtime with paused time, real channels and a dedicated worker. Only
 explicit virtual-time advances fire timers; I/O gates hold durability boundaries
 without real sleeps. They cover lag, mid-stream joins, epoch replacement,
-shutdown, uncertain writes, panic, overload and media. A randomized test runs 512 seeds. See
+shutdown and its drain rejections, uncertain writes, panic, overload, media,
+an injected overlapping storage effect, and a stale timer fire after reopen. A randomized test runs 512 seeds. See
 [development](development.md#runtime-tests).

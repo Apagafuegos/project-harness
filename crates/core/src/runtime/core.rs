@@ -203,6 +203,11 @@ impl Runtime {
         &self.view.view().snapshot
     }
 
+    /// This runtime incarnation's epoch.
+    pub fn epoch(&self) -> &RuntimeEpoch {
+        &self.view.view().epoch
+    }
+
     /// The current phase.
     pub fn phase(&self) -> Phase {
         self.view.view().phase
@@ -228,6 +233,10 @@ impl Runtime {
                 self.fault(FaultCause::Persist(error))
             }
             Input::StorageFailed { .. } => {}
+            Input::DriverInvariant { code } if self.mode != Mode::Faulted => {
+                self.fault(FaultCause::Internal(code))
+            }
+            Input::DriverInvariant { .. } => {}
             Input::Command { request, command } => self.command(request, command, env),
             Input::Persisted {
                 token,

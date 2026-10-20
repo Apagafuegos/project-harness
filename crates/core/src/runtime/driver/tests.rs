@@ -485,6 +485,183 @@ async fn shutdown_waits_for_inflight_sync_and_releases_lock_for_immediate_open()
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn commands_during_shutdown_drain_are_rejected_as_shutting_down() {
+    // Sent while the drain waits for an in-flight sync and the turn's cancel.
+    let fixture = Fixture::new(DriverConfig::default()).await;
+    let (entered, release) = fixture.gate(Point::Written);
+    let handle = fixture.handle.clone();
+    let command = tokio::spawn(async move { handle.command(Fixture::command(1)).await });
+    entered.await.unwrap();
+    let handle = fixture.handle.clone();
+    let shutdown = tokio::spawn(async move { handle.shutdown().await });
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fixture.handle.command(Fixture::command(2)).await,
+        Err(Rejection::ShuttingDown)
+    );
+    assert!(
+        matches!(fixture.handle.put_artifact(b"late".to_vec()).await, Err(PersistError::Rejected { code }) if code == "shutting_down")
+    );
+    assert_eq!(fixture.handle.view().await.unwrap().snapshot.sequence(), 0);
+    assert!(!shutdown.is_finished());
+    release.send(()).unwrap();
+    command.await.unwrap().unwrap();
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(2)).await;
+    shutdown.await.unwrap();
+
+    // Queued after the loop ended, while the drain joins an artifact upload.
+    let fixture = Fixture::new(DriverConfig::default()).await;
+    let (entered, release) = fixture.gate(Point::ArtifactWritten);
+    let handle = fixture.handle.clone();
+    let upload = tokio::spawn(async move { handle.put_artifact(b"upload".to_vec()).await });
+    entered.await.unwrap();
+    let handle = fixture.handle.clone();
+    let shutdown = tokio::spawn(async move { handle.shutdown().await });
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let mut queued = std::pin::pin!(fixture.handle.command(Fixture::command(1)));
+    assert!(
+        queued
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    release.send(()).unwrap();
+    upload.await.unwrap().unwrap();
+    assert_eq!(queued.await, Err(Rejection::ShuttingDown));
+    shutdown.await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn overlapping_storage_effects_fault_and_keep_the_first_operation() {
+    for media in [false, true] {
+        let mut fixture = Fixture::new(DriverConfig::default()).await;
+        let mut command = Fixture::command(1);
+        if media {
+            let artifact = fixture
+                .handle
+                .put_artifact(b"image".to_vec())
+                .await
+                .unwrap();
+            let Command::StartTurn { content, .. } = &mut command else {
+                unreachable!()
+            };
+            *content = vec![ContentBlock::Image {
+                artifact,
+                mime_type: "image/png".into(),
+            }];
+        }
+        let mut subscription = fixture.handle.subscribe();
+        let SubscriptionItem::Reset(_) = subscription.next().await.unwrap() else {
+            panic!("initial reset")
+        };
+        fixture
+            .options
+            .duplicate_storage_next
+            .store(true, Ordering::SeqCst);
+        assert_eq!(
+            fixture.handle.command(command).await,
+            Err(Rejection::Faulted)
+        );
+        loop {
+            let Some(SubscriptionItem::Event(event)) = subscription.next().await else {
+                panic!("fault event")
+            };
+            if let EventKind::Fault(cause) = event.kind {
+                assert!(matches!(cause, FaultCause::Internal("storage_overlap")));
+                break;
+            }
+        }
+        // The first operation still completes exactly once; the second never runs.
+        let reopened = fixture.handle.reopen().await.unwrap();
+        if media {
+            assert_eq!(reopened.snapshot.sequence(), 0);
+            assert!(idle(&reopened));
+        } else {
+            assert_eq!(reopened.snapshot.sequence(), 1);
+            assert_eq!(reopened.phase, Phase::RecoveryRequired);
+        }
+        assert!(fixture.streams.try_recv().is_err());
+        fixture.handle.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
+    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let (turn_id, stream) = fixture.start(1).await;
+    fixture
+        .handle
+        .command(Command::Cancel { turn_id })
+        .await
+        .unwrap();
+    // The old runtime's TimerId(1) ends this grace period.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let old = fixture.wait(idle).await;
+    drop(stream);
+    fixture.root.io.test.lock().unwrap().fail = Some(Point::BeforeWrite);
+    assert_eq!(
+        fixture.handle.command(Fixture::command(2)).await,
+        Err(Rejection::Faulted)
+    );
+    let reopened = fixture.handle.reopen().await.unwrap();
+    assert_ne!(reopened.epoch, old.epoch);
+
+    // The new runtime restarts its counters, so its cancel timer is TimerId(1)
+    // again: the same ID the old runtime armed for its cancel.
+    let Accepted::TurnStarted { turn_id, .. } =
+        fixture.handle.command(Fixture::command(3)).await.unwrap()
+    else {
+        panic!("start")
+    };
+    let (request, stream) = fixture.streams.recv().await.unwrap();
+    assert_eq!(request.inference, InferenceId(1));
+    stream.send(ProviderEvent::Started).await.unwrap();
+    fixture
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn_id.clone(),
+        })
+        .await
+        .unwrap();
+    let before = fixture.handle.view().await.unwrap();
+    let timers = fixture.handle.timer_sender().await;
+    timers.send((old.epoch.clone(), TimerId(1))).unwrap();
+    // Fires are polled before the mailbox, and the worker answers in order: any
+    // commit the fire caused is synced before this upload and in the next view.
+    fixture.handle.view().await.unwrap();
+    fixture
+        .handle
+        .put_artifact(b"barrier".to_vec())
+        .await
+        .unwrap();
+    let view = fixture.handle.view().await.unwrap();
+    assert_eq!(view.phase, Phase::Durable(RuntimeState::Cancelling));
+    assert_eq!(view.active_turn.as_ref(), Some(&turn_id));
+    assert_eq!(view.snapshot.sequence(), before.snapshot.sequence());
+    // The current runtime's own timer still ends the grace period.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    let live = fixture.wait(idle).await;
+    assert_eq!(
+        live.snapshot
+            .turns()
+            .find(|(id, _)| **id == turn_id)
+            .unwrap()
+            .1
+            .outcome,
+        Some(TurnOutcome::Cancelled)
+    );
+    drop(stream);
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn bounded_command_mailbox_rejects_overload_without_waiting() {
     let fixture = Fixture::new(DriverConfig {
         command_capacity: 1,

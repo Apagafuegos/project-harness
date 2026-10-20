@@ -66,9 +66,14 @@ faults the runtime; no uncertain write is retried.
 
 **Shutdown and faults.** Shutdown requests core cancellation, waits for in-flight
 durability and artifact work, drops worker senders, then awaits exit before
-replying. A worker panic or lost reply becomes `WorkerLost`. Infrastructure
+replying. Commands arriving during the drain are answered `ShuttingDown` by the
+driver without reaching the core. A worker panic or lost reply becomes `WorkerLost`. Infrastructure
 failures outside an append enter the core through `Input::StorageFailed` and
-fault there too. Reopen is allowed only in `Faulted`, drains the old worker and
+fault there too. A driver invariant failure, such as a second storage effect
+while one is outstanding, enters as `Input::DriverInvariant` and faults with
+`FaultCause::Internal`; the outstanding operation is kept, never dropped.
+Timer fires carry their runtime's epoch, and fires from a replaced runtime are
+dropped. Reopen is allowed only in `Faulted`, drains the old worker and
 opens the same journal on a new worker. It never repairs a torn tail implicitly.
 An unfinished reopened snapshot stays `RecoveryRequired` until step 6.
 

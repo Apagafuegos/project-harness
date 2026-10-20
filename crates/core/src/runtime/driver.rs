@@ -15,6 +15,8 @@ use crate::session::{ArtifactRef, DataRoot, SessionHeader, SessionId};
 
 type CommandResult = Result<Accepted, Rejection>;
 type PendingStorage = Pin<Box<dyn Future<Output = Input> + Send>>;
+/// Timer fires carry their runtime's epoch: `TimerId`s restart in a new runtime.
+type TimerFire = (RuntimeEpoch, TimerId);
 
 /// Channel and artifact bounds for one driver, separate from core limits.
 #[derive(Clone, Debug)]
@@ -49,6 +51,9 @@ enum Message {
     PutArtifact(Vec<u8>, oneshot::Sender<Result<ArtifactRef, PersistError>>),
     Reopen(oneshot::Sender<Result<RuntimeView, PersistError>>),
     Shutdown(oneshot::Sender<()>),
+    /// Test-only access to the real timer channel, to inject stale fires.
+    #[cfg(test)]
+    TimerSender(oneshot::Sender<mpsc::UnboundedSender<TimerFire>>),
 }
 
 /// Cheaply cloned access to the one task owning a session runtime.
@@ -144,6 +149,16 @@ impl SessionHandle {
                 mpsc::error::TrySendError::Closed(_) => Rejection::Faulted,
             })?;
         receive.await.unwrap_or(Err(Rejection::Faulted))
+    }
+
+    #[cfg(test)]
+    async fn timer_sender(&self) -> mpsc::UnboundedSender<TimerFire> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Message::TimerSender(reply))
+            .await
+            .unwrap();
+        receive.await.unwrap()
     }
 
     /// Begin the gap-free subscription protocol immediately, before taking a view.
@@ -308,11 +323,13 @@ struct Driver<E, P> {
     storage: Option<PendingStorage>,
     inference: Option<(InferenceId, mpsc::Receiver<ProviderEvent>)>,
     timers: BTreeMap<TimerId, JoinHandle<()>>,
-    timer_send: mpsc::UnboundedSender<TimerId>,
-    timer_receive: mpsc::UnboundedReceiver<TimerId>,
+    timer_send: mpsc::UnboundedSender<TimerFire>,
+    timer_receive: mpsc::UnboundedReceiver<TimerFire>,
     artifacts: JoinSet<Result<(), PersistError>>,
     shutdown: Vec<oneshot::Sender<()>>,
     closing: bool,
+    /// Every sender is gone; `recv` would return `None` at once.
+    mailbox_closed: bool,
     cancel_sent: bool,
 }
 
@@ -352,6 +369,7 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
             artifacts: JoinSet::new(),
             shutdown: Vec::new(),
             closing: false,
+            mailbox_closed: false,
             cancel_sent: false,
         }
     }
@@ -397,9 +415,12 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                         None => { self.inference = None; self.step(Input::ProviderEnded { inference }); }
                     }
                 }
-                Some(timer) = self.timer_receive.recv() => {
-                    self.timers.remove(&timer);
-                    self.step(Input::TimerFired { timer });
+                Some((epoch, timer)) = self.timer_receive.recv() => {
+                    // A fire from a replaced runtime could alias a new `TimerId`.
+                    if epoch == *self.runtime.epoch() {
+                        self.timers.remove(&timer);
+                        self.step(Input::TimerFired { timer });
+                    }
                 }
                 result = self.artifacts.join_next(), if !self.artifacts.is_empty() => {
                     match result {
@@ -408,10 +429,14 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                         _ => {},
                     }
                 },
-                message = self.commands.recv(), if !self.closing => {
+                // Still read while draining, so late commands get `ShuttingDown`.
+                message = self.commands.recv(), if !self.mailbox_closed => {
                     match message {
                         Some(message) => self.message(message).await,
-                        None => self.closing = true,
+                        None => {
+                            self.mailbox_closed = true;
+                            self.closing = true;
+                        }
                     }
                 }
             }
@@ -425,11 +450,10 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
             worker.shutdown().await;
         }
         // Close only after exit: every concurrent shutdown waits for this point.
+        // Messages queued since the loop ended are refused while still closing.
         self.commands.close();
         while let Ok(message) = self.commands.try_recv() {
-            if let Message::Shutdown(reply) = message {
-                self.shutdown.push(reply);
-            }
+            self.message(message).await;
         }
         for reply in self.shutdown {
             let _ = reply.send(());
@@ -437,7 +461,27 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
     }
 
     fn step(&mut self, input: Input) {
-        for effect in self.runtime.step(input, &mut self.env) {
+        #[allow(unused_mut)]
+        let mut effects = self.runtime.step(input, &mut self.env);
+        #[cfg(test)]
+        if let Some(at) = effects.iter().position(|effect| {
+            matches!(
+                effect,
+                Effect::Persist { .. } | Effect::VerifyArtifacts { .. }
+            )
+        }) && self
+            .options
+            .duplicate_storage_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let duplicate = effects[at].clone();
+            effects.insert(at + 1, duplicate);
+        }
+        // The core keeps at most one storage operation outstanding. If it ever
+        // asks for a second, keep the first (it may already be written), skip
+        // the second, and let the core fault rather than drop an answer.
+        let mut overlap = false;
+        for effect in effects {
             match effect {
                 Effect::Persist {
                     token,
@@ -445,6 +489,10 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                     command,
                     at,
                 } => {
+                    if self.storage.is_some() {
+                        overlap = true;
+                        continue;
+                    }
                     let sender = self.worker.as_ref().map(|worker| worker.sender.clone());
                     self.storage = Some(Box::pin(async move {
                         let result = match sender {
@@ -462,6 +510,10 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                     }));
                 }
                 Effect::VerifyArtifacts { token, refs } => {
+                    if self.storage.is_some() {
+                        overlap = true;
+                        continue;
+                    }
                     let sender = self.worker.as_ref().map(|worker| worker.sender.clone());
                     self.storage = Some(Box::pin(async move {
                         let result = match sender {
@@ -503,10 +555,11 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                 }
                 Effect::SetTimer { timer, duration } => {
                     let send = self.timer_send.clone();
+                    let epoch = self.runtime.epoch().clone();
                     let deadline = tokio::time::Instant::now() + duration;
                     let task = tokio::spawn(async move {
                         tokio::time::sleep_until(deadline).await;
-                        let _ = send.send(timer);
+                        let _ = send.send((epoch, timer));
                     });
                     self.timers.insert(timer, task);
                 }
@@ -525,6 +578,11 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                 }
             }
         }
+        if overlap {
+            self.step(Input::DriverInvariant {
+                code: "storage_overlap",
+            });
+        }
         // A terminal core fault also disposes of an already-ended transport whose
         // sender failed to close, before local inference IDs can be reused.
         if self.runtime.phase() == Phase::Faulted {
@@ -533,7 +591,19 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
     }
 
     async fn message(&mut self, message: Message) {
+        let shutting_down = || PersistError::Rejected {
+            code: "shutting_down".into(),
+        };
         match message {
+            Message::Command(_, reply) if self.closing => {
+                let _ = reply.send(Err(Rejection::ShuttingDown));
+            }
+            Message::PutArtifact(_, reply) if self.closing => {
+                let _ = reply.send(Err(shutting_down()));
+            }
+            Message::Reopen(reply) if self.closing => {
+                let _ = reply.send(Err(shutting_down()));
+            }
             Message::Command(command, reply) => {
                 self.next_request += 1;
                 let request = RequestId(self.next_request);
@@ -585,6 +655,10 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                     if let Some(worker) = self.worker.take() {
                         worker.shutdown().await;
                     }
+                    // The fault cancelled the old runtime's timer; drop any left.
+                    for (_, timer) in std::mem::take(&mut self.timers) {
+                        timer.abort();
+                    }
                     match StorageWorker::start(
                         self.root.clone(),
                         self.session.clone(),
@@ -609,6 +683,10 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
             Message::Shutdown(reply) => {
                 self.shutdown.push(reply);
                 self.closing = true;
+            }
+            #[cfg(test)]
+            Message::TimerSender(reply) => {
+                let _ = reply.send(self.timer_send.clone());
             }
         }
     }

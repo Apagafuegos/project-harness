@@ -104,6 +104,12 @@ pub enum Input {
         /// Infrastructure failure; never retried.
         error: PersistError,
     },
+    /// The driver could not perform an effect without breaking one of its own
+    /// invariants. Faults with `FaultCause::Internal(code)`.
+    DriverInvariant {
+        /// Stable code naming the invariant.
+        code: &'static str,
+    },
 
     /// A client command, through the driver.
     Command {
@@ -397,6 +403,8 @@ pub enum Rejection {
     RecoveryRequired,
     /// A persistence failure stopped this runtime; reopen the store.
     Faulted,
+    /// The driver is draining for shutdown; the command never reached the core.
+    ShuttingDown,
     /// The named turn is not the active turn.
     NotActive,
     /// The command ID was accepted earlier for a different command.

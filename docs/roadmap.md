@@ -41,6 +41,13 @@ reopen and subscriptions. Epochs and view resets cover lag and runtime replaceme
 Remaining: the provider stream trait and scripted mock (step 4), the context builder and report (step 5) and
 startup recovery (step 6).
 
+Step 6 also adds torn-tail repair as an explicit `SessionHandle` command. Today
+`reopen()` returns the torn-tail diagnostic unchanged, so such a session is
+unreachable through the handle. The command must be bound to the fingerprint and
+size of the inspected journal, as `JournalStore::repair_tail` already is, and
+refuse a stale inspection. It is never run implicitly. Unfinished-turn recovery
+and torn-tail repair then share one inspect-then-confirm recovery flow.
+
 Add the public provider stream lifecycle and a deterministic scripted provider.
 Implement initial branch projection and the inspection API before Ratatui.
 Prove context/report reproducibility, ordered events, usage, partial-response

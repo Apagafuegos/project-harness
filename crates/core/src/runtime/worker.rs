@@ -83,7 +83,8 @@ pub struct StorageWorker {
     pub(super) exited: oneshot::Receiver<()>,
 }
 
-/// Test-only startup switches are applied on the worker, never on Tokio.
+/// Test-only fault switches. Worker switches are applied on the worker, never
+/// on Tokio; `duplicate_storage_next` is applied by the driver.
 #[derive(Clone, Default)]
 pub(super) struct WorkerOptions {
     #[cfg(test)]
@@ -92,6 +93,9 @@ pub(super) struct WorkerOptions {
     pub panic_next: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     pub lost_reply_next: Arc<std::sync::atomic::AtomicBool>,
+    /// Repeat the next storage effect, as if the core had asked for two.
+    #[cfg(test)]
+    pub duplicate_storage_next: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StorageWorker {
