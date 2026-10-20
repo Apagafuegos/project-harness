@@ -1,11 +1,11 @@
 # Runtime core
 
-Status: Milestone 2, steps 2 and 3 are implemented as `harness_core::runtime`:
-a pure synchronous state machine, a dedicated storage worker, and a Tokio
-driver/handle with broadcast subscriptions. An internal provider stand-in drives
-tests; the public handle reports a provider failure until the real provider seam
-arrives in step 4. Context building and startup recovery remain future work.
-[Decision 0004](decisions/0004-pure-runtime-core.md) records the design.
+Status: Milestone 2, steps 2 to 4 are implemented as `harness_core::runtime`
+and `harness_core::model`: a pure synchronous state machine, a dedicated storage
+worker, a Tokio driver/handle with broadcast subscriptions, and the provider
+stream seam with a scripted mock. Context building and startup recovery remain
+future work. Decisions [0004](decisions/0004-pure-runtime-core.md) and
+[0005](decisions/0005-provider-stream.md) record the design.
 
 ## Shape
 
@@ -64,7 +64,8 @@ fragments itself.
 | `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, `at` | Bind the command if present, append, answer |
 | `StartInference` | `InferenceId`, `TurnId`, head, `ModelRef`, `ResponseId` | Open a stream; context projection arrives in step 5 |
-| `CancelInference` | `InferenceId` | Stop the stream; its later events are dropped |
+| `CancelInference` | `InferenceId` | Cancel the stream's token; keep delivering it for a confirmation |
+| `ReleaseInference` | `InferenceId` | Stop listening and drop the stream; once per `StartInference` |
 | `SetTimer` / `CancelTimer` | `TimerId`, duration | Driver timer |
 | `Emit` | `RuntimeEvent` | Broadcast |
 | `Reply` | `RequestId`, `Result<Accepted, Rejection>` | Exactly one per `Command` |
@@ -182,11 +183,13 @@ arrives with the context builder.
 `NotActive`. Otherwise the request waits for a durable outcome:
 
 - **During inference:** emit `CancelInference` and `SetTimer(cancel_grace)` at
-  once, and persist `inferring>cancelling`. The first of `Finished`,
-  `ProviderEnded` or the timer ends the stream. Then the core persists the
-  partial response as `cancelled` with `turn_finished(cancelled)`, and cancels
-  the timer if it is still armed. Deltas after `CancelInference` are dropped as
-  stale and never reach the response.
+  once, and persist `inferring>cancelling`. The driver cancels the stream's
+  token and keeps polling it. The first of `Finished`, `ProviderEnded` or the
+  timer ends the stream, and the core emits `ReleaseInference`. Then the core
+  persists the partial response as `cancelled` with `turn_finished(cancelled)`,
+  and cancels the timer if it is still armed. Deltas after `CancelInference`
+  are dropped as stale and never reach the response. A provider that confirms
+  ends the turn at once; one that ignores the token is dropped at the grace end.
 - **During a commit in flight:** recorded and acted on after the ack, depending
   on the state that commit produced:
   - `inferring` before any stream: `inferring>cancelling` and
@@ -202,6 +205,23 @@ Cancellation never claims rollback.
 
 ## Provider stream
 
+`harness_core::model` is the seam. `ModelProvider::stream(&self, ModelRequest,
+OperationControl) -> ModelEventStream` returns an owned, pull-driven
+`futures_core::Stream` of `ProviderEvent`s that starts work when polled. Setup
+failures are terminal events. `OperationControl` carries a `CancellationToken`;
+deadlines are deferred. `ModelInput` names only the model until step 5.
+
+`model::scripted::ScriptedProvider` replays one `Script` per stream. Its steps
+are `Event`, `Wait` (until a test signals), `AwaitCancel` and `Stall` (until
+dropped); the end of the script is EOF. Events are yielded as written, even
+invalid ones. It reads no clock and reports `provider_failure`/`no_script` when
+no script is left. `streams()` records each request, the events yielded, and
+whether the stream was cancelled and dropped.
+
+- The core emits `ReleaseInference` exactly once per started stream, when it
+  stops listening: at any end, at grace expiry, for a malformed or oversized
+  stream, and on fault. Malformed and oversized streams are released at once,
+  without a cancellation to confirm.
 - Events for a stream that is not current, or that is cancelled or already
   ended, are dropped. Each drop emits a `StaleProviderEvent` diagnostic with
   the runtime's running count. A stale timer emits `StaleTimer`.
@@ -275,10 +295,11 @@ Views compare snapshots by session, sequence and record checksum.
 
 ## Async handle and worker
 
-`SessionHandle::open(root, session_id, DriverConfig)` opens the journal on its
-worker and spawns a driver task on the caller's Tokio runtime.
-`SessionHandle::create(root, session_id, header, config)` creates and syncs a
-new session instead. `root` is an `Arc<DataRoot>` prepared by the caller outside
+`SessionHandle::open(root, session_id, provider, DriverConfig)` opens the
+journal on its worker and spawns a driver task on the caller's Tokio runtime.
+`SessionHandle::create(root, session_id, header, provider, config)` creates and
+syncs a new session instead. `provider` is an `Arc<dyn ModelProvider>` that
+streams every inference of the session. `root` is an `Arc<DataRoot>` prepared by the caller outside
 async execution. Header configuration artifacts must already be published.
 Cloning a handle is cheap. Dropping every handle also initiates shutdown;
 subscriptions hold only weak command senders and do not keep the driver alive.
@@ -317,7 +338,12 @@ Artifact task saturation returns `PersistError::Rejected { code: "overloaded" }`
 Reopen outside `Faulted` returns `Rejected { code: "not_faulted" }`.
 
 The driver uses biased `select!`: persistence/preflight replies first, provider
-events next, timers next, commands last. Worker exit and artifact failure are
+events next, timers next, commands last. For `StartInference` it calls
+`ModelProvider::stream` with a `ModelRequest { response_id, input: ModelInput
+{ model } }` and a fresh cancellation token, and polls the returned stream one
+event at a time; nothing is queued between the stream and the core.
+`CancelInference` cancels the token, and `ReleaseInference` drops the stream.
+Every drop also cancels the token. Worker exit and artifact failure are
 also observed before commands. It maps effects to worker requests, provider
 receivers, sleep tasks and broadcast events; it makes no turn decisions.
 Timers use Tokio deadlines and keep abortable task handles by `TimerId`.
@@ -356,8 +382,6 @@ epoch even when recovery prevents a new command.
 
 ## Not implemented yet
 
-- **Step 4:** the provider `Stream` trait and a scripted mock that expresses
-  mid-stream failure and cancellation without wall-clock time.
 - **Step 5:** context projection and its report. `StartInference` names the head
   and model only.
 - **Step 6:** startup recovery. `RecoveryRequired` only rejects commands today.
@@ -377,5 +401,8 @@ Tokio runtime with paused time, real channels and a dedicated worker. Only
 explicit virtual-time advances fire timers; I/O gates hold durability boundaries
 without real sleeps. They cover lag, mid-stream joins, epoch replacement,
 shutdown and its drain rejections, uncertain writes, panic, overload, media,
-an injected overlapping storage effect, and a stale timer fire after reopen. A randomized test runs 512 seeds. See
+an injected overlapping storage effect, and a stale timer fire after reopen.
+`ScriptedProvider` scripts cover confirmed cancellation without virtual time,
+a stalled stream released at grace end, setup and mid-stream failure,
+interruption and a malformed stream released at once. A randomized test runs 512 seeds. See
 [development](development.md#runtime-tests).

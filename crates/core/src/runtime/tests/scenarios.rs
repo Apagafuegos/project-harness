@@ -685,7 +685,12 @@ mod bodies {
         begin(d, "big");
         say(d, 0, &"a".repeat(max / 2));
         let effects = say(d, 0, &"b".repeat(max / 2));
+        // The core stops listening at once; there is nothing to confirm.
         assert!(has(&effects, |e| matches!(
+            e,
+            Effect::ReleaseInference { .. }
+        )));
+        assert!(!has(&effects, |e| matches!(
             e,
             Effect::CancelInference { .. }
         )));
@@ -710,7 +715,7 @@ mod bodies {
         let effects = ready(d, 0);
         assert!(has(&effects, |e| matches!(
             e,
-            Effect::CancelInference { .. }
+            Effect::ReleaseInference { .. }
         )));
         d.settle();
         // Duplicate keys are malformed, as storage would reject them.

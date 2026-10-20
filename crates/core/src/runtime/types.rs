@@ -3,10 +3,11 @@
 use std::{fmt, time::Duration};
 
 use crate::session::{
-    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, EntryId, FinishReason,
-    ModelError, ModelRef, ResponseId, SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome,
-    Usage,
+    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, EntryId, ModelRef, ResponseId,
+    SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome, Usage,
 };
+
+pub use crate::model::{ProviderEvent, ProviderOutcome};
 
 use super::view::Phase;
 
@@ -231,75 +232,6 @@ impl PersistError {
     }
 }
 
-/// Terminal outcome reported by a provider's `Finished` event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProviderOutcome {
-    /// The response completed with a finish reason.
-    Completed,
-    /// The provider failed; an error is required.
-    Failed,
-    /// The provider reports that it cancelled the response.
-    Cancelled,
-}
-
-/// Normalized provider stream events (Contract 1). Blocks are identified by a
-/// response-local `block_index`; the core issues each tool call's `CallId`
-/// when it sees `ToolCallStarted`, so a provider cannot choose journal IDs.
-#[derive(Clone, Debug, PartialEq)]
-pub enum ProviderEvent {
-    /// The response opened. At most once, before any content.
-    Started,
-    /// Append text to a text block.
-    TextDelta {
-        /// Response-local block.
-        block_index: u32,
-        /// Appended text.
-        text: String,
-    },
-    /// Append to a provider-designated displayable reasoning summary.
-    ReasoningSummaryDelta {
-        /// Response-local block.
-        block_index: u32,
-        /// Appended text.
-        text: String,
-    },
-    /// Open a tool-call block.
-    ToolCallStarted {
-        /// Response-local block.
-        block_index: u32,
-        /// Tool name; must be nonempty.
-        name: String,
-        /// Native call identity, retained for replay.
-        provider_call_id: Option<String>,
-    },
-    /// Append an argument fragment. Fragments may be incomplete JSON.
-    ToolArgumentsDelta {
-        /// Response-local tool-call block.
-        block_index: u32,
-        /// Appended fragment.
-        fragment: String,
-    },
-    /// All fragments arrived; they must form one JSON object.
-    ToolCallReady {
-        /// Response-local tool-call block.
-        block_index: u32,
-    },
-    /// Cumulative usage so far. Replaces, never adds to, earlier figures.
-    UsageUpdated {
-        /// Usage snapshot.
-        usage: Usage,
-    },
-    /// The single terminal event.
-    Finished {
-        /// Terminal outcome.
-        outcome: ProviderOutcome,
-        /// Required exactly when the outcome is `Completed`.
-        finish_reason: Option<FinishReason>,
-        /// Required exactly when the outcome is `Failed`.
-        error: Option<ModelError>,
-    },
-}
-
 /// Side effects the driver performs. The core does nothing else.
 #[derive(Clone, Debug)]
 pub enum Effect {
@@ -335,8 +267,16 @@ pub enum Effect {
         /// Identity the assistant entry will carry.
         response_id: ResponseId,
     },
-    /// Stop a stream. Later events for it are ignored.
+    /// Ask a stream to stop by cancelling its token. Keep delivering its events
+    /// and its end: the core waits for a confirmation, ignoring other events,
+    /// until `ReleaseInference`.
     CancelInference {
+        /// The stream.
+        inference: InferenceId,
+    },
+    /// Stop listening and drop the stream, which also cancels it. Exactly once
+    /// per `StartInference`, when the core stops listening for any reason.
+    ReleaseInference {
         /// The stream.
         inference: InferenceId,
     },

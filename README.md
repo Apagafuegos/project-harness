@@ -21,7 +21,8 @@ commit it emits in tests is appended to real storage. The `harness` command
 still shows only help and version information. A dedicated storage worker and
 Tokio driver now expose an async command handle, media uploads, cancellation,
 shutdown/reopen and subscriptions that resync after lag or runtime replacement.
-The provider is an internal stand-in; no real provider adapter, workspace tool,
+Sessions stream inferences from a public `ModelProvider` seam; a deterministic
+scripted mock is the only provider. No native provider adapter, workspace tool,
 context projection or TUI exists, so nothing runs an agent yet.
 
 ## Getting started
@@ -64,7 +65,7 @@ The context inspection API belongs to the headless engine from the first slice.
 See [session storage usage](docs/session-storage.md), the
 [storage decision](docs/decisions/0003-jsonl-storage.md), the
 [runtime core](docs/runtime.md) and its [decision](docs/decisions/0004-pure-runtime-core.md).
-The rest of the milestone adds the provider Stream trait and scripted mock, headless context inspection and startup recovery. See
+The rest of the milestone adds headless context inspection and startup recovery. See
 the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

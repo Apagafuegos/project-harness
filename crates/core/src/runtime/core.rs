@@ -690,8 +690,8 @@ impl Runtime {
             }
         }
         if let Some(inference) = self.inference.take() {
-            if matches!(inference.status, Stream::Open) {
-                self.out.push(Effect::CancelInference {
+            if !matches!(inference.status, Stream::Ended(_)) {
+                self.out.push(Effect::ReleaseInference {
                     inference: inference.id,
                 });
             }
@@ -993,8 +993,7 @@ impl Runtime {
             && inference.timer == Some(timer)
         {
             inference.timer = None;
-            inference.status = Stream::Ended(End::Cancelled);
-            self.advance(env);
+            self.end(End::Cancelled, env);
         } else {
             self.emit(EventKind::Diagnostic(RuntimeDiagnostic::StaleTimer {
                 timer,
@@ -1016,18 +1015,19 @@ impl Runtime {
             inference: id,
             reason,
         }));
-        self.out.push(Effect::CancelInference { inference: id });
         self.end(End::Malformed(reason), env);
     }
 
     fn too_large(&mut self, env: &mut dyn Env) {
-        let id = self.inference.as_ref().expect("current inference").id;
-        self.out.push(Effect::CancelInference { inference: id });
         self.end(End::TooLarge, env);
     }
 
+    /// The core stops listening: release the stream, then decide what follows.
     fn end(&mut self, end: End, env: &mut dyn Env) {
-        self.inference.as_mut().expect("current inference").status = Stream::Ended(end);
+        let inference = self.inference.as_mut().expect("current inference");
+        inference.status = Stream::Ended(end);
+        let id = inference.id;
+        self.out.push(Effect::ReleaseInference { inference: id });
         self.advance(env);
     }
 

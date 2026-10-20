@@ -38,8 +38,10 @@ tested against real storage with scenarios, replay and 512 randomized seeds
 Step 3 is implemented: a dedicated worker owns blocking storage, a Tokio driver
 owns the pure core, and `SessionHandle` exposes commands, media, shutdown,
 reopen and subscriptions. Epochs and view resets cover lag and runtime replacement.
-Remaining: the provider stream trait and scripted mock (step 4), the context builder and report (step 5) and
-startup recovery (step 6).
+Step 4 is implemented: the public `ModelProvider` stream seam, cancel-then-release
+stream lifecycle and a deterministic `ScriptedProvider`
+([decision 0005](decisions/0005-provider-stream.md)).
+Remaining: the context builder and report (step 5) and startup recovery (step 6).
 
 Step 6 also adds torn-tail repair as an explicit `SessionHandle` command. Today
 `reopen()` returns the torn-tail diagnostic unchanged, so such a session is

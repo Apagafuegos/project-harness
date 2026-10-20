@@ -99,6 +99,7 @@ The schema and all three example journals are exercised by tests. See
 in, effects out, no I/O. It reads lifecycle facts from storage snapshots and is
 tested by appending every commit it emits to a real store. See
 [runtime](runtime.md). A Tokio task is its only production caller and owns the
-broadcast/handle; a dedicated thread owns the blocking store. Providers, tools,
+broadcast/handle; a dedicated thread owns the blocking store. `harness_core::model`
+defines the provider stream seam and a scripted mock. Native providers, tools,
 context projection and the TUI remain unimplemented; the CLI still provides help/version only. See
 the [roadmap](roadmap.md).

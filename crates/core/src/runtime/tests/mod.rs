@@ -76,6 +76,8 @@ struct Driver {
     /// Latest started inference of the current runtime.
     inference: Option<InferenceId>,
     started: Vec<InferenceId>,
+    /// Started and not yet released, in the current runtime.
+    listening: BTreeSet<InferenceId>,
     timers: BTreeSet<TimerId>,
 }
 
@@ -121,6 +123,7 @@ impl Driver {
             last_seq: 0,
             inference: None,
             started: Vec::new(),
+            listening: BTreeSet::new(),
             timers: BTreeSet::new(),
         }
     }
@@ -133,6 +136,9 @@ impl Driver {
         }
         let view = self.runtime.view();
         assert_eq!(view.event_seq, self.last_seq, "view lags the event stream");
+        if view.phase == Phase::Faulted || view.snapshot.active_turn().is_none() {
+            assert!(self.listening.is_empty(), "stream not released");
+        }
         self.segment.inputs.push(input);
         self.segment.effects.extend(effects.iter().cloned());
         self.segment.views.push(view);
@@ -165,8 +171,14 @@ impl Driver {
             Effect::StartInference { inference, .. } => {
                 self.inference = Some(*inference);
                 self.started.push(*inference);
+                assert!(self.listening.insert(*inference), "inference reused");
             }
-            Effect::CancelInference { .. } => {}
+            Effect::CancelInference { inference } => {
+                assert!(self.listening.contains(inference), "cancel after release");
+            }
+            Effect::ReleaseInference { inference } => {
+                assert!(self.listening.remove(inference), "second release");
+            }
             Effect::SetTimer { timer, .. } => assert!(self.timers.insert(*timer)),
             Effect::CancelTimer { timer } => {
                 self.timers.remove(timer);
@@ -329,6 +341,8 @@ impl Driver {
         self.done.push(segment);
         self.last_seq = 0;
         self.inference = None;
+        // A restarted process holds none of the old runtime's streams.
+        self.listening.clear();
         self.timers.clear();
     }
 

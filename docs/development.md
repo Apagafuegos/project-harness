@@ -91,8 +91,9 @@ RUNTIME_SEEDS=5000 cargo test --release -p harness-core --locked randomized
 
 ### Async driver tests
 
-`runtime/driver/tests.rs` drives `SessionHandle` with a private mpsc provider
-stand-in. Every behavioral test uses
+`runtime/driver/tests.rs` drives `SessionHandle` through the public
+`ModelProvider` seam: the scripted mock, or a test-only channel adapter where a
+test paces events against observed views. Every behavioral test uses
 `#[tokio::test(flavor = "current_thread", start_paused = true)]`,
 `DeterministicEnv`, real worker threads and real temporary journals. No test
 reads the wall clock or sleeps for real. Cancellation timers fire only through

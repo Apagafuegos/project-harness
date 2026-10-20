@@ -7,28 +7,40 @@ use std::{
     time::Duration,
 };
 
+use futures_core::Stream;
+
 use super::*;
-use crate::session::{
-    io::{Gate, Point},
-    *,
+use crate::{
+    model::scripted::{Script, ScriptedProvider, Step},
+    session::{
+        io::{Gate, Point},
+        *,
+    },
 };
 
-struct Scripted {
-    opened: mpsc::UnboundedSender<(InferenceRequest, mpsc::Sender<ProviderEvent>)>,
-    scripts: VecDeque<Vec<ProviderEvent>>,
+/// One opened stream, handed to the test, which plays the provider.
+type Opened = (ModelRequest, mpsc::Sender<ProviderEvent>, CancellationToken);
+
+/// Test-only adapter: each stream is a channel the test writes into, so tests
+/// can pace events against the views they observe.
+struct Channel {
+    opened: mpsc::UnboundedSender<Opened>,
 }
 
-impl Provider for Scripted {
-    fn start(&mut self, request: InferenceRequest) -> mpsc::Receiver<ProviderEvent> {
+impl ModelProvider for Channel {
+    fn stream(&self, request: ModelRequest, control: OperationControl) -> ModelEventStream {
         let (send, receive) = mpsc::channel(256);
-        if let Some(script) = self.scripts.pop_front() {
-            for event in script {
-                send.try_send(event).unwrap();
-            }
-        } else {
-            self.opened.send((request, send)).unwrap();
-        }
-        receive
+        let _ = self.opened.send((request, send, control.cancel));
+        Box::pin(Received(receive))
+    }
+}
+
+struct Received(mpsc::Receiver<ProviderEvent>);
+
+impl Stream for Received {
+    type Item = ProviderEvent;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<ProviderEvent>> {
+        self.0.poll_recv(cx)
     }
 }
 
@@ -37,7 +49,7 @@ struct Fixture {
     root: Arc<DataRoot>,
     session: SessionId,
     handle: SessionHandle,
-    streams: mpsc::UnboundedReceiver<(InferenceRequest, mpsc::Sender<ProviderEvent>)>,
+    streams: mpsc::UnboundedReceiver<Opened>,
     awake: JoinHandle<()>,
     options: WorkerOptions,
 }
@@ -50,13 +62,25 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(config: DriverConfig) -> Self {
-        Self::configured(config, WorkerOptions::default(), VecDeque::new()).await
+        Self::configured(config, WorkerOptions::default(), None).await
     }
 
+    /// A fixture whose inferences replay `scripts` through the public mock.
+    async fn scripted(
+        config: DriverConfig,
+        options: WorkerOptions,
+        scripts: impl IntoIterator<Item = Script>,
+    ) -> (Self, Arc<ScriptedProvider>) {
+        let provider = Arc::new(ScriptedProvider::new(scripts));
+        let fixture = Self::configured(config, options, Some(provider.clone())).await;
+        (fixture, provider)
+    }
+
+    /// Without a provider, the test plays each stream through `streams`.
     async fn configured(
         config: DriverConfig,
         options: WorkerOptions,
-        scripts: VecDeque<Vec<ProviderEvent>>,
+        provider: Option<Arc<dyn ModelProvider>>,
     ) -> Self {
         // Prevent paused time from automatically advancing while a real OS
         // thread is syncing. Only tests' explicit advance() fires timers.
@@ -87,7 +111,7 @@ impl Fixture {
         root.io.test.lock().unwrap().trace.clear();
         root.io.test.lock().unwrap().threads.clear();
         let (opened, streams) = mpsc::unbounded_channel();
-        let provider = Scripted { opened, scripts };
+        let provider = provider.unwrap_or_else(|| Arc::new(Channel { opened }));
         let handle = SessionHandle::launch(
             root.clone(),
             session.clone(),
@@ -126,20 +150,18 @@ impl Fixture {
         }
     }
 
-    async fn start(&mut self, n: u64) -> (TurnId, mpsc::Sender<ProviderEvent>) {
+    async fn start(&mut self, n: u64) -> (TurnId, mpsc::Sender<ProviderEvent>, CancellationToken) {
         let Accepted::TurnStarted { turn_id, .. } =
             self.handle.command(Self::command(n)).await.unwrap()
         else {
             panic!("start")
         };
-        let (request, stream) = self.streams.recv().await.unwrap();
-        assert_eq!(request.turn_id, turn_id);
-        assert_eq!(request.inference, InferenceId(n));
+        let (request, stream, cancel) = self.streams.recv().await.unwrap();
         assert!(!request.response_id.as_str().is_empty());
-        assert!(!request.head.as_str().is_empty());
-        assert_eq!(request.model.model, "test");
+        assert_eq!(request.input.model.model, "test");
+        assert!(!cancel.is_cancelled());
         stream.send(ProviderEvent::Started).await.unwrap();
-        (turn_id, stream)
+        (turn_id, stream, cancel)
     }
 
     async fn wait(&self, check: impl Fn(&RuntimeView) -> bool) -> RuntimeView {
@@ -229,7 +251,7 @@ async fn end_to_end_replies_follow_sync_and_only_worker_touches_storage() {
         panic!("start")
     };
     assert_eq!(ack.sequence, 1);
-    let (_, stream) = fixture.streams.recv().await.unwrap();
+    let (_, stream, _) = fixture.streams.recv().await.unwrap();
     stream.send(ProviderEvent::Started).await.unwrap();
     stream.send(delta("Hello")).await.unwrap();
     let partial = fixture
@@ -261,9 +283,9 @@ async fn end_to_end_replies_follow_sync_and_only_worker_touches_storage() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn cancellation_grace_uses_virtual_time_and_drops_late_events() {
+async fn unconfirmed_cancellation_drops_late_events_and_releases_at_grace() {
     let mut fixture = Fixture::new(DriverConfig::default()).await;
-    let (turn_id, stream) = fixture.start(1).await;
+    let (turn_id, stream, cancel) = fixture.start(1).await;
     stream.send(delta("before")).await.unwrap();
     fixture
         .wait(|view| view.partial.as_ref().is_some_and(|p| !p.blocks.is_empty()))
@@ -275,7 +297,9 @@ async fn cancellation_grace_uses_virtual_time_and_drops_late_events() {
         })
         .await
         .unwrap();
-    assert!(stream.send(delta("late")).await.is_err());
+    // The token is cancelled, but the stream stays open for a confirmation.
+    assert!(cancel.is_cancelled());
+    stream.send(delta("late")).await.unwrap();
     assert_eq!(
         fixture.handle.view().await.unwrap().phase,
         Phase::Durable(RuntimeState::Cancelling)
@@ -285,8 +309,10 @@ async fn cancellation_grace_uses_virtual_time_and_drops_late_events() {
         fixture.handle.view().await.unwrap().phase,
         Phase::Durable(RuntimeState::Cancelling)
     );
+    assert!(!stream.is_closed());
     tokio::time::advance(Duration::from_secs(1)).await;
     let live = fixture.wait(idle).await;
+    assert!(stream.is_closed(), "released when the grace period ends");
     assert_eq!(
         live.snapshot
             .turns()
@@ -324,7 +350,7 @@ async fn lagging_and_midstream_subscribers_get_partial_then_converge() {
     let SubscriptionItem::Reset(mut client) = lagging.next().await.unwrap() else {
         panic!("initial reset")
     };
-    let (_, stream) = fixture.start(1).await;
+    let (_, stream, _) = fixture.start(1).await;
     for _ in 0..80 {
         stream.send(delta("x")).await.unwrap();
     }
@@ -355,7 +381,7 @@ async fn lagging_and_midstream_subscribers_get_partial_then_converge() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn fault_reopen_changes_epoch_and_preserves_existing_subscription() {
     let mut fixture = Fixture::new(DriverConfig::default()).await;
-    let (_, stream) = fixture.start(1).await;
+    let (_, stream, _) = fixture.start(1).await;
     for _ in 0..100 {
         stream.send(delta("x")).await.unwrap();
     }
@@ -595,7 +621,7 @@ async fn overlapping_storage_effects_fault_and_keep_the_first_operation() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
     let mut fixture = Fixture::new(DriverConfig::default()).await;
-    let (turn_id, stream) = fixture.start(1).await;
+    let (turn_id, stream, _) = fixture.start(1).await;
     fixture
         .handle
         .command(Command::Cancel { turn_id })
@@ -620,8 +646,7 @@ async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
     else {
         panic!("start")
     };
-    let (request, stream) = fixture.streams.recv().await.unwrap();
-    assert_eq!(request.inference, InferenceId(1));
+    let (_, stream, _) = fixture.streams.recv().await.unwrap();
     stream.send(ProviderEvent::Started).await.unwrap();
     fixture
         .handle
@@ -762,7 +787,7 @@ async fn media_upload_is_synced_and_missing_or_invalid_refs_write_nothing() {
         })
         .await
         .unwrap();
-    let (_, stream) = fixture.streams.recv().await.unwrap();
+    let (_, stream, _) = fixture.streams.recv().await.unwrap();
     stream.send(ProviderEvent::Started).await.unwrap();
     stream.send(finished(FinishReason::Stop)).await.unwrap();
     drop(stream);
@@ -782,6 +807,196 @@ async fn media_upload_is_synced_and_missing_or_invalid_refs_write_nothing() {
             mime_type: "image/png".into()
         }]
     );
+}
+
+fn finishes(view: &RuntimeView) -> Vec<(TurnOutcome, Option<String>)> {
+    view.snapshot
+        .events()
+        .filter_map(|(_, _, event)| match event {
+            JournalEvent::TurnFinished(finished) => Some((finished.outcome, finished.code.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn responses(view: &RuntimeView) -> Vec<AssistantResponse> {
+    view.snapshot
+        .entries()
+        .filter_map(|(_, entry)| match &entry.entry.payload {
+            EntryPayload::AssistantResponse(response) => Some(response.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn error(code: ModelErrorCode) -> ModelError {
+    ModelError {
+        code,
+        message: "scripted".into(),
+        provider_code: None,
+        retry_after_ms: None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn scripted_cancellation_is_confirmed_without_advancing_time() {
+    let (fixture, provider) = Fixture::scripted(
+        DriverConfig::default(),
+        WorkerOptions::default(),
+        [Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "partial"),
+            Step::AwaitCancel,
+            Step::cancelled(),
+        ])],
+    )
+    .await;
+    let Accepted::TurnStarted { turn_id, .. } =
+        fixture.handle.command(Fixture::command(1)).await.unwrap()
+    else {
+        panic!("start")
+    };
+    fixture
+        .wait(|view| {
+            view.partial
+                .as_ref()
+                .is_some_and(|p| p.blocks.get(&0) == Some(&PartialBlock::Text("partial".into())))
+        })
+        .await;
+    assert!(matches!(
+        fixture.handle.command(Command::Cancel { turn_id }).await,
+        Ok(Accepted::Cancelling { .. })
+    ));
+    // No virtual time passes: the confirmation, not the grace timer, ends it.
+    let live = fixture.wait(idle).await;
+    assert_eq!(finishes(&live), [(TurnOutcome::Cancelled, None)]);
+    let [response] = &responses(&live)[..] else {
+        panic!("one response")
+    };
+    assert_eq!(response.outcome, ResponseOutcome::Cancelled);
+    assert_eq!(
+        response.content,
+        [ContentBlock::Text {
+            text: "partial".into()
+        }]
+    );
+    let [record] = &provider.streams()[..] else {
+        panic!("one stream")
+    };
+    assert_eq!(record.request.response_id, response.response_id);
+    assert_eq!(record.request.input.model, response.model);
+    assert_eq!(record.yielded, 3);
+    assert!(record.cancelled && record.dropped);
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn scripted_stall_is_cancelled_then_released_when_grace_ends() {
+    let (fixture, provider) = Fixture::scripted(
+        DriverConfig::default(),
+        WorkerOptions::default(),
+        [Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "partial"),
+            Step::Stall,
+        ])],
+    )
+    .await;
+    let Accepted::TurnStarted { turn_id, .. } =
+        fixture.handle.command(Fixture::command(1)).await.unwrap()
+    else {
+        panic!("start")
+    };
+    fixture
+        .wait(|view| view.partial.as_ref().is_some_and(|p| !p.blocks.is_empty()))
+        .await;
+    fixture
+        .handle
+        .command(Command::Cancel { turn_id })
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert_eq!(
+        fixture.handle.view().await.unwrap().phase,
+        Phase::Durable(RuntimeState::Cancelling)
+    );
+    let record = &provider.streams()[0];
+    assert!(record.cancelled && !record.dropped, "still listening");
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let live = fixture.wait(idle).await;
+    assert_eq!(finishes(&live), [(TurnOutcome::Cancelled, None)]);
+    assert!(provider.streams()[0].dropped);
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn scripted_failures_record_their_outcomes_and_release_every_stream() {
+    let (fixture, provider) = Fixture::scripted(
+        DriverConfig::default(),
+        WorkerOptions::default(),
+        [
+            // Setup failure: a terminal event before any start.
+            Script::new([Step::failed(error(ModelErrorCode::Authentication))]),
+            // Mid-stream failure after partial output.
+            Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::text(0, "half"),
+                Step::failed(error(ModelErrorCode::Transport)),
+            ]),
+            // Interruption: EOF without a terminal event.
+            Script::new([Step::Event(ProviderEvent::Started), Step::text(0, "cut")]),
+            // Malformed arguments, then a stall: released without any grace.
+            Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::Event(ProviderEvent::ToolCallStarted {
+                    block_index: 0,
+                    name: "read".into(),
+                    provider_call_id: None,
+                }),
+                Step::Event(ProviderEvent::ToolArgumentsDelta {
+                    block_index: 0,
+                    fragment: "{".into(),
+                }),
+                Step::Event(ProviderEvent::ToolCallReady { block_index: 0 }),
+                Step::Stall,
+            ]),
+        ],
+    )
+    .await;
+    for n in 1..=4 {
+        fixture.handle.command(Fixture::command(n)).await.unwrap();
+        fixture
+            .wait(|view| idle(view) && finishes(view).len() == n as usize)
+            .await;
+    }
+    let live = fixture.handle.view().await.unwrap();
+    let failed = |code: &str| (TurnOutcome::Failed, Some(code.to_owned()));
+    assert_eq!(
+        finishes(&live),
+        [
+            failed("authentication"),
+            failed("transport"),
+            failed("provider_eof"),
+            failed("malformed_stream"),
+        ]
+    );
+    let outcomes: Vec<_> = responses(&live)
+        .iter()
+        .map(|response| (response.outcome, response.content.clone()))
+        .collect();
+    let text = |text: &str| vec![ContentBlock::Text { text: text.into() }];
+    assert_eq!(
+        outcomes,
+        [
+            (ResponseOutcome::Failed, vec![]),
+            (ResponseOutcome::Failed, text("half")),
+            (ResponseOutcome::Interrupted, text("cut")),
+            (ResponseOutcome::Failed, vec![]),
+        ]
+    );
+    assert_eq!(provider.remaining(), 0);
+    assert!(provider.streams().iter().all(|record| record.dropped));
+    fixture.handle.shutdown().await;
 }
 
 fn tool_script() -> Vec<ProviderEvent> {
@@ -812,13 +1027,13 @@ async fn tool_loop_and_inference_limit_use_core_decisions_through_real_channels(
             ..DriverConfig::default()
         })
         .await;
-        let (turn, stream) = fixture.start(1).await;
+        let (turn, stream, _) = fixture.start(1).await;
         for event in tool_script().into_iter().skip(1) {
             stream.send(event).await.unwrap();
         }
         drop(stream);
         if limit == 2 {
-            let (_, stream) = fixture.streams.recv().await.unwrap();
+            let (_, stream, _) = fixture.streams.recv().await.unwrap();
             stream.send(ProviderEvent::Started).await.unwrap();
             stream.send(delta("done")).await.unwrap();
             stream.send(finished(FinishReason::Stop)).await.unwrap();
@@ -957,7 +1172,7 @@ async fn media_preflight_holds_the_exclusive_slot_and_attaches_matching_retries(
     release.send(()).unwrap();
     upload.await.unwrap().unwrap();
     assert_eq!(first.await.unwrap(), retry.await.unwrap());
-    let (_, stream) = fixture.streams.recv().await.unwrap();
+    let (_, stream, _) = fixture.streams.recv().await.unwrap();
     stream.send(ProviderEvent::Started).await.unwrap();
     stream.send(finished(FinishReason::Stop)).await.unwrap();
     fixture.wait(idle).await;
@@ -1047,15 +1262,16 @@ async fn session_handle_tool_turn_benchmark() {
         })
         .unwrap();
     let direct = receive.await.unwrap();
-    let scripts = (0..TURNS)
-        .flat_map(|_| {
-            [
-                tool_script(),
-                vec![ProviderEvent::Started, finished(FinishReason::Stop)],
-            ]
-        })
-        .collect();
-    let fixture = Fixture::configured(
+    let scripts = (0..TURNS).flat_map(|_| {
+        [
+            Script::new(tool_script().into_iter().map(Step::Event)),
+            Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::completed(FinishReason::Stop),
+            ]),
+        ]
+    });
+    let (fixture, _) = Fixture::scripted(
         DriverConfig::default(),
         WorkerOptions {
             without_oracle: true,

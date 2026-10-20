@@ -2,7 +2,9 @@
 
 Status: High-level behavior provisionally agreed. Concrete types, lifecycle,
 and defaults are proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
-No public Rust types or provider adapters are implemented yet.
+The stream seam and a deterministic scripted mock are implemented in
+`harness_core::model` ([decision 0005](../decisions/0005-provider-stream.md)).
+No native provider adapter exists yet.
 
 ## Purpose and ownership
 

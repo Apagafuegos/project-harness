@@ -6,12 +6,16 @@ use tokio::{
     sync::{broadcast, mpsc, oneshot},
     task::{JoinHandle, JoinSet},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{
     worker::{StorageWorker, WorkerOptions},
     *,
 };
-use crate::session::{ArtifactRef, DataRoot, SessionHeader, SessionId};
+use crate::{
+    model::{ModelEventStream, ModelInput, ModelProvider, ModelRequest, OperationControl},
+    session::{ArtifactRef, DataRoot, SessionHeader, SessionId},
+};
 
 type CommandResult = Result<Accepted, Rejection>;
 type PendingStorage = Pin<Box<dyn Future<Output = Input> + Send>>;
@@ -66,10 +70,11 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Open using the caller's Tokio runtime. No runtime is created here.
-    /// The private stand-in reports `provider_unavailable` until step 4.
+    /// Every inference of this session streams from `provider`.
     pub async fn open(
         root: Arc<DataRoot>,
         session: SessionId,
+        provider: Arc<dyn ModelProvider>,
         config: DriverConfig,
     ) -> Result<Self, PersistError> {
         Self::launch(
@@ -78,7 +83,7 @@ impl SessionHandle {
             None,
             config,
             SystemEnv,
-            UnavailableProvider,
+            provider,
             WorkerOptions::default(),
         )
         .await
@@ -89,6 +94,7 @@ impl SessionHandle {
         root: Arc<DataRoot>,
         session: SessionId,
         header: SessionHeader,
+        provider: Arc<dyn ModelProvider>,
         config: DriverConfig,
     ) -> Result<Self, PersistError> {
         let mut env = SystemEnv;
@@ -99,19 +105,19 @@ impl SessionHandle {
             Some((header, at)),
             config,
             env,
-            UnavailableProvider,
+            provider,
             WorkerOptions::default(),
         )
         .await
     }
 
-    pub(super) async fn launch<E: Env + Send + 'static, P: Provider + Send + 'static>(
+    pub(super) async fn launch<E: Env + Send + 'static>(
         root: Arc<DataRoot>,
         session: SessionId,
         create: Option<(SessionHeader, crate::session::Timestamp)>,
         config: DriverConfig,
         mut env: E,
-        provider: P,
+        provider: Arc<dyn ModelProvider>,
         options: WorkerOptions,
     ) -> Result<Self, PersistError> {
         let (worker, snapshot) = StorageWorker::start(
@@ -266,62 +272,35 @@ async fn request_view(commands: &mpsc::Sender<Message>) -> Option<RuntimeView> {
     receive.await.ok()
 }
 
-/// Minimal internal seam. Step 4 replaces this with the provider Stream trait.
-pub(super) trait Provider {
-    fn start(&mut self, request: InferenceRequest) -> mpsc::Receiver<ProviderEvent>;
+/// The current stream and its token. Dropping it cancels the token first, so
+/// an adapter's own tasks stop even if dropping the stream alone would not.
+struct Live {
+    id: InferenceId,
+    stream: ModelEventStream,
+    cancel: CancellationToken,
 }
 
-/// Exactly the data carried by StartInference, with no context decisions.
-#[derive(Clone, Debug)]
-pub(super) struct InferenceRequest {
-    pub inference: InferenceId,
-    pub turn_id: crate::session::TurnId,
-    pub head: crate::session::EntryId,
-    pub model: crate::session::ModelRef,
-    pub response_id: crate::session::ResponseId,
-}
-
-struct UnavailableProvider;
-impl Provider for UnavailableProvider {
-    fn start(&mut self, request: InferenceRequest) -> mpsc::Receiver<ProviderEvent> {
-        let InferenceRequest {
-            inference,
-            turn_id,
-            head,
-            model,
-            response_id,
-        } = request;
-        let _ = (inference, turn_id, head, model, response_id);
-        let (send, receive) = mpsc::channel(1);
-        let _ = send.try_send(ProviderEvent::Finished {
-            outcome: ProviderOutcome::Failed,
-            finish_reason: None,
-            error: Some(crate::session::ModelError {
-                code: crate::session::ModelErrorCode::ProviderFailure,
-                message: "provider_unavailable: step 4 is not implemented".into(),
-                provider_code: None,
-                retry_after_ms: None,
-            }),
-        });
-        receive
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.cancel.cancel();
     }
 }
 
-struct Driver<E, P> {
+struct Driver<E> {
     root: Arc<DataRoot>,
     session: SessionId,
     worker: Option<StorageWorker>,
     runtime: Runtime,
     config: DriverConfig,
     env: E,
-    provider: P,
+    provider: Arc<dyn ModelProvider>,
     options: WorkerOptions,
     events: broadcast::Sender<RuntimeEvent>,
     commands: mpsc::Receiver<Message>,
     replies: BTreeMap<RequestId, oneshot::Sender<CommandResult>>,
     next_request: u64,
     storage: Option<PendingStorage>,
-    inference: Option<(InferenceId, mpsc::Receiver<ProviderEvent>)>,
+    inference: Option<Live>,
     timers: BTreeMap<TimerId, JoinHandle<()>>,
     timer_send: mpsc::UnboundedSender<TimerFire>,
     timer_receive: mpsc::UnboundedReceiver<TimerFire>,
@@ -333,7 +312,7 @@ struct Driver<E, P> {
     cancel_sent: bool,
 }
 
-impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
+impl<E: Env + Send + 'static> Driver<E> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         root: Arc<DataRoot>,
@@ -342,7 +321,7 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
         runtime: Runtime,
         config: DriverConfig,
         env: E,
-        provider: P,
+        provider: Arc<dyn ModelProvider>,
         options: WorkerOptions,
         events: broadcast::Sender<RuntimeEvent>,
         commands: mpsc::Receiver<Message>,
@@ -408,8 +387,11 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                     self.worker = None;
                     self.step(Input::StorageFailed { error: PersistError::WorkerLost });
                 }
-                event = async { self.inference.as_mut().expect("guarded").1.recv().await }, if self.inference.is_some() => {
-                    let inference = self.inference.as_ref().expect("guarded").0;
+                // Pull-driven: the stream produces only when polled here.
+                event = std::future::poll_fn(|cx| {
+                    self.inference.as_mut().expect("guarded").stream.as_mut().poll_next(cx)
+                }), if self.inference.is_some() => {
+                    let inference = self.inference.as_ref().expect("guarded").id;
                     match event {
                         Some(event) => self.step(Input::Provider { inference, event }),
                         None => { self.inference = None; self.step(Input::ProviderEnded { inference }); }
@@ -526,29 +508,41 @@ impl<E: Env + Send + 'static, P: Provider + Send + 'static> Driver<E, P> {
                         }
                     }));
                 }
+                // The head is for step 5's context builder; the provider sees
+                // only the response identity and the model.
                 Effect::StartInference {
                     inference,
-                    turn_id,
-                    head,
                     model,
                     response_id,
+                    ..
                 } => {
-                    self.inference = Some((
-                        inference,
-                        self.provider.start(InferenceRequest {
-                            inference,
-                            turn_id,
-                            head,
-                            model,
-                            response_id,
-                        }),
-                    ));
+                    let cancel = CancellationToken::new();
+                    let request = ModelRequest {
+                        response_id,
+                        input: ModelInput { model },
+                    };
+                    let control = OperationControl {
+                        cancel: cancel.clone(),
+                    };
+                    self.inference = Some(Live {
+                        id: inference,
+                        stream: self.provider.stream(request, control),
+                        cancel,
+                    });
                 }
+                // Keep polling: the core waits for the stream to confirm.
                 Effect::CancelInference { inference } => {
+                    if let Some(live) = &self.inference
+                        && live.id == inference
+                    {
+                        live.cancel.cancel();
+                    }
+                }
+                Effect::ReleaseInference { inference } => {
                     if self
                         .inference
                         .as_ref()
-                        .is_some_and(|(id, _)| *id == inference)
+                        .is_some_and(|live| live.id == inference)
                     {
                         self.inference = None;
                     }
