@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::context::SessionConfiguration;
+use crate::context::{ModelLimits, SessionConfiguration};
 use crate::runtime::*;
 use crate::session::{io::Point, *};
 
@@ -83,9 +83,28 @@ struct Driver {
     timers: BTreeSet<TimerId>,
 }
 
+/// The default configuration with a generous limit for both test models, so
+/// a turn's budget is known.
+pub(super) fn known() -> RuntimeConfig {
+    let mut config = RuntimeConfig::default();
+    for model in ["scripted", "other"] {
+        config.context.catalog.insert(
+            ModelRef {
+                provider_instance: "mock".into(),
+                model: model.into(),
+            },
+            ModelLimits {
+                context_tokens: Some(1_000_000),
+                max_output_tokens: None,
+            },
+        );
+    }
+    config
+}
+
 impl Driver {
     fn new() -> Self {
-        Self::with_config(RuntimeConfig::default())
+        Self::with_config(known())
     }
 
     fn with_config(config: RuntimeConfig) -> Self {

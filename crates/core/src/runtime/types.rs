@@ -81,6 +81,8 @@ pub struct RuntimeConfig {
     /// recorded as interrupted, failing the turn with `provider_stalled`.
     pub provider_idle_timeout: Duration,
     /// Model limits, budget deductions and estimator of the context builder.
+    /// The default catalog is empty, and a turn whose model has no context
+    /// limit fails with `context_budget_unknown`.
     pub context: ContextConfig,
 }
 

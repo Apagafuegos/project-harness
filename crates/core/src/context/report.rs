@@ -174,6 +174,8 @@ pub enum ExclusionReason {
     ProviderStateNotPortable,
     /// A `model_changed` entry; it selects the model and is not dialogue.
     ModelChangeMarker,
+    /// A response with no blocks and no continuation: nothing to replay.
+    EmptyResponse,
     /// A summary superseded by a later summary on the branch.
     SupersededSummary,
     /// An entry replaced by a summary.
@@ -193,6 +195,11 @@ pub struct Exclusion {
     /// The covering summary for `covered_by_summary`, or the superseding one
     /// for `superseded_summary`; otherwise `null`.
     pub summary_id: Option<EntryId>,
+    /// Present only when `summary_id` is itself covered or superseded: the
+    /// summary that stands for this entry in the projection, found by
+    /// following those links until one is a projection item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_summary: Option<EntryId>,
 }
 
 /// One summary on the branch that no later summary supersedes.
@@ -292,6 +299,7 @@ pub enum Budget {
         unestimated_opaque_bytes: u64,
     },
     /// No context limit is configured: no overflow check, no compaction flag.
+    /// The core fails a turn in this state with `context_budget_unknown`.
     Unknown {
         /// Why.
         reason: UnknownLimit,
@@ -367,6 +375,9 @@ pub struct PreviewReport {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Flags {
+    /// The budget is unknown. Inspection reports it; the core refuses to
+    /// infer with it and fails the turn with `context_budget_unknown`.
+    pub budget_unknown: bool,
     /// The estimate exceeds the usable budget. Never set for an unknown budget.
     pub overflow: bool,
     /// The estimate is at or above the compaction threshold. Nothing acts on

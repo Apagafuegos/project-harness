@@ -440,7 +440,12 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
                 kind: EventKind::ContextBuilt { flags, .. },
                 ..
             }) => count(format!(
-                "context built{}{}",
+                "context built{}{}{}",
+                if flags.budget_unknown {
+                    ", budget unknown"
+                } else {
+                    ""
+                },
                 if flags.overflow { ", overflow" } else { "" },
                 if flags.compaction_recommended {
                     ", compaction recommended"
@@ -466,23 +471,40 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
 }
 
 /// Every context the core built during the run is rebuilt from the reopened
-/// journal with the same fingerprint, and builds at a random head, for its
-/// own model and as a preview, pass the builder's invariant checks. A broken
-/// invariant would also have faulted the core with an internal cause.
+/// journal with the same fingerprint and flags, every stream started from a
+/// known budget that fits, and builds at a random head, for its own model and
+/// as a preview, pass the builder's invariant checks. A broken invariant
+/// would also have faulted the core with an internal cause.
 fn check_contexts(finished: &Finished, rng: &mut Rng) {
     let first = &finished.segments[0];
     let builder = ContextBuilder::new(&first.config.context, &first.configuration);
     let snapshot = &finished.reopened;
+    for effect in finished.segments.iter().flat_map(|s| &s.effects) {
+        if let Effect::StartInference {
+            head, fingerprint, ..
+        } = effect
+        {
+            let rebuilt = builder.build(snapshot, Some(head), None).unwrap();
+            assert_eq!(&rebuilt.projection.fingerprint, fingerprint);
+            let flags = rebuilt.report.flags;
+            assert!(!flags.budget_unknown, "inference with an unknown budget");
+            assert!(!flags.overflow, "inference with an overflowing context");
+        }
+    }
     for event in finished.segments.iter().flat_map(Segment::events) {
         match &event.kind {
             EventKind::ContextBuilt {
-                head, fingerprint, ..
+                head,
+                fingerprint,
+                flags,
+                ..
             } => {
                 let rebuilt = builder.build(snapshot, Some(head), None).unwrap();
                 assert_eq!(
                     &rebuilt.projection.fingerprint, fingerprint,
                     "rebuild after reopen differs"
                 );
+                assert_eq!(&rebuilt.report.flags, flags);
             }
             EventKind::Fault(FaultCause::Internal(code)) => panic!("internal fault: {code}"),
             _ => {}
@@ -511,20 +533,39 @@ fn run_seed(seed: u64) -> Finished {
     };
     // A separate generator, so the interleavings of each seed are unchanged.
     let mut context = Rng(seed ^ 0xc0e7_e7c7);
-    let limit = *context.pick(&[None, Some(16_400), Some(16_420), Some(1_000_000)]);
+    // Without a limit every turn fails in `Preparing`, so that case is rarer.
+    let limit = *context.pick(&[
+        None,
+        Some(16_400),
+        Some(16_420),
+        Some(16_400),
+        Some(16_420),
+        Some(1_000_000),
+        Some(1_000_000),
+        Some(1_000_000),
+    ]);
     if let Some(context_tokens) = limit {
         // With the default 16,384 tokens of deductions, small limits leave
         // room for a few turns only, so overflow is reached in some runs.
-        config.context.catalog.insert(
-            ModelRef {
-                provider_instance: "mock".into(),
-                model: "scripted".into(),
-            },
-            ModelLimits {
-                context_tokens: Some(context_tokens),
-                max_output_tokens: None,
-            },
-        );
+        // In some runs `b` stays unlisted: turns after a switch to it fail
+        // with `context_budget_unknown`, as every turn does without a limit.
+        let listed: &[&str] = if context.chance(25) {
+            &["scripted", "a"]
+        } else {
+            &["scripted", "a", "b"]
+        };
+        for model in listed {
+            config.context.catalog.insert(
+                ModelRef {
+                    provider_instance: "mock".into(),
+                    model: (*model).into(),
+                },
+                ModelLimits {
+                    context_tokens: Some(context_tokens),
+                    max_output_tokens: None,
+                },
+            );
+        }
     }
     let mut d = Driver::with_config(config);
     let mut issued = Vec::new();

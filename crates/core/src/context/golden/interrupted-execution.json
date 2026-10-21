@@ -8,10 +8,10 @@
       "model": "scripted-text"
     },
     "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
-    "builder_version": 1,
-    "projection_version": 1
+    "builder_version": 2,
+    "projection_version": 2
   },
-  "fingerprint": "1703df01101015e0e4ce0b48267a48f0b9f5f456feacc812602a9a3150fc0a03",
+  "fingerprint": "9084fc63e5bcae7416286b3c92d15bddda33425016e295fabb425a0125dcf578",
   "instructions": {
     "status": "empty"
   },
@@ -20,13 +20,6 @@
       "entry_id": "019a0000-0000-7000-8000-000000000191",
       "kind": "user",
       "estimated_tokens": 4,
-      "opaque_bytes": 0,
-      "blocks": []
-    },
-    {
-      "entry_id": "019a0000-0000-7000-8000-00000000019a",
-      "kind": "assistant",
-      "estimated_tokens": 0,
       "opaque_bytes": 0,
       "blocks": []
     }
@@ -86,6 +79,7 @@
   "portability": [],
   "preview": null,
   "flags": {
+    "budget_unknown": false,
     "overflow": false,
     "compaction_recommended": false,
     "preview": false

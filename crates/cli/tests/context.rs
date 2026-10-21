@@ -64,6 +64,7 @@ fn prints_the_golden_report_of_the_compaction_fixture() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["budget"]["status"], "unknown");
     assert_eq!(report["budget"]["reason"], "model_not_in_catalog");
+    assert_eq!(report["flags"]["budget_unknown"], true);
 
     // A preview for another model, from an earlier head.
     let output = harness(&[

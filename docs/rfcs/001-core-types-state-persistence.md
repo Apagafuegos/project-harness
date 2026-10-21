@@ -600,8 +600,9 @@ automatic rollback to an older valid prefix and no guessing missing entries.
 > implements projection and its report as `ContextBuilder::build(snapshot,
 > head, model_override)`, without `ProjectionInput` or a `ContextBuilder`
 > trait. Instructions come from the configuration artifact; tools, options and
-> continuation selection are deferred. Unknown context limits are reported as
-> unknown rather than rejected, sibling entries are not listed as
+> continuation selection are deferred. As C01 requires, execution rejects an
+> unknown context limit (`context_budget_unknown`); inspection reports it as
+> unknown. Sibling entries are not listed as
 > `other_branch`, and the exclusion reasons are the closed set in
 > [context](../context.md#inclusion-rules). Summary generation (6.1) is not
 > implemented. The proposal below is kept for reference.

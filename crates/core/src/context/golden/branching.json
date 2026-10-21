@@ -8,10 +8,10 @@
       "model": "scripted-text"
     },
     "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
-    "builder_version": 1,
-    "projection_version": 1
+    "builder_version": 2,
+    "projection_version": 2
   },
-  "fingerprint": "2cb3a6154c33b48bab89b2a5a24cb742e8453cfa21d1f2de87ab01accd0f0ea8",
+  "fingerprint": "5e3d4fcf511df85e857add8bfa2aab446e9465b69e5549387574c669d5d44285",
   "instructions": {
     "status": "empty"
   },
@@ -93,6 +93,7 @@
   "portability": [],
   "preview": null,
   "flags": {
+    "budget_unknown": false,
     "overflow": false,
     "compaction_recommended": false,
     "preview": false

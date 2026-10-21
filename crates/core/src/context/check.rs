@@ -50,6 +50,9 @@ fn agrees(items: &[ContextItem], report: &ContextReport) -> Result<(), &'static 
             if blocks != content.len() || continued != continuation.is_some() {
                 return Err("report_disagrees_with_projection");
             }
+            if record.blocks.is_empty() {
+                return Err("empty_assistant_item");
+            }
         } else if !record.blocks.is_empty() {
             return Err("report_disagrees_with_projection");
         }
@@ -57,9 +60,11 @@ fn agrees(items: &[ContextItem], report: &ContextReport) -> Result<(), &'static 
     Ok(())
 }
 
-/// Every branch entry has exactly one entry-level decision; every part of an
-/// included assistant response has exactly one part-level decision; nothing
-/// off the branch appears; exclusion reasons carry the right summary link.
+/// Every branch entry is decided exactly once: by one entry-level decision,
+/// or, for a response none of whose parts is included, by part exclusions
+/// alone. Every part of a response decided by parts, included or not, has
+/// exactly one part-level decision; nothing off the branch appears; exclusion
+/// reasons carry the right summary links.
 fn complete(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'static str> {
     let on_branch: HashMap<&EntryId, &StoredEntry> = branch
         .iter()
@@ -104,19 +109,27 @@ fn complete(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'sta
             Part::Entry => *decided.entry(id).or_default() += 1,
             other => part(&mut parts, id, other)?,
         }
+        let summary = |id: &EntryId| {
+            on_branch
+                .get(id)
+                .is_some_and(|stored| matches!(stored.entry.payload, EntryPayload::Compaction(_)))
+        };
         let linked = match exclusion.reason {
             ExclusionReason::CoveredBySummary | ExclusionReason::SupersededSummary => {
-                exclusion.summary_id.as_ref().is_some_and(|summary| {
-                    on_branch.get(summary).is_some_and(|stored| {
-                        matches!(stored.entry.payload, EntryPayload::Compaction(_))
-                    })
-                })
+                exclusion.summary_id.as_ref().is_some_and(summary)
+                    && exclusion
+                        .effective_summary
+                        .as_ref()
+                        .is_none_or(|effective| {
+                            summary(effective) && Some(effective) != exclusion.summary_id.as_ref()
+                        })
             }
-            _ => exclusion.summary_id.is_none(),
+            _ => exclusion.summary_id.is_none() && exclusion.effective_summary.is_none(),
         };
         let entry_level = matches!(
             exclusion.reason,
             ExclusionReason::FailedResponse
+                | ExclusionReason::EmptyResponse
                 | ExclusionReason::ModelChangeMarker
                 | ExclusionReason::SupersededSummary
                 | ExclusionReason::CoveredBySummary
@@ -125,34 +138,36 @@ fn complete(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'sta
             return Err("invalid_exclusion");
         }
     }
-    for stored in branch {
-        match decided.get(&stored.entry.id) {
-            Some(1) => {}
-            Some(_) => return Err("duplicate_decision"),
-            None => return Err("entry_without_decision"),
-        }
-    }
-    // Part decisions exist exactly for included assistant responses, and
-    // cover every block and the continuation. Every entry with parts is on
-    // the branch (checked above); walk it in order so the first error found
-    // is deterministic.
+    // Part decisions cover every block and the continuation of the response
+    // they belong to. An included response also has its entry-level
+    // inclusion; an excluded one has nothing else. Walk the branch in order
+    // so the first error found is deterministic.
     for stored in branch {
         let id = &stored.entry.id;
+        let entry_decisions = decided.get(id).copied().unwrap_or(0);
         let Some(decided) = parts.get(id) else {
-            continue;
+            match entry_decisions {
+                1 => continue,
+                0 => return Err("entry_without_decision"),
+                _ => return Err("duplicate_decision"),
+            }
         };
         let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
             return Err("part_of_non_response");
         };
-        let included = assistants.contains(id);
         let expected: BTreeSet<Part> = (0..response.content.len())
             .map(|index| Part::Block {
                 index: index as u32,
             })
             .chain(response.continuation.as_ref().map(|_| Part::Continuation))
             .collect();
-        if !included || *decided != expected {
+        if *decided != expected {
             return Err("incomplete_part_decisions");
+        }
+        let included = assistants.contains(id);
+        match (included, entry_decisions) {
+            (true, 1) | (false, 0) => {}
+            _ => return Err("duplicate_decision"),
         }
     }
     Ok(())

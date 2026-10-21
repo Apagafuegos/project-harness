@@ -243,16 +243,14 @@ fn golden_interrupted_execution_excludes_the_unanswered_call() {
             part: Part::Block { index: 0 },
             reason: ExclusionReason::OrphanToolCall,
             summary_id: None,
+            effective_summary: None,
         }]
     );
-    let [
-        ContextItem::User { .. },
-        ContextItem::Assistant { content, .. },
-    ] = &built.projection.input.items[..]
-    else {
+    // With its only block excluded, the response is no item at all; the
+    // block's exclusion is its whole account.
+    let [ContextItem::User { .. }] = &built.projection.input.items[..] else {
         panic!("unexpected items {:?}", built.projection.input.items);
     };
-    assert!(content.is_empty(), "the orphan call reached the projection");
 }
 
 #[test]
@@ -335,7 +333,7 @@ fn canonical_projection_bytes_are_compact_with_sorted_argument_keys() {
             r#""call_id":"019a0000-0000-7000-8000-000000000066","name":"read","#,
             r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}],"#,
             r#""continuation":null}],"model":{"provider_instance":"mock","model":"scripted"},"#,
-            r#""projection_version":1}"#
+            r#""projection_version":2}"#
         )
     );
     assert_eq!(fingerprint(&mock(), &items), Digest::of(&bytes));
@@ -785,6 +783,82 @@ fn partial_responses_keep_text_and_exclude_orphan_calls_reasoning_and_failures()
 }
 
 #[test]
+fn responses_with_nothing_to_project_are_accounted_for_without_an_item() {
+    let mut journal = Journal::new();
+    let user = journal.user(vec![text("go")]);
+    // Cancelled before any delta: no blocks, no continuation.
+    let empty = journal.respond(Response::ended(ResponseOutcome::Cancelled, vec![]));
+    let again = journal.user(vec![text("again")]);
+    // Every block excluded: the part exclusions are the whole account.
+    let excluded = journal.respond(Response::ended(
+        ResponseOutcome::Interrupted,
+        vec![
+            ContentBlock::ReasoningSummary {
+                text: "thinking".into(),
+            },
+            call(&CallId::new(), "read"),
+        ],
+    ));
+
+    let built = journal.build();
+    assert_eq!(included_ids(&built.report), [user, again].map(Some));
+    assert!(
+        built
+            .projection
+            .input
+            .items
+            .iter()
+            .all(|item| !matches!(item, ContextItem::Assistant { .. }))
+    );
+    let decisions: Vec<_> = built
+        .report
+        .excluded
+        .iter()
+        .map(|e| (e.entry_id.clone(), e.part, e.reason))
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            (empty, Part::Entry, ExclusionReason::EmptyResponse),
+            (
+                excluded.clone(),
+                Part::Block { index: 0 },
+                ExclusionReason::ReasoningDisplayOnly
+            ),
+            (
+                excluded,
+                Part::Block { index: 1 },
+                ExclusionReason::OrphanToolCall
+            ),
+        ]
+    );
+
+    // An entry-level decision beside the part decisions decides it twice.
+    let mut twice = built.report.clone();
+    twice.excluded.push(Exclusion {
+        entry_id: twice.excluded[1].entry_id.clone(),
+        part: Part::Entry,
+        reason: ExclusionReason::FailedResponse,
+        summary_id: None,
+        effective_summary: None,
+    });
+    let snapshot = journal.snapshot();
+    let branch = snapshot.ancestry(snapshot.head()).unwrap();
+    let items = &built.projection.input.items;
+    assert_eq!(
+        super::check::check(&branch, items, &twice),
+        Err("duplicate_decision")
+    );
+    // Dropping one part decision leaves the response incompletely decided.
+    let mut partial = built.report.clone();
+    partial.excluded.pop();
+    assert_eq!(
+        super::check::check(&branch, items, &partial),
+        Err("incomplete_part_decisions")
+    );
+}
+
+#[test]
 fn answered_calls_are_included_with_their_results_directly_after() {
     let mut journal = Journal::new();
     let user = journal.user(vec![text("use tools")]);
@@ -1037,6 +1111,25 @@ fn superseded_and_nested_summaries_are_excluded_with_their_summary() {
         [(t1[0].clone(), s1.clone()), (t1[1].clone(), s1.clone())]
     );
     assert!(by.contains(&(s1.clone(), s3.clone())));
+    // Turn 1 names S1, which is itself covered: S3 stands for it in the
+    // projection. Every other link already names a projected summary.
+    let effective: Vec<_> = nested
+        .report
+        .excluded
+        .iter()
+        .filter_map(|e| Some((e.entry_id.clone(), e.effective_summary.clone()?)))
+        .collect();
+    assert_eq!(
+        effective,
+        [(t1[0].clone(), s3.clone()), (t1[1].clone(), s3.clone())]
+    );
+    assert!(
+        built
+            .report
+            .excluded
+            .iter()
+            .all(|e| e.effective_summary.is_none())
+    );
     assert!(
         !serde_json::to_string(&nested.report)
             .unwrap()
@@ -1307,6 +1400,7 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
         part: Part::Entry,
         reason: ExclusionReason::FailedResponse,
         summary_id: None,
+        effective_summary: None,
     });
     assert_eq!(check(items, &twice), Err("duplicate_decision"));
 
@@ -1316,12 +1410,26 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
         part: Part::Entry,
         reason: ExclusionReason::ModelChangeMarker,
         summary_id: None,
+        effective_summary: None,
     });
     assert_eq!(check(items, &foreign), Err("entry_from_other_branch"));
 
     let mut unlinked = built.report.clone();
     unlinked.excluded[0].summary_id = Some(proposal.clone());
     assert_eq!(check(items, &unlinked), Err("invalid_exclusion"));
+    let mut effective = built.report.clone();
+    effective.excluded[0].effective_summary = Some(proposal.clone());
+    assert_eq!(check(items, &effective), Err("invalid_exclusion"));
+
+    // An assistant item with nothing in it is never emitted.
+    let mut hollow_items = items.clone();
+    let mut hollow = built.report.clone();
+    let ContextItem::Assistant { content, .. } = hollow_items.last_mut().unwrap() else {
+        panic!("the last item is the final response");
+    };
+    content.clear();
+    hollow.included.last_mut().unwrap().blocks.clear();
+    assert_eq!(check(&hollow_items, &hollow), Err("empty_assistant_item"));
 
     // Remove the result item and its record: the call is left unanswered.
     let mut unpaired_items = items.clone();

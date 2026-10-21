@@ -1155,9 +1155,10 @@ impl Runtime {
         }
     }
 
-    /// Build the context for the next inference. An overflow fails the turn
-    /// from `Preparing`, before C2 and without a provider call; otherwise C2
-    /// follows and its acknowledgement starts the stream with this projection.
+    /// Build the context for the next inference. An unknown budget or an
+    /// overflow fails the turn from `Preparing`, before C2 and without a
+    /// provider call; otherwise C2 follows and its acknowledgement starts the
+    /// stream with this projection.
     fn prepare(&mut self, snapshot: &SessionSnapshot, turn: TurnId, env: &mut dyn Env) {
         let Some(head) = snapshot.head().cloned() else {
             return self.fault(FaultCause::Internal("inference_without_head"));
@@ -1174,8 +1175,17 @@ impl Runtime {
             totals: report.totals,
             flags: report.flags,
         });
-        if report.flags.overflow {
-            let finished = turn_finished(&turn, TurnOutcome::Failed, Some("context_overflow"));
+        // RFC-001 C01: no inference without a known budget. Inspection
+        // still reports an unknown budget; only execution refuses it.
+        let refusal = if report.flags.budget_unknown {
+            Some("context_budget_unknown")
+        } else if report.flags.overflow {
+            Some("context_overflow")
+        } else {
+            None
+        };
+        if let Some(code) = refusal {
+            let finished = turn_finished(&turn, TurnOutcome::Failed, Some(code));
             return self.finish(snapshot, &turn, None, finished, env);
         }
         self.prepared = Some(built.projection);

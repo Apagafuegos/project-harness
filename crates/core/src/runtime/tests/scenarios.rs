@@ -2,7 +2,7 @@
 //! repeats it, replays it and checks resync, reopening and turn outcomes.
 
 use super::*;
-use crate::context::{Budget, ContextConfig, ContextItem, ModelLimits};
+use crate::context::{Budget, ContextConfig, ContextItem, ModelLimits, UnknownLimit};
 use crate::runtime::tests::scenario;
 
 /// `Started` changes nothing visible; it only restarts the idle timer.
@@ -151,7 +151,7 @@ macro_rules! scenarios {
     ($($name:ident $(with $config:expr)?),+ $(,)?) => {$(
         #[test]
         fn $name() {
-            let config = [RuntimeConfig::default() $(, $config)?].into_iter().last().unwrap();
+            let config = [known() $(, $config)?].into_iter().last().unwrap();
             scenario(config, bodies::$name);
         }
     )+};
@@ -161,7 +161,7 @@ fn limited(max_inferences_per_turn: u32, max_partial_bytes: usize) -> RuntimeCon
     RuntimeConfig {
         max_inferences_per_turn,
         max_partial_bytes,
-        ..RuntimeConfig::default()
+        ..known()
     }
 }
 
@@ -228,6 +228,8 @@ fn contexts(d: &Driver) -> (Vec<Built>, Vec<Started>) {
 
 scenarios!(
     context_is_built_in_preparing_and_sent_with_its_stream,
+    context_budget_unknown_fails_the_turn_from_preparing with RuntimeConfig::default(),
+    context_budget_unknown_after_a_switch_fails_only_that_model,
     context_overflow_fails_the_turn_from_preparing with context_limit(2),
     context_overflow_after_tool_results_fails_before_the_next_inference with context_limit(10),
     context_rebuilds_identically_after_reopen,
@@ -328,8 +330,71 @@ mod bodies {
         for (head, fingerprint, _) in &started {
             let report = d.runtime.inspect_context(Some(head.clone()), None).unwrap();
             assert_eq!(&report.fingerprint, fingerprint);
-            assert!(matches!(report.budget, Budget::Unknown { .. }));
+            assert!(matches!(report.budget, Budget::Known { .. }));
         }
+    }
+
+    pub fn context_budget_unknown_fails_the_turn_from_preparing(d: &mut Driver) {
+        // RFC-001 C01: the empty default catalog knows no limit for the model.
+        let (request, _) = d.start("hello");
+        d.settle();
+        let turn = turn_of(d, request);
+        assert_eq!(
+            shapes(d),
+            [OPEN, "finished(failed, context_budget_unknown)"]
+        );
+        assert_eq!(outcome(d, &turn), Some(TurnOutcome::Failed));
+        let (built, started) = contexts(d);
+        assert!(started.is_empty(), "the provider was asked for a stream");
+        assert_eq!(built.len(), 1);
+        assert!(!built[0].2, "an unknown budget is not an overflow");
+        // Inspection still answers, and says why the budget is unknown.
+        let report = d.runtime.inspect_context(None, None).unwrap();
+        assert!(matches!(
+            report.budget,
+            Budget::Unknown {
+                reason: UnknownLimit::ModelNotInCatalog,
+                ..
+            }
+        ));
+        assert_eq!(d.runtime.phase(), Phase::Durable(RuntimeState::Idle));
+    }
+
+    pub fn context_budget_unknown_after_a_switch_fails_only_that_model(d: &mut Driver) {
+        let unlisted = ModelRef {
+            provider_instance: "mock".into(),
+            model: "unlisted".into(),
+        };
+        plain_turn(d, "first", "one");
+        let switch = d.command(Command::SwitchModel {
+            model: unlisted.clone(),
+        });
+        d.settle();
+        assert!(matches!(d.accepted(switch), Accepted::ModelSwitched { .. }));
+        let (request, _) = d.start("second");
+        d.settle();
+        let turn = turn_of(d, request);
+        assert_eq!(outcome(d, &turn), Some(TurnOutcome::Failed));
+        assert_eq!(
+            shapes(d).last().map(String::as_str),
+            Some("finished(failed, context_budget_unknown)")
+        );
+        assert_eq!(contexts(d).1.len(), 1, "only the first turn streamed");
+        // A preview for a listed model shows the budget a switch back gives.
+        let scripted = ModelRef {
+            provider_instance: "mock".into(),
+            model: "scripted".into(),
+        };
+        let preview = d
+            .runtime
+            .inspect_context(None, Some(scripted.clone()))
+            .unwrap();
+        assert!(matches!(preview.budget, Budget::Known { .. }));
+        let switch = d.command(Command::SwitchModel { model: scripted });
+        d.settle();
+        assert!(matches!(d.accepted(switch), Accepted::ModelSwitched { .. }));
+        plain_turn(d, "third", "three");
+        assert_eq!(contexts(d).1.len(), 2);
     }
 
     pub fn context_overflow_fails_the_turn_from_preparing(d: &mut Driver) {

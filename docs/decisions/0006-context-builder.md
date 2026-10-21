@@ -40,17 +40,37 @@ the identity of a projection, stable on any machine and after any reopen.
 Changing an inclusion rule or item shape bumps `PROJECTION_VERSION`.
 
 **Closed exclusion reasons.** `ExclusionReason` is an enum: `orphan_tool_call`,
-`failed_response`, `reasoning_display_only`, `provider_state_not_portable`,
-`model_change_marker`, `superseded_summary` and `covered_by_summary`. A report
-cannot invent free text, and a silent drop fails the completeness check.
+`failed_response`, `empty_response`, `reasoning_display_only`,
+`provider_state_not_portable`, `model_change_marker`, `superseded_summary` and
+`covered_by_summary`. A report cannot invent free text, and a silent drop fails
+the completeness check.
+
+**No empty items.** A response none of whose parts is included is no projection
+item; its part exclusions are its whole account, and a check rejects an empty
+`assistant` item. A response with no parts at all is `empty_response`. Sending
+an empty assistant turn would cost a provider round trip for nothing, and some
+providers reject one. Under nested summaries an exclusion also names its
+`effective_summary`, the summary that stands for it in the projection.
 
 **Honest budgets.** Limits come only from a configured `ModelCatalog`; the
-provider is not consulted. An unknown context limit is reported as unknown,
-with no overflow check, and the turn proceeds. Estimates name their method;
-opaque provider state is counted in bytes, never tokens; provider-reported
-usage is labelled, attributed to the response it describes, and never added to
-an estimate. An estimate above the usable budget fails the turn from
-`Preparing` with `context_overflow`, before C2 and without a provider call.
+provider is not consulted. Estimates name their method; opaque provider state
+is counted in bytes, never tokens; provider-reported usage is labelled,
+attributed to the response it describes, and never added to an estimate.
+
+**Unknown budgets: reported by inspection, refused by execution.** The builder
+never fails on an unknown limit. It reports the budget as
+`unknown` with its reason and sets the `budget_unknown` flag, with no overflow
+check. What happens next depends on the caller:
+
+- *Execution* follows RFC-001 C01. The core fails the turn from `Preparing`
+  with `context_budget_unknown`, before C2 and without a provider call, exactly
+  as an estimate above the usable budget fails it with `context_overflow`.
+- *Inspection* (`Runtime::inspect_context`, `SessionHandle::inspect_context`,
+  `harness context`) returns the report. An unknown budget is a fact about
+  configuration, and the report is how an operator finds it.
+
+The builder stays one pure function with one result, and the refusal is the
+core's policy, applied where every other "may we infer?" decision is made.
 
 **Instructions come from the configuration artifact.** Its optional
 `instructions` array becomes the first projection item. The pure core cannot
@@ -70,7 +90,11 @@ provider state.
 - `Runtime::new` takes a `SessionConfiguration`; `RuntimeConfig` gains
   `context`. `StorageWorker` fails to open a session whose configuration
   artifact does not decode.
-- `ContextBuilt` is a new event. It does not change client views.
+- `ContextBuilt` is a new event. It does not change client views. Its flags
+  say why a turn is about to fail: `budget_unknown` or `overflow`.
+- `RuntimeConfig::default()` has an empty catalog, so a runtime that infers
+  must configure its models' limits; until native adapters supply them, an
+  operator does. Test harnesses list their mock models explicitly.
 - The builder's cost is linear in branch length, once per inference. On a
   10,000-entry branch a release build takes about 60 ms, of which about 18 ms
   is hashing a 2 MB projection and 15 ms the checks. Only storage validation is
@@ -82,11 +106,6 @@ provider state.
 
 ### Departures from RFC-001
 
-- **Unknown budgets are reported, not rejected.** RFC-001 section 3.1 and C01
-  require an explicit limit before inference. This decision reports the budget
-  as unknown and lets the turn proceed; an operator who wants enforcement
-  configures a limit. Rejecting would make every session without a catalog
-  entry unusable before native adapters can supply limits.
 - **No `other_branch` entries.** RFC-001 proposes listing sibling entries as
   `other_branch`. Reports cover exactly the selected branch, which keeps them
   linear in that branch; another branch is inspected by passing its head.
@@ -107,6 +126,15 @@ provider state.
 - **Persist the projection or fingerprint.** A projection is derived data; a
   stored copy could disagree with history. Recording the fingerprint on each
   response is useful but needs a schema version, and is deferred to Milestone 3.
+- **Let turns proceed with an unknown budget.** The first version of this
+  decision did, so that sessions without a catalog entry stayed usable before
+  native adapters supply limits. It would send a request that might not fit,
+  with no overflow check, against RFC-001 C01. It was reversed before merge.
+- **Fail the build itself on an unknown budget.** Inspection would then have
+  nothing to show for the very sessions that need diagnosing.
+- **Keep empty assistant items.** The first version did, so every response was
+  an item. The report already accounts for each excluded part, and an adapter
+  would have to drop or send an empty turn.
 - **Debug-only checks.** A broken invariant could send an unanswered call to a
   provider, which rejects it. The checks cost about a quarter of a build and
   run everywhere.

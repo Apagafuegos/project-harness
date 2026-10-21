@@ -42,8 +42,8 @@ Step 4 is implemented: the public `ModelProvider` stream seam, cancel-then-relea
 stream lifecycle and a deterministic `ScriptedProvider`
 ([decision 0005](decisions/0005-provider-stream.md)).
 Step 5 is implemented: the pure context builder and its report, run by the
-core in `Preparing` (overflow fails the turn with `context_overflow` before any
-stream), `SessionHandle::inspect_context` and the read-only `harness context`
+core in `Preparing` (an unknown budget or an overflow fails the turn with
+`context_budget_unknown` or `context_overflow` before any stream), `SessionHandle::inspect_context` and the read-only `harness context`
 command, with golden reports for the three fixtures and C01 coverage
 ([context](context.md), [decision 0006](decisions/0006-context-builder.md)).
 Remaining: startup recovery (step 6).

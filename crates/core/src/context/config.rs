@@ -19,7 +19,8 @@ pub struct ModelLimits {
 }
 
 /// Explicitly configured model limits. A model missing from the catalog has
-/// unknown limits. The provider is never consulted, which keeps the builder pure.
+/// unknown limits, which the core refuses to infer with. The provider is never
+/// consulted, which keeps the builder pure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCatalog {
     models: BTreeMap<ModelRef, ModelLimits>,

@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use harness_core::{context::SessionConfiguration, runtime::*, session::*};
+//! use harness_core::{context::{ModelLimits, SessionConfiguration}, runtime::*, session::*};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let parent = tempfile::tempdir()?;
 //! let root = Arc::new(DataRoot::open(parent.path().join("state"), true)?);
@@ -22,7 +22,7 @@
 //! let model = ModelRef { provider_instance: "mock".into(), model: "scripted".into() };
 //! let header = SessionHeader {
 //!     workspace: "/workspace".into(),
-//!     initial_model: model,
+//!     initial_model: model.clone(),
 //!     policy_revision: "initial".into(),
 //!     configuration,
 //! };
@@ -30,7 +30,11 @@
 //! let decoded = SessionConfiguration::load(&root, &header.configuration)?;
 //! let mut store = JournalStore::create(root, SessionId::new(), header, Timestamp::now())?;
 //! let mut env = SystemEnv;
-//! let mut runtime = Runtime::new(store.snapshot(), decoded, RuntimeConfig::default(), &mut env);
+//! // The core refuses to infer without a known context limit (RFC-001 C01).
+//! let mut config = RuntimeConfig::default();
+//! let limits = ModelLimits { context_tokens: Some(128_000), max_output_tokens: None };
+//! config.context.catalog.insert(model, limits);
+//! let mut runtime = Runtime::new(store.snapshot(), decoded, config, &mut env);
 //!
 //! let content = vec![ContentBlock::Text { text: "hello".into() }];
 //! let command = Command::StartTurn { command_id: CommandId::new(), content };

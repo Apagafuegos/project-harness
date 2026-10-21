@@ -148,17 +148,24 @@ impl<'a> ContextBuilder<'a> {
             {
                 latest_completed = Some((id, response));
             }
-            if let Some(by) = plan.superseded_by.get(id) {
-                walk.exclude(
-                    id,
-                    Part::Entry,
-                    ExclusionReason::SupersededSummary,
-                    Some(by),
-                );
-                continue;
-            }
-            if let Some(by) = plan.covered_by.get(id) {
-                walk.exclude(id, Part::Entry, ExclusionReason::CoveredBySummary, Some(by));
+            let replaced = plan
+                .superseded_by
+                .get(id)
+                .map(|by| (ExclusionReason::SupersededSummary, by))
+                .or_else(|| {
+                    plan.covered_by
+                        .get(id)
+                        .map(|by| (ExclusionReason::CoveredBySummary, by))
+                });
+            if let Some((reason, by)) = replaced {
+                let effective = plan.effective(by, branch.len())?;
+                walk.excluded.push(Exclusion {
+                    entry_id: id.clone(),
+                    part: Part::Entry,
+                    reason,
+                    summary_id: Some((*by).clone()),
+                    effective_summary: (effective != *by).then(|| effective.clone()),
+                });
                 continue;
             }
             match &entry.payload {
@@ -202,6 +209,7 @@ impl<'a> ContextBuilder<'a> {
         };
         let budget = budget_for(self.config, model, estimated, counts.opaque);
         let (overflow, compaction_recommended) = thresholds(&budget);
+        let budget_unknown = matches!(budget, Budget::Unknown { .. });
         let preview = walk.preview.then(|| PreviewReport {
             model_at_head: head_model.clone(),
             preview_model: model.clone(),
@@ -240,6 +248,7 @@ impl<'a> ContextBuilder<'a> {
             portability: walk.portability,
             preview,
             flags: Flags {
+                budget_unknown,
                 overflow,
                 compaction_recommended,
                 preview: model_override.is_some(),
@@ -329,6 +338,24 @@ impl<'a> Plan<'a> {
             active,
             answered,
         })
+    }
+
+    /// The summary standing for `summary` in the projection: follow
+    /// supersession, then coverage, until one is a projection item. Both
+    /// links point later on the branch, so `limit` steps always suffice.
+    fn effective(&self, summary: &'a EntryId, limit: usize) -> Result<&'a EntryId, ContextError> {
+        let mut current = summary;
+        for _ in 0..=limit {
+            match self
+                .superseded_by
+                .get(current)
+                .or_else(|| self.covered_by.get(current))
+            {
+                Some(next) => current = next,
+                None => return Ok(current),
+            }
+        }
+        Err(ContextError::Invariant("summary_cycle"))
     }
 
     fn summaries(&self, estimator: &dyn TokenEstimator) -> Vec<SummaryReport> {
@@ -476,6 +503,7 @@ impl Walk<'_> {
             part,
             reason,
             summary_id: summary_id.cloned(),
+            effective_summary: None,
         });
     }
 
@@ -546,6 +574,10 @@ impl Walk<'_> {
             self.exclude(id, Part::Entry, ExclusionReason::FailedResponse, None);
             return Ok(());
         }
+        if response.content.is_empty() && response.continuation.is_none() {
+            self.exclude(id, Part::Entry, ExclusionReason::EmptyResponse, None);
+            return Ok(());
+        }
         let mut content = Vec::new();
         let mut blocks = Vec::new();
         let (mut tokens, mut opaque) = (0u64, 0u64);
@@ -608,6 +640,11 @@ impl Walk<'_> {
             }
             _ => None,
         };
+        // Nothing survived: the part exclusions already account for every
+        // block, and an empty item would only cost the provider a turn.
+        if blocks.is_empty() {
+            return Ok(());
+        }
         self.counts.opaque = self.counts.opaque.saturating_add(opaque);
         self.push(
             ContextItem::Assistant {

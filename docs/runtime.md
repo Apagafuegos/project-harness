@@ -111,6 +111,7 @@ These are the commits the tests assert. Entries come first, then events in order
 | --- | --- | --- |
 | C1 open | user message | `turn_started`, `idle>preparing` (carries the command) |
 | C2 infer | — | `preparing>inferring`; `StartInference` follows its ack |
+| Unknown budget, instead of C2 | — | `turn_finished(failed, context_budget_unknown)`; no stream |
 | Overflow, instead of C2 | — | `turn_finished(failed, context_overflow)`; no stream |
 | C3 stop | assistant `completed/stop` | `inferring>processing`, `turn_finished(completed)` |
 | C3 tool calls | assistant `completed/tool_calls` | `inferring>processing` |
@@ -119,13 +120,16 @@ These are the commits the tests assert. Entries come first, then events in order
 
 Entering `Preparing` (after C1, or after C4's `continuing>preparing`) builds
 the context, unless a cancel is pending or the inference limit is reached. The
-core emits `ContextBuilt` first. If the projection overflows the configured
-budget, the turn fails from `Preparing` with `context_overflow` and the
+core emits `ContextBuilt` first. If the model has no configured context limit,
+the turn fails from `Preparing` with `context_budget_unknown` (RFC-001 C01);
+if the projection overflows the budget, with `context_overflow`. Either way the
 provider is never asked for a stream. Otherwise the core keeps the projection,
 commits C2 and sends that projection with `StartInference` after the ack. C2
 adds no entries, so the projection is still the head's; the core checks the
-head matches and that it is not a preview. An unknown context limit never
-overflows. A builder invariant failure faults the core with its code.
+head matches and that it is not a preview. `RuntimeConfig::default()` has an
+empty model catalog, so a runtime that infers must list its models'
+limits in `context.catalog`. Inspection still reports an unknown budget. A
+builder invariant failure faults the core with its code.
 
 Other stream endings record the response and finish the turn in one commit:
 

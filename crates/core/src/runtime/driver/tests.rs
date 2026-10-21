@@ -11,7 +11,8 @@ use futures_core::Stream;
 
 use super::*;
 use crate::context::{
-    ContextError, ContextItem, ExclusionReason, ModelLimits, SessionConfiguration, fingerprint,
+    ContextError, ContextItem, ExclusionReason, Flags, ModelLimits, SessionConfiguration,
+    fingerprint,
 };
 use crate::{
     model::scripted::{Script, ScriptedProvider, Step},
@@ -251,7 +252,7 @@ async fn catch_up(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn end_to_end_replies_follow_sync_and_only_worker_touches_storage() {
-    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let mut fixture = Fixture::new(config()).await;
     let (entered, release) = fixture.gate(Point::Written);
     let handle = fixture.handle.clone();
     let command = tokio::spawn(async move { handle.command(Fixture::command(1)).await });
@@ -297,7 +298,7 @@ async fn end_to_end_replies_follow_sync_and_only_worker_touches_storage() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn unconfirmed_cancellation_drops_late_events_and_releases_at_grace() {
-    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let mut fixture = Fixture::new(config()).await;
     let (turn_id, stream, cancel) = fixture.start(1).await;
     stream.send(delta("before")).await.unwrap();
     fixture
@@ -356,7 +357,7 @@ async fn unconfirmed_cancellation_drops_late_events_and_releases_at_grace() {
 async fn lagging_and_midstream_subscribers_get_partial_then_converge() {
     let mut fixture = Fixture::new(DriverConfig {
         event_capacity: 4,
-        ..DriverConfig::default()
+        ..config()
     })
     .await;
     let mut lagging = fixture.handle.subscribe();
@@ -393,7 +394,7 @@ async fn lagging_and_midstream_subscribers_get_partial_then_converge() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn fault_reopen_changes_epoch_and_preserves_existing_subscription() {
-    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let mut fixture = Fixture::new(config()).await;
     let (_, stream, _) = fixture.start(1).await;
     for _ in 0..100 {
         stream.send(delta("x")).await.unwrap();
@@ -427,7 +428,7 @@ async fn fault_reopen_changes_epoch_and_preserves_existing_subscription() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn uncertain_writes_are_never_retried_and_torn_tails_require_explicit_repair() {
     for point in [Point::PartialWrite, Point::BeforeAck] {
-        let fixture = Fixture::new(DriverConfig::default()).await;
+        let fixture = Fixture::new(config()).await;
         let mut subscription = fixture.handle.subscribe();
         let SubscriptionItem::Reset(mut client) = subscription.next().await.unwrap() else {
             panic!("initial reset")
@@ -467,7 +468,7 @@ async fn uncertain_writes_are_never_retried_and_torn_tails_require_explicit_repa
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn worker_panic_or_lost_reply_faults_pending_commands_without_hanging() {
     for panic in [true, false] {
-        let fixture = Fixture::new(DriverConfig::default()).await;
+        let fixture = Fixture::new(config()).await;
         if panic {
             fixture.options.panic_next.store(true, Ordering::SeqCst);
         } else {
@@ -489,7 +490,7 @@ async fn worker_panic_or_lost_reply_faults_pending_commands_without_hanging() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn shutdown_waits_for_inflight_sync_and_releases_lock_for_immediate_open() {
-    let fixture = Fixture::new(DriverConfig::default()).await;
+    let fixture = Fixture::new(config()).await;
     let (entered, release) = fixture.gate(Point::Written);
     let handle = fixture.handle.clone();
     let command = tokio::spawn(async move { handle.command(Fixture::command(1)).await });
@@ -526,7 +527,7 @@ async fn shutdown_waits_for_inflight_sync_and_releases_lock_for_immediate_open()
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn commands_during_shutdown_drain_are_rejected_as_shutting_down() {
     // Sent while the drain waits for an in-flight sync and the turn's cancel.
-    let fixture = Fixture::new(DriverConfig::default()).await;
+    let fixture = Fixture::new(config()).await;
     let (entered, release) = fixture.gate(Point::Written);
     let handle = fixture.handle.clone();
     let command = tokio::spawn(async move { handle.command(Fixture::command(1)).await });
@@ -554,7 +555,7 @@ async fn commands_during_shutdown_drain_are_rejected_as_shutting_down() {
     shutdown.await.unwrap();
 
     // Queued after the loop ended, while the drain joins an artifact upload.
-    let fixture = Fixture::new(DriverConfig::default()).await;
+    let fixture = Fixture::new(config()).await;
     let (entered, release) = fixture.gate(Point::ArtifactWritten);
     let handle = fixture.handle.clone();
     let upload = tokio::spawn(async move { handle.put_artifact(b"upload".to_vec()).await });
@@ -580,7 +581,7 @@ async fn commands_during_shutdown_drain_are_rejected_as_shutting_down() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn overlapping_storage_effects_fault_and_keep_the_first_operation() {
     for media in [false, true] {
-        let mut fixture = Fixture::new(DriverConfig::default()).await;
+        let mut fixture = Fixture::new(config()).await;
         let mut command = Fixture::command(1);
         if media {
             let artifact = fixture
@@ -633,7 +634,7 @@ async fn overlapping_storage_effects_fault_and_keep_the_first_operation() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
-    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let mut fixture = Fixture::new(config()).await;
     let (turn_id, stream, _) = fixture.start(1).await;
     fixture
         .handle
@@ -706,7 +707,7 @@ async fn timer_fire_from_a_replaced_runtime_is_dropped_after_reopen() {
 async fn bounded_command_mailbox_rejects_overload_without_waiting() {
     let fixture = Fixture::new(DriverConfig {
         command_capacity: 1,
-        ..DriverConfig::default()
+        ..config()
     })
     .await;
     let mut first = std::pin::pin!(fixture.handle.command(Fixture::command(1)));
@@ -738,7 +739,7 @@ async fn bounded_command_mailbox_rejects_overload_without_waiting() {
 async fn media_upload_is_synced_and_missing_or_invalid_refs_write_nothing() {
     let mut fixture = Fixture::new(DriverConfig {
         max_artifact_bytes: 32,
-        ..DriverConfig::default()
+        ..config()
     })
     .await;
     fixture.root.io.test.lock().unwrap().trace.clear();
@@ -857,7 +858,7 @@ fn error(code: ModelErrorCode) -> ModelError {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn scripted_cancellation_is_confirmed_without_advancing_time() {
     let (fixture, provider) = Fixture::scripted(
-        DriverConfig::default(),
+        config(),
         WorkerOptions::default(),
         [Script::new([
             Step::Event(ProviderEvent::Started),
@@ -909,7 +910,7 @@ async fn scripted_cancellation_is_confirmed_without_advancing_time() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn scripted_stall_is_cancelled_then_released_when_grace_ends() {
     let (fixture, provider) = Fixture::scripted(
-        DriverConfig::default(),
+        config(),
         WorkerOptions::default(),
         [Script::new([
             Step::Event(ProviderEvent::Started),
@@ -948,7 +949,7 @@ async fn scripted_stall_is_cancelled_then_released_when_grace_ends() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn scripted_failures_record_their_outcomes_and_release_every_stream() {
     let (fixture, provider) = Fixture::scripted(
-        DriverConfig::default(),
+        config(),
         WorkerOptions::default(),
         [
             // Setup failure: a terminal event before any start.
@@ -1023,8 +1024,7 @@ async fn cancel_preempts_an_always_ready_stream_within_a_few_events() {
             .chain((0..DELTAS).map(|_| Step::text(0, "x")))
             .chain([Step::completed(FinishReason::Stop)]),
     );
-    let (fixture, provider) =
-        Fixture::scripted(DriverConfig::default(), WorkerOptions::default(), [script]).await;
+    let (fixture, provider) = Fixture::scripted(config(), WorkerOptions::default(), [script]).await;
     let Accepted::TurnStarted { turn_id, .. } =
         fixture.handle.command(Fixture::command(1)).await.unwrap()
     else {
@@ -1070,9 +1070,9 @@ async fn provider_idle_timeout_restarts_on_events_and_fails_a_stalled_turn() {
     let config = DriverConfig {
         runtime: RuntimeConfig {
             provider_idle_timeout: Duration::from_secs(10),
-            ..RuntimeConfig::default()
+            ..known()
         },
-        ..DriverConfig::default()
+        ..config()
     };
     let (fixture, provider) = Fixture::scripted(
         config,
@@ -1143,9 +1143,9 @@ async fn tool_loop_and_inference_limit_use_core_decisions_through_real_channels(
         let mut fixture = Fixture::new(DriverConfig {
             runtime: RuntimeConfig {
                 max_inferences_per_turn: limit,
-                ..RuntimeConfig::default()
+                ..known()
             },
-            ..DriverConfig::default()
+            ..config()
         })
         .await;
         let (turn, stream, _) = fixture.start(1).await;
@@ -1182,7 +1182,7 @@ async fn tool_loop_and_inference_limit_use_core_decisions_through_real_channels(
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn failed_open_leaves_no_worker_and_poisoned_worker_still_answers() {
-    let fixture = Fixture::new(DriverConfig::default()).await;
+    let fixture = Fixture::new(config()).await;
     assert!(
         matches!(StorageWorker::open(fixture.root.clone(), fixture.session.clone()).await,
         Err(PersistError::Rejected { code }) if code == "session_locked")
@@ -1194,7 +1194,7 @@ async fn failed_open_leaves_no_worker_and_poisoned_worker_still_answers() {
     let mut env = DeterministicEnv::new(10);
     let configuration =
         SessionConfiguration::load(&fixture.root, snapshot.configuration()).unwrap();
-    let mut core = Runtime::new(snapshot, configuration, RuntimeConfig::default(), &mut env);
+    let mut core = Runtime::new(snapshot, configuration, known(), &mut env);
     let effects = core.step(
         Input::Command {
             request: RequestId(1),
@@ -1235,7 +1235,7 @@ async fn failed_open_leaves_no_worker_and_poisoned_worker_still_answers() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn artifact_io_failure_faults_runtime_even_without_pending_commit() {
-    let fixture = Fixture::new(DriverConfig::default()).await;
+    let fixture = Fixture::new(config()).await;
     fixture.root.io.test.lock().unwrap().fail = Some(Point::ArtifactSynced);
     assert!(matches!(
         fixture.handle.put_artifact(b"upload".to_vec()).await,
@@ -1252,7 +1252,7 @@ async fn artifact_io_failure_faults_runtime_even_without_pending_commit() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn media_preflight_holds_the_exclusive_slot_and_attaches_matching_retries() {
-    let mut fixture = Fixture::new(DriverConfig::default()).await;
+    let mut fixture = Fixture::new(config()).await;
     let reference = fixture
         .handle
         .put_artifact(b"image".to_vec())
@@ -1326,12 +1326,7 @@ fn direct_tool_turns(turns: u64) -> Duration {
             .unwrap();
         let configuration = SessionConfiguration::load(&root, &header.configuration).unwrap();
         let mut store = JournalStore::create(root, session, header, at).unwrap();
-        let mut runtime = Runtime::new(
-            store.snapshot(),
-            configuration,
-            RuntimeConfig::default(),
-            &mut env,
-        );
+        let mut runtime = Runtime::new(store.snapshot(), configuration, known(), &mut env);
         let started = std::time::Instant::now();
         for n in 1..=turns {
             let mut inputs = VecDeque::from([Input::Command {
@@ -1401,7 +1396,7 @@ async fn session_handle_tool_turn_benchmark() {
         ]
     });
     let (fixture, _) = Fixture::scripted(
-        DriverConfig::default(),
+        config(),
         WorkerOptions {
             without_oracle: true,
             ..WorkerOptions::default()
@@ -1443,6 +1438,27 @@ async fn session_handle_tool_turn_benchmark() {
     );
 }
 
+/// The default runtime configuration with a limit for the test model, so its
+/// budget is known; the default catalog is empty.
+fn known() -> RuntimeConfig {
+    let mut config = RuntimeConfig::default();
+    config.context.catalog.insert(
+        test_model(),
+        ModelLimits {
+            context_tokens: Some(1_000_000),
+            max_output_tokens: None,
+        },
+    );
+    config
+}
+
+fn config() -> DriverConfig {
+    DriverConfig {
+        runtime: known(),
+        ..DriverConfig::default()
+    }
+}
+
 fn test_model() -> ModelRef {
     ModelRef {
         provider_instance: "mock".into(),
@@ -1458,11 +1474,11 @@ fn reply(text: &str) -> Script {
     ])
 }
 
-/// A projection that does not fit fails the turn from `Preparing`: no C2,
-/// and the provider is never asked for a stream.
+/// A projection that does not fit, or whose budget is unknown, fails the turn
+/// from `Preparing`: no C2, and the provider is never asked for a stream.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn context_overflow_fails_the_turn_before_any_stream_opens() {
-    let mut config = DriverConfig::default();
+    let mut config = config();
     // The default deductions total 16,384 tokens, leaving one usable token;
     // "hello" is estimated at two.
     config.runtime.context.catalog.insert(
@@ -1472,6 +1488,20 @@ async fn context_overflow_fails_the_turn_before_any_stream_opens() {
             max_output_tokens: None,
         },
     );
+    let flags = refused_before_any_stream(config, "context_overflow").await;
+    assert!(flags.overflow && !flags.budget_unknown && !flags.preview);
+}
+
+/// RFC-001 C01: with no limit for the model, execution refuses to infer.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn unknown_budget_fails_the_turn_before_any_stream_opens() {
+    let flags = refused_before_any_stream(DriverConfig::default(), "context_budget_unknown").await;
+    assert!(flags.budget_unknown && !flags.overflow && !flags.preview);
+}
+
+/// Start a turn that `config` refuses in `Preparing` with `code`, check that
+/// nothing reached the provider, and return the flags `ContextBuilt` carried.
+async fn refused_before_any_stream(config: DriverConfig, code: &str) -> Flags {
     let (fixture, provider) =
         Fixture::scripted(config, WorkerOptions::default(), [reply("unused")]).await;
     let mut subscription = fixture.handle.subscribe();
@@ -1485,10 +1515,7 @@ async fn context_overflow_fails_the_turn_before_any_stream_opens() {
         Ok(Accepted::TurnStarted { .. })
     ));
     let view = fixture.wait(idle).await;
-    assert_eq!(
-        finishes(&view),
-        [(TurnOutcome::Failed, Some("context_overflow".into()))]
-    );
+    assert_eq!(finishes(&view), [(TurnOutcome::Failed, Some(code.into()))]);
     assert!(provider.streams().is_empty(), "a stream was opened");
     assert_eq!(provider.remaining(), 1);
     let inferring = view.snapshot.events().any(|(_, _, event)| {
@@ -1504,20 +1531,21 @@ async fn context_overflow_fails_the_turn_before_any_stream_opens() {
                 ..
             }) => built = Some(flags),
             SubscriptionItem::Event(RuntimeEvent {
-                kind: EventKind::TurnFinished { code, .. },
+                kind: EventKind::TurnFinished { code: finished, .. },
                 ..
             }) => {
-                assert_eq!(code.as_deref(), Some("context_overflow"));
+                assert_eq!(finished.as_deref(), Some(code));
                 break;
             }
             _ => {}
         }
     }
     let flags = built.expect("ContextBuilt precedes TurnFinished");
-    assert!(flags.overflow && !flags.preview);
+    // Inspection keeps answering, with the same flags.
     let report = fixture.handle.inspect_context(None, None).await.unwrap();
-    assert!(report.flags.overflow);
+    assert_eq!(report.flags, flags);
     fixture.handle.shutdown().await;
+    flags
 }
 
 /// The worker decodes the configuration artifact, so its instructions reach
@@ -1530,7 +1558,7 @@ async fn requests_carry_the_projection_and_inspection_reads_any_branch() {
         reply("three"),
     ]));
     let fixture = Fixture::with_configuration(
-        DriverConfig::default(),
+        config(),
         WorkerOptions::default(),
         Some(provider.clone()),
         br#"{"instructions":[{"level":"system","text":"Be brief."}]}"#,
@@ -1644,7 +1672,7 @@ async fn requests_carry_the_projection_and_inspection_reads_any_branch() {
 /// projections without its instructions.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn open_refuses_a_configuration_with_invalid_instructions() {
-    let fixture = Fixture::scripted(DriverConfig::default(), WorkerOptions::default(), [])
+    let fixture = Fixture::scripted(config(), WorkerOptions::default(), [])
         .await
         .0;
     fixture.handle.shutdown().await;
@@ -1664,7 +1692,7 @@ async fn open_refuses_a_configuration_with_invalid_instructions() {
         session,
         header,
         Arc::new(ScriptedProvider::new([])),
-        DriverConfig::default(),
+        config(),
     )
     .await;
     assert!(matches!(

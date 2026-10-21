@@ -85,11 +85,13 @@ events, stale stream IDs, timer firings and injected persist failures. Each run
 is then driven to quiescence. Every started turn must have exactly one
 `turn_finished` in the journal; only a turn stopped by an injected fault may
 have none. A second generator derived from the seed picks a context limit
-(none, two small ones that overflow after a few turns, or a large one) without
-changing the seed's interleavings. Every context the core built is rebuilt from
-the reopened journal and must have the same fingerprint, a build at a random
-head (and a preview there) must pass the builder's checks, and no run may
-fault with an internal cause. With `--nocapture` it prints the outcomes and paths it reached. A
+(none in one seed in eight, two small ones that overflow after a few turns, or
+a large one) and whether switch target `b` is listed, without changing the
+seed's interleavings. Every context the core built is rebuilt from the reopened
+journal and must have the same fingerprint and flags, every started stream's
+context must have a known budget that fits, a build at a random head (and a
+preview there) must pass the builder's checks, and no run may fault with an
+internal cause. With `--nocapture` it prints the outcomes and paths it reached. A
 failing run prints its seed. Rerun one seed, or run more:
 
 ```sh
@@ -134,7 +136,8 @@ cargo run --locked -p harness -- context <data-root> <session-id> \
 
 `--head` inspects any entry, including one on another branch. `--model` builds
 a preview for another model. `--context-tokens` configures the projected
-model's context limit; without it the budget is reported as unknown. The
+model's context limit; without it the budget is reported as unknown (a running
+engine would refuse such a turn with `context_budget_unknown`). The
 command reads the session's configuration artifact for its instructions.
 
 ### Golden reports
