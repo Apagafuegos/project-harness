@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::context::SessionConfiguration;
 use crate::runtime::*;
 use crate::session::{io::Point, *};
 
@@ -34,6 +35,7 @@ fn text(text: &str) -> Vec<ContentBlock> {
 /// Inputs and outputs of one `Runtime`, from construction to the end or a reopen.
 struct Segment {
     stream: u16,
+    configuration: SessionConfiguration,
     config: RuntimeConfig,
     initial: SessionSnapshot,
     inputs: Vec<Input>,
@@ -87,9 +89,15 @@ impl Driver {
     }
 
     fn with_config(config: RuntimeConfig) -> Self {
+        Self::with_configuration(config, br#"{"policy":"runtime-test"}"#)
+    }
+
+    /// A new session whose configuration artifact holds `configuration`.
+    fn with_configuration(config: RuntimeConfig, configuration: &[u8]) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = Arc::new(DataRoot::open(temp.path().join("state"), true).unwrap());
-        let configuration = root.put_artifact(br#"{"policy":"runtime-test"}"#).unwrap();
+        let configuration = root.put_artifact(configuration).unwrap();
+        let decoded = SessionConfiguration::load(&root, &configuration).unwrap();
         let header = SessionHeader {
             workspace: "/workspace".into(),
             initial_model: ModelRef {
@@ -105,9 +113,9 @@ impl Driver {
         let mut env = DeterministicEnv::new(FIRST_STREAM);
         Self {
             session: snapshot.session_id().clone(),
-            runtime: Runtime::new(snapshot.clone(), config.clone(), &mut env),
+            runtime: Runtime::new(snapshot.clone(), decoded.clone(), config.clone(), &mut env),
             env,
-            segment: Segment::new(FIRST_STREAM, config, snapshot),
+            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot),
             done: Vec::new(),
             _temp: temp,
             root,
@@ -335,9 +343,19 @@ impl Driver {
         let snapshot = store.snapshot();
         self.store = Some(store);
         let config = self.segment.config.clone();
+        let configuration =
+            SessionConfiguration::load(&self.root, snapshot.configuration()).unwrap();
         self.env = DeterministicEnv::new(stream);
-        self.runtime = Runtime::new(snapshot.clone(), config.clone(), &mut self.env);
-        let segment = std::mem::replace(&mut self.segment, Segment::new(stream, config, snapshot));
+        self.runtime = Runtime::new(
+            snapshot.clone(),
+            configuration.clone(),
+            config.clone(),
+            &mut self.env,
+        );
+        let segment = std::mem::replace(
+            &mut self.segment,
+            Segment::new(stream, configuration, config, snapshot),
+        );
         self.done.push(segment);
         self.last_seq = 0;
         self.inference = None;
@@ -400,10 +418,16 @@ impl Driver {
 }
 
 impl Segment {
-    fn new(stream: u16, config: RuntimeConfig, initial: SessionSnapshot) -> Self {
+    fn new(
+        stream: u16,
+        configuration: SessionConfiguration,
+        config: RuntimeConfig,
+        initial: SessionSnapshot,
+    ) -> Self {
         let views = vec![
             Runtime::new(
                 initial.clone(),
+                configuration.clone(),
                 config.clone(),
                 &mut DeterministicEnv::new(stream),
             )
@@ -411,6 +435,7 @@ impl Segment {
         ];
         Self {
             stream,
+            configuration,
             config,
             initial,
             inputs: Vec::new(),
@@ -512,7 +537,12 @@ fn check_resync(finished: &Finished) {
 fn check_replay(finished: &Finished) {
     for segment in &finished.segments {
         let mut env = DeterministicEnv::new(segment.stream);
-        let mut runtime = Runtime::new(segment.initial.clone(), segment.config.clone(), &mut env);
+        let mut runtime = Runtime::new(
+            segment.initial.clone(),
+            segment.configuration.clone(),
+            segment.config.clone(),
+            &mut env,
+        );
         let replayed: Vec<_> = segment
             .inputs
             .iter()

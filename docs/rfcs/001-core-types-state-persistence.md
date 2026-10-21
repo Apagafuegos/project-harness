@@ -596,6 +596,16 @@ automatic rollback to an older valid prefix and no guessing missing entries.
 
 ## 6. Contract 5: context and compaction
 
+> **Implementation note.** [Decision 0006](../decisions/0006-context-builder.md)
+> implements projection and its report as `ContextBuilder::build(snapshot,
+> head, model_override)`, without `ProjectionInput` or a `ContextBuilder`
+> trait. Instructions come from the configuration artifact; tools, options and
+> continuation selection are deferred. Unknown context limits are reported as
+> unknown rather than rejected, sibling entries are not listed as
+> `other_branch`, and the exclusion reasons are the closed set in
+> [context](../context.md#inclusion-rules). Summary generation (6.1) is not
+> implemented. The proposal below is kept for reference.
+
 ```rust,ignore
 pub struct ProjectionInput {
     pub session: SessionSnapshot,

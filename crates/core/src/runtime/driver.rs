@@ -13,8 +13,9 @@ use super::{
     *,
 };
 use crate::{
-    model::{ModelEventStream, ModelInput, ModelProvider, ModelRequest, OperationControl},
-    session::{ArtifactRef, DataRoot, SessionHeader, SessionId},
+    context::ContextReport,
+    model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl},
+    session::{ArtifactRef, DataRoot, EntryId, ModelRef, SessionHeader, SessionId},
 };
 
 type CommandResult = Result<Accepted, Rejection>;
@@ -52,6 +53,11 @@ impl Default for DriverConfig {
 enum Message {
     Command(Command, oneshot::Sender<CommandResult>),
     View(oneshot::Sender<RuntimeView>),
+    InspectContext(
+        Option<EntryId>,
+        Option<ModelRef>,
+        oneshot::Sender<Result<ContextReport, InspectError>>,
+    ),
     PutArtifact(Vec<u8>, oneshot::Sender<Result<ArtifactRef, PersistError>>),
     Reopen(oneshot::Sender<Result<RuntimeView, PersistError>>),
     Shutdown(oneshot::Sender<()>),
@@ -120,7 +126,7 @@ impl SessionHandle {
         provider: Arc<dyn ModelProvider>,
         options: WorkerOptions,
     ) -> Result<Self, PersistError> {
-        let (worker, snapshot) = StorageWorker::start(
+        let (worker, snapshot, configuration) = StorageWorker::start(
             root.clone(),
             session.clone(),
             create,
@@ -128,7 +134,7 @@ impl SessionHandle {
             options.clone(),
         )
         .await?;
-        let runtime = Runtime::new(snapshot, config.runtime.clone(), &mut env);
+        let runtime = Runtime::new(snapshot, configuration, config.runtime.clone(), &mut env);
         let (commands, receive) = mpsc::channel(config.command_capacity.max(1));
         let (events, _) = broadcast::channel(config.event_capacity.max(1));
         let handle = Self {
@@ -179,6 +185,24 @@ impl SessionHandle {
     /// Take a coherent view between core steps.
     pub async fn view(&self) -> Result<RuntimeView, Rejection> {
         request_view(&self.commands).await.ok_or(Rejection::Faulted)
+    }
+
+    /// The context report for `head` (`None` means the current head), from
+    /// the snapshot published when the driver answers, between core steps.
+    /// Any entry can be the head, so a client can inspect another branch
+    /// without navigating to it. With `model_override` the report is a
+    /// preview for that model. Nothing is persisted and the head never moves.
+    pub async fn inspect_context(
+        &self,
+        head: Option<EntryId>,
+        model_override: Option<ModelRef>,
+    ) -> Result<ContextReport, InspectError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Message::InspectContext(head, model_override, reply))
+            .await
+            .map_err(|_| InspectError::Closed)?;
+        receive.await.unwrap_or(Err(InspectError::Closed))
     }
 
     /// Publish an artifact, replying only after file and directory sync.
@@ -516,19 +540,16 @@ impl<E: Env + Send + 'static> Driver<E> {
                         }
                     }));
                 }
-                // The head is for step 5's context builder; the provider sees
-                // only the response identity and the model.
+                // The core built the projection in `Preparing`; the driver
+                // only hands it to the provider with the response identity.
                 Effect::StartInference {
                     inference,
-                    model,
+                    input,
                     response_id,
                     ..
                 } => {
                     let cancel = CancellationToken::new();
-                    let request = ModelRequest {
-                        response_id,
-                        input: ModelInput { model },
-                    };
+                    let request = ModelRequest { response_id, input };
                     let control = OperationControl {
                         cancel: cancel.clone(),
                     };
@@ -615,6 +636,13 @@ impl<E: Env + Send + 'static> Driver<E> {
             Message::View(reply) => {
                 let _ = reply.send(self.runtime.view());
             }
+            Message::InspectContext(head, model, reply) => {
+                let _ = reply.send(
+                    self.runtime
+                        .inspect_context(head, model)
+                        .map_err(InspectError::from),
+                );
+            }
             Message::PutArtifact(bytes, reply) => {
                 if self.runtime.phase() == Phase::Faulted {
                     let _ = reply.send(Err(PersistError::Rejected {
@@ -670,10 +698,14 @@ impl<E: Env + Send + 'static> Driver<E> {
                     )
                     .await
                     {
-                        Ok((worker, snapshot)) => {
+                        Ok((worker, snapshot, configuration)) => {
                             self.worker = Some(worker);
-                            self.runtime =
-                                Runtime::new(snapshot, self.config.runtime.clone(), &mut self.env);
+                            self.runtime = Runtime::new(
+                                snapshot,
+                                configuration,
+                                self.config.runtime.clone(),
+                                &mut self.env,
+                            );
                             self.step(Input::PublishView);
                             Ok(self.runtime.view())
                         }

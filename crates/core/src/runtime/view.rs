@@ -234,7 +234,10 @@ impl ClientView {
                     view.partial = None;
                 }
             }
-            EventKind::TurnFinished { .. } | EventKind::Diagnostic(_) | EventKind::Fault(_) => {}
+            EventKind::TurnFinished { .. }
+            | EventKind::ContextBuilt { .. }
+            | EventKind::Diagnostic(_)
+            | EventKind::Fault(_) => {}
         }
         ApplyOutcome::Applied
     }

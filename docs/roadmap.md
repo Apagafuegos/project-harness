@@ -41,7 +41,12 @@ reopen and subscriptions. Epochs and view resets cover lag and runtime replaceme
 Step 4 is implemented: the public `ModelProvider` stream seam, cancel-then-release
 stream lifecycle and a deterministic `ScriptedProvider`
 ([decision 0005](decisions/0005-provider-stream.md)).
-Remaining: the context builder and report (step 5) and startup recovery (step 6).
+Step 5 is implemented: the pure context builder and its report, run by the
+core in `Preparing` (overflow fails the turn with `context_overflow` before any
+stream), `SessionHandle::inspect_context` and the read-only `harness context`
+command, with golden reports for the three fixtures and C01 coverage
+([context](context.md), [decision 0006](decisions/0006-context-builder.md)).
+Remaining: startup recovery (step 6).
 
 Step 6 also adds torn-tail repair as an explicit `SessionHandle` command. Today
 `reopen()` returns the torn-tail diagnostic unchanged, so such a session is

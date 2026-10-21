@@ -1,0 +1,93 @@
+{
+  "identity": {
+    "session_id": "019a0000-0000-7000-8000-000000000002",
+    "journal_sequence": 4,
+    "head": "019a0000-0000-7000-8000-00000000019a",
+    "model": {
+      "provider_instance": "mock-default",
+      "model": "scripted-text"
+    },
+    "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
+    "builder_version": 1,
+    "projection_version": 1
+  },
+  "fingerprint": "1703df01101015e0e4ce0b48267a48f0b9f5f456feacc812602a9a3150fc0a03",
+  "instructions": {
+    "status": "empty"
+  },
+  "included": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000191",
+      "kind": "user",
+      "estimated_tokens": 4,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-00000000019a",
+      "kind": "assistant",
+      "estimated_tokens": 0,
+      "opaque_bytes": 0,
+      "blocks": []
+    }
+  ],
+  "excluded": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-00000000019a",
+      "part": "block",
+      "index": 0,
+      "reason": "orphan_tool_call",
+      "summary_id": null
+    }
+  ],
+  "summaries": [],
+  "totals": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 0,
+    "estimated_user": 4,
+    "estimated_assistant_text": 0,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 0,
+    "estimated_media": 0,
+    "estimated_total": 4,
+    "opaque_provider_state_bytes": 0
+  },
+  "budget": {
+    "status": "known",
+    "limits": {
+      "context_tokens": 128000,
+      "max_output_tokens": null
+    },
+    "context_tokens": 128000,
+    "deductions": {
+      "output_reserve": 4096,
+      "tool_headroom": 8192,
+      "safety_margin": 4096
+    },
+    "usable_tokens": 111616,
+    "estimated_tokens": 4,
+    "headroom_tokens": 111612,
+    "overflow_tokens": 0,
+    "compaction_trigger_permille": 850,
+    "compaction_threshold_tokens": 94874,
+    "unestimated_opaque_bytes": 0
+  },
+  "reported_usage": null,
+  "portability": [],
+  "preview": null,
+  "flags": {
+    "overflow": false,
+    "compaction_recommended": false,
+    "preview": false
+  }
+}

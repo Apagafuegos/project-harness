@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use harness_core::{runtime::*, session::*};
+//! use harness_core::{context::SessionConfiguration, runtime::*, session::*};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let parent = tempfile::tempdir()?;
 //! let root = Arc::new(DataRoot::open(parent.path().join("state"), true)?);
@@ -26,9 +26,11 @@
 //!     policy_revision: "initial".into(),
 //!     configuration,
 //! };
+//! // The core is pure, so the caller decodes the configuration artifact.
+//! let decoded = SessionConfiguration::load(&root, &header.configuration)?;
 //! let mut store = JournalStore::create(root, SessionId::new(), header, Timestamp::now())?;
 //! let mut env = SystemEnv;
-//! let mut runtime = Runtime::new(store.snapshot(), RuntimeConfig::default(), &mut env);
+//! let mut runtime = Runtime::new(store.snapshot(), decoded, RuntimeConfig::default(), &mut env);
 //!
 //! let content = vec![ContentBlock::Text { text: "hello".into() }];
 //! let command = Command::StartTurn { command_id: CommandId::new(), content };

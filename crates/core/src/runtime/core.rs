@@ -2,6 +2,9 @@
 
 use serde_json::json;
 
+use crate::context::{
+    ContextBuilder, ContextError, ContextReport, Projection, SessionConfiguration,
+};
 use crate::session::{
     AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, Entry, EntryId,
     EntryPayload, HeadChange, HeadReason, JournalEvent, MAX_COUNTER, ModelChanged, ModelError,
@@ -30,6 +33,8 @@ const NOT_STARTED: &str = "cancelled: the turn was cancelled before this call st
 #[derive(Debug)]
 pub struct Runtime {
     config: RuntimeConfig,
+    /// The decoded configuration artifact the context builder reads.
+    configuration: SessionConfiguration,
     mode: Mode,
     /// Published snapshot, phase and partial response, changed only by
     /// applying emitted events, so `view()` always matches the event stream.
@@ -45,6 +50,9 @@ pub struct Runtime {
     inferences: u32,
     cancel: Option<CancelRequest>,
     stale_events: u64,
+    /// The projection built in `Preparing`, sent with the stream that C2's
+    /// acknowledgement starts. C2 adds no entries, so it stays valid.
+    prepared: Option<Projection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,7 +174,14 @@ struct Recorded {
 impl Runtime {
     /// Wrap a published snapshot. Emits nothing; the first input produces the
     /// first effects. A snapshot with unfinished work starts `RecoveryRequired`.
-    pub fn new(snapshot: SessionSnapshot, config: RuntimeConfig, env: &mut impl Env) -> Self {
+    /// `configuration` is the decoded configuration artifact of `snapshot`,
+    /// read by the caller; the context builder refuses any other.
+    pub fn new(
+        snapshot: SessionSnapshot,
+        configuration: SessionConfiguration,
+        config: RuntimeConfig,
+        env: &mut impl Env,
+    ) -> Self {
         let mode = if snapshot.requires_recovery() || snapshot.state() != RuntimeState::Idle {
             Mode::RecoveryRequired
         } else {
@@ -182,6 +197,7 @@ impl Runtime {
         };
         Self {
             config,
+            configuration,
             mode,
             view: view.into(),
             out: Vec::new(),
@@ -194,6 +210,7 @@ impl Runtime {
             inferences: 0,
             cancel: None,
             stale_events: 0,
+            prepared: None,
         }
     }
 
@@ -220,6 +237,31 @@ impl Runtime {
     /// The configured limits.
     pub fn config(&self) -> &RuntimeConfig {
         &self.config
+    }
+
+    /// The decoded session configuration the context builder reads.
+    pub fn configuration(&self) -> &SessionConfiguration {
+        &self.configuration
+    }
+
+    /// The context report for any head of the published snapshot (`None`
+    /// means its current head), optionally previewed for another model.
+    /// Read-only: nothing is emitted, persisted or moved.
+    pub fn inspect_context(
+        &self,
+        head: Option<EntryId>,
+        model_override: Option<ModelRef>,
+    ) -> Result<ContextReport, ContextError> {
+        let snapshot = self.snapshot();
+        let head = head.or_else(|| snapshot.head().cloned());
+        Ok(self
+            .builder()
+            .build(snapshot, head.as_ref(), model_override.as_ref())?
+            .report)
+    }
+
+    fn builder(&self) -> ContextBuilder<'_> {
+        ContextBuilder::new(&self.config.context, &self.configuration)
     }
 
     /// Process one input. Returns every effect it causes, in order.
@@ -696,6 +738,7 @@ impl Runtime {
     /// Stop for good: no retries, no further effects except rejections.
     fn fault(&mut self, cause: FaultCause) {
         self.mode = Mode::Faulted;
+        self.prepared = None;
         if let Some(verification) = self.verifying.take() {
             for request in verification.waiters {
                 self.reply(request, Err(Rejection::Faulted));
@@ -1083,10 +1126,7 @@ impl Runtime {
                 turn_finished(&turn, TurnOutcome::Failed, Some("inference_limit")),
                 env,
             ),
-            Preparing => {
-                let commit = audit(&snapshot, vec![transition(&turn, Preparing, Inferring)]);
-                self.persist(commit, idle_flight(), None, env);
-            }
+            Preparing => self.prepare(&snapshot, turn, env),
             Inferring => match stream {
                 None if cancel => {
                     self.finish(&snapshot, &turn, Some(Inferring), cancelled(&turn), env)
@@ -1115,6 +1155,41 @@ impl Runtime {
         }
     }
 
+    /// Build the context for the next inference. An overflow fails the turn
+    /// from `Preparing`, before C2 and without a provider call; otherwise C2
+    /// follows and its acknowledgement starts the stream with this projection.
+    fn prepare(&mut self, snapshot: &SessionSnapshot, turn: TurnId, env: &mut dyn Env) {
+        let Some(head) = snapshot.head().cloned() else {
+            return self.fault(FaultCause::Internal("inference_without_head"));
+        };
+        let built = match self.builder().build(snapshot, Some(&head), None) {
+            Ok(built) => built,
+            Err(error) => return self.fault(FaultCause::Internal(error.code())),
+        };
+        let report = built.report;
+        self.emit(EventKind::ContextBuilt {
+            turn_id: turn.clone(),
+            head,
+            fingerprint: report.fingerprint,
+            totals: report.totals,
+            flags: report.flags,
+        });
+        if report.flags.overflow {
+            let finished = turn_finished(&turn, TurnOutcome::Failed, Some("context_overflow"));
+            return self.finish(snapshot, &turn, None, finished, env);
+        }
+        self.prepared = Some(built.projection);
+        let commit = audit(
+            snapshot,
+            vec![transition(
+                &turn,
+                RuntimeState::Preparing,
+                RuntimeState::Inferring,
+            )],
+        );
+        self.persist(commit, idle_flight(), None, env);
+    }
+
     /// Terminate the turn with no response, from `from` through `Cancelling`
     /// when cancelling.
     fn finish(
@@ -1125,6 +1200,7 @@ impl Runtime {
         finished: TurnFinished,
         env: &mut dyn Env,
     ) {
+        self.prepared = None;
         let mut events = Vec::new();
         if let Some(from) = cancelling_from {
             events.push(transition(turn, from, RuntimeState::Cancelling));
@@ -1145,9 +1221,15 @@ impl Runtime {
         let Some(head) = snapshot.head().cloned() else {
             return self.fault(FaultCause::Internal("inference_without_head"));
         };
-        let Ok(model) = snapshot.model_at(Some(&head)).cloned() else {
-            return self.fault(FaultCause::Internal("inference_head_unknown"));
+        // Only the projection built for this head, under its own model, may
+        // reach a provider; a preview never does.
+        let Some(projection) = self.prepared.take() else {
+            return self.fault(FaultCause::Internal("inference_without_projection"));
         };
+        if projection.preview || projection.head.as_ref() != Some(&head) {
+            return self.fault(FaultCause::Internal("stale_projection"));
+        }
+        let model = projection.input.model.clone();
         self.next_inference += 1;
         let inference = InferenceId(self.next_inference);
         let response_id = env.response_id();
@@ -1170,7 +1252,8 @@ impl Runtime {
             inference,
             turn_id,
             head,
-            model,
+            input: projection.input,
+            fingerprint: projection.fingerprint,
             response_id,
         });
         self.arm_idle();

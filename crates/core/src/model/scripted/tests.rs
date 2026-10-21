@@ -17,6 +17,7 @@ fn request(n: u128) -> ModelRequest {
                 provider_instance: "mock".into(),
                 model: "scripted".into(),
             },
+            items: Vec::new(),
         },
     }
 }

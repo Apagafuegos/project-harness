@@ -14,7 +14,10 @@ use std::pin::Pin;
 use futures_core::Stream;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::{FinishReason, ModelError, ModelRef, ResponseId, Usage};
+use crate::{
+    context::ContextItem,
+    session::{FinishReason, ModelError, ModelRef, ResponseId, Usage},
+};
 
 pub mod scripted;
 
@@ -38,13 +41,15 @@ pub struct ModelRequest {
     pub input: ModelInput,
 }
 
-/// The logical model input. Step 5's context builder adds the projected
-/// instructions, conversation items, tools, options and continuation; until
-/// then a request names only the model.
+/// The logical model input: the context builder's projection. Adapters
+/// translate it to a provider's wire format. Tool definitions and inference
+/// options are not projected yet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInput {
     /// Provider instance and model.
     pub model: ModelRef,
+    /// Instructions, dialogue, tool results and summaries, in order.
+    pub items: Vec<ContextItem>,
 }
 
 /// Caller-owned controls for one stream.

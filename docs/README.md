@@ -19,8 +19,12 @@ describing a future component is not evidence that it is implemented.
   core with a driver, one commit in flight, command dedup and view resync.
 - [Provider stream decision](decisions/0005-provider-stream.md): accepted
   `ModelProvider` seam, cancel-then-release lifecycle and scripted mock.
+- [Context builder decision](decisions/0006-context-builder.md): accepted pure
+  builder in `step`, unpersisted projection, closed reasons and honest budgets.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
-  cancellation, worker/driver, provider stream, media and resync; what steps 5–6 add.
+  cancellation, worker/driver, provider stream, media and resync; what step 6 adds.
+- [Context builder](context.md): implemented inclusion rules, budget, report,
+  fingerprint, `inspect_context` and `harness context`.
 - [Model provider](contracts/model.md): native APIs, hybrid multimodal content,
   streaming, capabilities, and model switching.
 - [Tools](contracts/tools.md): registry, validation, authorization, sequential calls,
@@ -47,8 +51,9 @@ options such as SQLite or parallel initial tool execution.
 **RFC details** specify how to implement those boundaries. Storage details are
 accepted and tested under decision 0003; the pure runtime core's turn commits
 and async worker/driver under decision 0004; the provider stream seam under
-decision 0005. Other details, including approval defaults, native adapters and
-recovery orchestration, remain proposed. Schema/examples alone are
+decision 0005; the context builder and report under decision 0006. Other
+details, including approval defaults, native adapters, compaction generation
+and recovery orchestration, remain proposed. Schema/examples alone are
 not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

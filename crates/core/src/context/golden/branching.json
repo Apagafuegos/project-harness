@@ -1,0 +1,100 @@
+{
+  "identity": {
+    "session_id": "019a0000-0000-7000-8000-000000000001",
+    "journal_sequence": 8,
+    "head": "019a0000-0000-7000-8000-00000000012d",
+    "model": {
+      "provider_instance": "mock-default",
+      "model": "scripted-text"
+    },
+    "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
+    "builder_version": 1,
+    "projection_version": 1
+  },
+  "fingerprint": "2cb3a6154c33b48bab89b2a5a24cb742e8453cfa21d1f2de87ab01accd0f0ea8",
+  "instructions": {
+    "status": "empty"
+  },
+  "included": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000065",
+      "kind": "user",
+      "estimated_tokens": 5,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000067",
+      "kind": "assistant",
+      "estimated_tokens": 6,
+      "opaque_bytes": 0,
+      "blocks": [
+        {
+          "part": "block",
+          "index": 0,
+          "kind": "text",
+          "estimated_tokens": 6,
+          "opaque_bytes": 0
+        }
+      ]
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-00000000012d",
+      "kind": "user",
+      "estimated_tokens": 4,
+      "opaque_bytes": 0,
+      "blocks": []
+    }
+  ],
+  "excluded": [],
+  "summaries": [],
+  "totals": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 0,
+    "estimated_user": 9,
+    "estimated_assistant_text": 6,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 0,
+    "estimated_media": 0,
+    "estimated_total": 15,
+    "opaque_provider_state_bytes": 0
+  },
+  "budget": {
+    "status": "known",
+    "limits": {
+      "context_tokens": 128000,
+      "max_output_tokens": null
+    },
+    "context_tokens": 128000,
+    "deductions": {
+      "output_reserve": 4096,
+      "tool_headroom": 8192,
+      "safety_margin": 4096
+    },
+    "usable_tokens": 111616,
+    "estimated_tokens": 15,
+    "headroom_tokens": 111601,
+    "overflow_tokens": 0,
+    "compaction_trigger_permille": 850,
+    "compaction_threshold_tokens": 94874,
+    "unestimated_opaque_bytes": 0
+  },
+  "reported_usage": null,
+  "portability": [],
+  "preview": null,
+  "flags": {
+    "overflow": false,
+    "compaction_recommended": false,
+    "preview": false
+  }
+}

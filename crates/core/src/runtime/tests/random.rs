@@ -2,6 +2,7 @@
 //! timers and persist failures, all against real storage.
 
 use super::*;
+use crate::context::{ContextBuilder, ModelLimits};
 
 /// Seeds run by default. Set `RUNTIME_SEED` to rerun one seed, or
 /// `RUNTIME_SEEDS` to run more.
@@ -435,6 +436,18 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
     for effect in finished.segments.iter().flat_map(|s| &s.effects) {
         match effect {
             Effect::Persist { .. } => count("commits".into()),
+            Effect::Emit(RuntimeEvent {
+                kind: EventKind::ContextBuilt { flags, .. },
+                ..
+            }) => count(format!(
+                "context built{}{}",
+                if flags.overflow { ", overflow" } else { "" },
+                if flags.compaction_recommended {
+                    ", compaction recommended"
+                } else {
+                    ""
+                }
+            )),
             Effect::Reply { result: Ok(a), .. } => count(format!(
                 "accepted {}",
                 format!("{a:?}").split(' ').next().unwrap()
@@ -452,14 +465,67 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
     }
 }
 
+/// Every context the core built during the run is rebuilt from the reopened
+/// journal with the same fingerprint, and builds at a random head, for its
+/// own model and as a preview, pass the builder's invariant checks. A broken
+/// invariant would also have faulted the core with an internal cause.
+fn check_contexts(finished: &Finished, rng: &mut Rng) {
+    let first = &finished.segments[0];
+    let builder = ContextBuilder::new(&first.config.context, &first.configuration);
+    let snapshot = &finished.reopened;
+    for event in finished.segments.iter().flat_map(Segment::events) {
+        match &event.kind {
+            EventKind::ContextBuilt {
+                head, fingerprint, ..
+            } => {
+                let rebuilt = builder.build(snapshot, Some(head), None).unwrap();
+                assert_eq!(
+                    &rebuilt.projection.fingerprint, fingerprint,
+                    "rebuild after reopen differs"
+                );
+            }
+            EventKind::Fault(FaultCause::Internal(code)) => panic!("internal fault: {code}"),
+            _ => {}
+        }
+    }
+    let ids: Vec<EntryId> = snapshot.entries().map(|(id, _)| id.clone()).collect();
+    let head = (!ids.is_empty() && rng.chance(90)).then(|| rng.pick(&ids).clone());
+    let other = ModelRef {
+        provider_instance: "other".into(),
+        model: "model".into(),
+    };
+    let built = builder.build(snapshot, head.as_ref(), None).unwrap();
+    assert_eq!(builder.build(snapshot, head.as_ref(), None).unwrap(), built);
+    builder
+        .build(snapshot, head.as_ref(), Some(&other))
+        .unwrap();
+}
+
 fn run_seed(seed: u64) -> Finished {
     let _guard = SeedGuard(seed);
     let mut rng = Rng(seed);
-    let config = RuntimeConfig {
+    let mut config = RuntimeConfig {
         max_inferences_per_turn: 1 + rng.below(3) as u32,
         max_partial_bytes: *rng.pick(&[600, 4_000, 1 << 20]),
         ..RuntimeConfig::default()
     };
+    // A separate generator, so the interleavings of each seed are unchanged.
+    let mut context = Rng(seed ^ 0xc0e7_e7c7);
+    let limit = *context.pick(&[None, Some(16_400), Some(16_420), Some(1_000_000)]);
+    if let Some(context_tokens) = limit {
+        // With the default 16,384 tokens of deductions, small limits leave
+        // room for a few turns only, so overflow is reached in some runs.
+        config.context.catalog.insert(
+            ModelRef {
+                provider_instance: "mock".into(),
+                model: "scripted".into(),
+            },
+            ModelLimits {
+                context_tokens: Some(context_tokens),
+                max_output_tokens: None,
+            },
+        );
+    }
     let mut d = Driver::with_config(config);
     let mut issued = Vec::new();
     let mut scripts = Scripts::new();
@@ -470,6 +536,7 @@ fn run_seed(seed: u64) -> Finished {
     let finished = d.finish();
     check_turns(&finished);
     check_resync(&finished);
+    check_contexts(&finished, &mut context);
     finished
 }
 

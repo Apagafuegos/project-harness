@@ -4,6 +4,7 @@ use std::{sync::Arc, thread};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::context::SessionConfiguration;
 use crate::session::{
     ArtifactRef, CommandId, Commit, CommitAck, DataRoot, JournalStore, SessionHeader, SessionId,
     SessionSnapshot, StoreError, Timestamp,
@@ -12,6 +13,7 @@ use crate::session::{
 use super::PersistError;
 
 type AppendResult = Result<(CommitAck, SessionSnapshot), PersistError>;
+type Opened = Result<(SessionSnapshot, SessionConfiguration), PersistError>;
 
 enum Request {
     Append {
@@ -100,11 +102,15 @@ pub(super) struct WorkerOptions {
 
 impl StorageWorker {
     /// Open on the worker thread itself. Failure leaves no live writer/thread.
+    /// The session's configuration artifact must decode; see
+    /// [`SessionConfiguration::parse`].
     pub async fn open(
         root: Arc<DataRoot>,
         session_id: SessionId,
     ) -> Result<(Self, SessionSnapshot), PersistError> {
-        Self::start(root, session_id, None, 8, WorkerOptions::default()).await
+        Self::start(root, session_id, None, 8, WorkerOptions::default())
+            .await
+            .map(|(worker, snapshot, _)| (worker, snapshot))
     }
 
     /// Create and sync the header on the worker thread itself.
@@ -122,6 +128,7 @@ impl StorageWorker {
             WorkerOptions::default(),
         )
         .await
+        .map(|(worker, snapshot, _)| (worker, snapshot))
     }
 
     pub(super) async fn start(
@@ -130,7 +137,7 @@ impl StorageWorker {
         create: Option<(SessionHeader, Timestamp)>,
         capacity: usize,
         options: WorkerOptions,
-    ) -> Result<(Self, SessionSnapshot), PersistError> {
+    ) -> Result<(Self, SessionSnapshot, SessionConfiguration), PersistError> {
         let (sender, receiver) = mpsc::channel(capacity.max(1));
         let (opened, receive) = oneshot::channel();
         let (exit, exited) = oneshot::channel();
@@ -157,7 +164,7 @@ impl StorageWorker {
             exited,
         };
         match receive.await.unwrap_or(Err(PersistError::WorkerLost)) {
-            Ok(snapshot) => Ok((worker, snapshot)),
+            Ok((snapshot, configuration)) => Ok((worker, snapshot, configuration)),
             Err(error) => {
                 worker.shutdown().await;
                 Err(error)
@@ -177,7 +184,7 @@ fn run(
     session_id: SessionId,
     create: Option<(SessionHeader, Timestamp)>,
     mut requests: mpsc::Receiver<Request>,
-    opened: oneshot::Sender<Result<SessionSnapshot, PersistError>>,
+    opened: oneshot::Sender<Opened>,
     options: &WorkerOptions,
 ) {
     let result = match create {
@@ -191,7 +198,19 @@ fn run(
             return;
         }
     };
-    if opened.send(Ok(store.snapshot())).is_err() {
+    // The context builder reads the configuration artifact's instructions;
+    // the pure core cannot, so it is decoded once here, under the lock.
+    let snapshot = store.snapshot();
+    let configuration = match SessionConfiguration::load(&root, snapshot.configuration()) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            let _ = opened.send(Err(PersistError::Rejected {
+                code: error.code().into(),
+            }));
+            return;
+        }
+    };
+    if opened.send(Ok((snapshot, configuration))).is_err() {
         return;
     }
     let mut poisoned = false;

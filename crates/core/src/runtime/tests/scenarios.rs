@@ -2,6 +2,7 @@
 //! repeats it, replays it and checks resync, reopening and turn outcomes.
 
 use super::*;
+use crate::context::{Budget, ContextConfig, ContextItem, ModelLimits};
 use crate::runtime::tests::scenario;
 
 /// `Started` changes nothing visible; it only restarts the idle timer.
@@ -164,7 +165,72 @@ fn limited(max_inferences_per_turn: u32, max_partial_bytes: usize) -> RuntimeCon
     }
 }
 
+/// A context limit for the test model with no deductions, so `usable` is
+/// exactly `context_tokens`.
+fn context_limit(context_tokens: u32) -> RuntimeConfig {
+    let mut context = ContextConfig {
+        output_reserve: 0,
+        tool_headroom: 0,
+        safety_margin: 0,
+        ..ContextConfig::default()
+    };
+    context.catalog.insert(
+        ModelRef {
+            provider_instance: "mock".into(),
+            model: "scripted".into(),
+        },
+        ModelLimits {
+            context_tokens: Some(context_tokens),
+            max_output_tokens: None,
+        },
+    );
+    RuntimeConfig {
+        context,
+        ..RuntimeConfig::default()
+    }
+}
+
+/// Every `ContextBuilt` and `StartInference` so far, as
+/// `(head, fingerprint, overflow)` and `(head, fingerprint, items)`.
+type Built = (EntryId, Digest, bool);
+type Started = (EntryId, Digest, Vec<ContextItem>);
+fn contexts(d: &Driver) -> (Vec<Built>, Vec<Started>) {
+    let effects = d
+        .done
+        .iter()
+        .chain([&d.segment])
+        .flat_map(|segment| &segment.effects);
+    let mut built = Vec::new();
+    let mut started = Vec::new();
+    for effect in effects {
+        match effect {
+            Effect::Emit(RuntimeEvent {
+                kind:
+                    EventKind::ContextBuilt {
+                        head,
+                        fingerprint,
+                        flags,
+                        ..
+                    },
+                ..
+            }) => built.push((head.clone(), fingerprint.clone(), flags.overflow)),
+            Effect::StartInference {
+                head,
+                input,
+                fingerprint,
+                ..
+            } => started.push((head.clone(), fingerprint.clone(), input.items.clone())),
+            _ => {}
+        }
+    }
+    (built, started)
+}
+
 scenarios!(
+    context_is_built_in_preparing_and_sent_with_its_stream,
+    context_overflow_fails_the_turn_from_preparing with context_limit(2),
+    context_overflow_after_tool_results_fails_before_the_next_inference with context_limit(10),
+    context_rebuilds_identically_after_reopen,
     plain_turn_ends_in_stop,
     tool_calls_answered_unavailable_then_second_inference_stops,
     inference_limit_fails_the_turn with limited(3, 4096),
@@ -192,6 +258,147 @@ scenarios!(
 
 mod bodies {
     use super::*;
+
+    pub fn context_is_built_in_preparing_and_sent_with_its_stream(d: &mut Driver) {
+        d.start("use tools");
+        let effects = d.segment.effects.clone();
+        // C1 is in flight; its ack builds the context, then persists C2.
+        d.complete();
+        let after_c1 = &d.segment.effects[effects.len()..];
+        let built = after_c1
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    Effect::Emit(RuntimeEvent {
+                        kind: EventKind::ContextBuilt { .. },
+                        ..
+                    })
+                )
+            })
+            .expect("ContextBuilt after C1");
+        let c2 = after_c1
+            .iter()
+            .position(|e| matches!(e, Effect::Persist { .. }))
+            .expect("C2 after the build");
+        assert!(built < c2);
+        assert!(
+            !has(after_c1, |e| matches!(e, Effect::StartInference { .. })),
+            "the stream waits for C2's ack"
+        );
+        d.settle();
+        started(d);
+        say(d, 0, "Let me look.");
+        two_calls(d);
+        finish(d, ProviderOutcome::Completed, Some(FinishReason::ToolCalls));
+        d.settle();
+        started(d);
+        say(d, 0, "Done.");
+        stop(d);
+        d.settle();
+
+        let (built, started) = contexts(d);
+        assert_eq!(built.len(), 2);
+        assert_eq!(started.len(), 2);
+        for ((head, fingerprint, overflow), (started_head, started_fingerprint, _)) in
+            built.iter().zip(&started)
+        {
+            assert!(!overflow, "an unknown limit never overflows");
+            assert_eq!(head, started_head);
+            assert_eq!(fingerprint, started_fingerprint);
+        }
+        let kinds = |items: &[ContextItem]| -> Vec<&'static str> {
+            items
+                .iter()
+                .map(|item| match item {
+                    ContextItem::User { .. } => "user",
+                    ContextItem::Assistant { .. } => "assistant",
+                    ContextItem::ToolResult { .. } => "result",
+                    _ => "other",
+                })
+                .collect()
+        };
+        assert_eq!(kinds(&started[0].2), ["user"]);
+        assert_eq!(
+            kinds(&started[1].2),
+            ["user", "assistant", "result", "result"]
+        );
+        assert_ne!(started[0].1, started[1].1);
+        // Inspection rebuilds the same projection at each inference's head.
+        for (head, fingerprint, _) in &started {
+            let report = d.runtime.inspect_context(Some(head.clone()), None).unwrap();
+            assert_eq!(&report.fingerprint, fingerprint);
+            assert!(matches!(report.budget, Budget::Unknown { .. }));
+        }
+    }
+
+    pub fn context_overflow_fails_the_turn_from_preparing(d: &mut Driver) {
+        // "use tools" is estimated at three tokens; two are usable.
+        let (request, _) = d.start("use tools");
+        d.settle();
+        let turn = turn_of(d, request);
+        assert_eq!(shapes(d), [OPEN, "finished(failed, context_overflow)"]);
+        assert_eq!(outcome(d, &turn), Some(TurnOutcome::Failed));
+        let (built, started) = contexts(d);
+        assert!(started.is_empty(), "the provider was asked for a stream");
+        assert_eq!(built.len(), 1);
+        assert!(built[0].2);
+        let report = d.runtime.inspect_context(None, None).unwrap();
+        assert!(matches!(
+            report.budget,
+            Budget::Known {
+                usable_tokens: 2,
+                estimated_tokens: 3,
+                overflow_tokens: 1,
+                ..
+            }
+        ));
+        assert_eq!(d.runtime.phase(), Phase::Durable(RuntimeState::Idle));
+    }
+
+    pub fn context_overflow_after_tool_results_fails_before_the_next_inference(d: &mut Driver) {
+        // The first projection fits in ten tokens; with the proposal and two
+        // results the second does not.
+        begin(d, "use tools");
+        say(d, 0, "Let me look.");
+        two_calls(d);
+        finish(d, ProviderOutcome::Completed, Some(FinishReason::ToolCalls));
+        d.settle();
+        assert_eq!(
+            shapes(d),
+            [
+                OPEN,
+                INFER,
+                "assistant(completed/toolcalls) inferring>processing",
+                "result(denied) result(denied) processing>continuing continuing>preparing",
+                "finished(failed, context_overflow)",
+            ]
+        );
+        let (built, started) = contexts(d);
+        assert_eq!(started.len(), 1);
+        assert_eq!(built.iter().map(|b| b.2).collect::<Vec<_>>(), [false, true]);
+    }
+
+    pub fn context_rebuilds_identically_after_reopen(d: &mut Driver) {
+        plain_turn(d, "first", "one");
+        begin(d, "use tools");
+        two_calls(d);
+        finish(d, ProviderOutcome::Completed, Some(FinishReason::ToolCalls));
+        d.settle();
+        started(d);
+        stop(d);
+        d.settle();
+        let (_, started) = contexts(d);
+        assert_eq!(started.len(), 3);
+        let before = d.runtime.inspect_context(None, None).unwrap();
+        d.reopen();
+        assert_eq!(d.runtime.inspect_context(None, None).unwrap(), before);
+        for (head, fingerprint, items) in &started {
+            let report = d.runtime.inspect_context(Some(head.clone()), None).unwrap();
+            assert_eq!(&report.fingerprint, fingerprint, "differs after reopen");
+            assert_eq!(report.included.len(), items.len());
+        }
+    }
 
     pub fn plain_turn_ends_in_stop(d: &mut Driver) {
         let request = begin(d, "hi");
@@ -929,7 +1136,7 @@ mod bodies {
         // The next inference uses the branch's new model.
         begin(d, "second");
         let model = d.segment.effects.iter().rev().find_map(|e| match e {
-            Effect::StartInference { model, .. } => Some(model.clone()),
+            Effect::StartInference { input, .. } => Some(input.model.clone()),
             _ => None,
         });
         assert_eq!(model, Some(other.clone()));

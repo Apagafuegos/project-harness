@@ -31,13 +31,16 @@ cargo run --locked -p harness -- --version
 
 The check script verifies formatting, Clippy with warnings denied, workspace
 tests and doctests, a development build, documentation with warnings denied,
-and CLI help/version smoke checks. It can also be invoked from another working
-directory. CI runs the same script with the repository toolchain.
+CLI help/version smoke checks, and a `harness context` smoke test that must
+print the compaction fixture's golden report. It can also be invoked from
+another working directory. CI runs the same script with the repository
+toolchain.
 
 The checks exercise J01–J03 storage behavior, the runtime core against real
-storage, and the Rust API usage examples, including the specification journals
-and injected durability failures. They do not prove provider compatibility,
-workspace tools or sandbox enforcement.
+storage, the context builder and its golden reports, and the Rust API usage
+examples, including the specification journals and injected durability
+failures. They do not prove provider compatibility, workspace tools or sandbox
+enforcement.
 
 For narrower checks while working:
 
@@ -81,7 +84,12 @@ answers, scripted streams with occasional corrupt
 events, stale stream IDs, timer firings and injected persist failures. Each run
 is then driven to quiescence. Every started turn must have exactly one
 `turn_finished` in the journal; only a turn stopped by an injected fault may
-have none. With `--nocapture` it prints the outcomes and paths it reached. A
+have none. A second generator derived from the seed picks a context limit
+(none, two small ones that overflow after a few turns, or a large one) without
+changing the seed's interleavings. Every context the core built is rebuilt from
+the reopened journal and must have the same fingerprint, a build at a random
+head (and a preview there) must pass the builder's checks, and no run may
+fault with an internal cause. With `--nocapture` it prints the outcomes and paths it reached. A
 failing run prints its seed. Rerun one seed, or run more:
 
 ```sh
@@ -112,6 +120,56 @@ reopen never repairs history or performs step-6 recovery.
 ```sh
 cargo test -p harness-core --locked runtime::driver::tests
 ```
+
+## Context inspection
+
+`harness context` prints the [context report](context.md) of a stored session
+as JSON. It is read-only and takes a shared lock, so it refuses a session a
+running engine holds, at once and with a message saying so:
+
+```sh
+cargo run --locked -p harness -- context <data-root> <session-id> \
+  [--head ENTRY_ID] [--model PROVIDER/MODEL] [--context-tokens N]
+```
+
+`--head` inspects any entry, including one on another branch. `--model` builds
+a preview for another model. `--context-tokens` configures the projected
+model's context limit; without it the budget is reported as unknown. The
+command reads the session's configuration artifact for its instructions.
+
+### Golden reports
+
+`crates/core/src/context/golden/` holds the expected reports of the three
+RFC-001 fixtures, exactly as `harness context --context-tokens 128000` prints
+them. `context::tests::golden_*` compare them byte for byte, and
+`scripts/check.sh` diffs the CLI's output for the compaction fixture against
+its file. When a deliberate change alters a report:
+
+```sh
+UPDATE_GOLDEN=1 cargo test -p harness-core --locked context::tests::golden
+git diff crates/core/src/context/golden/
+```
+
+Review the diff before committing it. A changed `fingerprint` with no other
+change means the projection's bytes changed: bump `PROJECTION_VERSION` unless
+nothing using the old fingerprints has been released. Never update golden
+files to make an unexplained difference pass.
+
+### Context benchmark
+
+An opt-in benchmark appends a 10,000-entry branch (2,500 tool turns) with the
+oracle off, then builds its context 21 times and prints the median, the time
+spent fetching ancestry, hashing and checking, and the report's size:
+
+```sh
+TMPDIR=/dev/shm CARGO_NET_OFFLINE=true cargo test --release -p harness-core --locked \
+  context_build_benchmark -- --ignored --nocapture
+```
+
+On 2026-10-21, Rust 1.99.1, aarch64, tmpfs: median **59.6 ms** per build
+(ancestry 2.4 ms, fingerprint 17.8 ms, checks 14.9 ms) for 10,000 items; the
+report is **1.81 MB** compact and 2.93 MB pretty-printed. This is a local
+measurement, not a production promise.
 
 ## Scaling benchmark
 
@@ -175,7 +233,8 @@ dependencies, and lints live in the root manifest. Each crate opts into them.
 First-party unsafe code is forbidden; this does not audit dependencies or create
 an execution sandbox.
 
-Clap supplies CLI help, version, and argument validation. Storage uses Serde and
+Clap supplies CLI help, version, and argument validation. The CLI depends on
+`harness-core` and Serde JSON for `harness context`; its tests use Tempfile. Storage uses Serde and
 Serde JSON, the bundled JSON Schema validator with remote resolution disabled,
 SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives, typed
 errors and imbl persistent collections for sharing session snapshots. Tempfile
@@ -204,15 +263,16 @@ explicit when process execution is introduced.
 
 The storage library can create a private state root, checksummed journals and
 content-addressed artifacts when explicitly called. The CLI creates no runtime
-storage. See [session storage](session-storage.md) for API usage and limits.
+storage; `harness context` only reads an existing one. See [session storage](session-storage.md) for API usage and limits.
 Retention/deletion UI remains future work.
 
 ## Specification artifacts
 
 [RFC-001](rfcs/001-core-types-state-persistence.md) has a bundled JSON Schema,
 checksummed example journals, and conformance cases. Storage tests validate all
-three examples and their artifacts and cover J01–J03. Runtime, security, model
-and context gates remain future work.
+three examples and their artifacts and cover J01–J03. Context tests build
+golden reports from all three and cover C01. Security, model and other context
+gates remain future work.
 
 Bubblewrap and Linux namespace support will be prerequisites for external tool
 execution, not for the current storage/CLI checks. Do not install or

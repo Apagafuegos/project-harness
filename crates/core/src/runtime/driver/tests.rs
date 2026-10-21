@@ -10,6 +10,9 @@ use std::{
 use futures_core::Stream;
 
 use super::*;
+use crate::context::{
+    ContextError, ContextItem, ExclusionReason, ModelLimits, SessionConfiguration, fingerprint,
+};
 use crate::{
     model::scripted::{Script, ScriptedProvider, Step},
     session::{
@@ -82,6 +85,16 @@ impl Fixture {
         options: WorkerOptions,
         provider: Option<Arc<dyn ModelProvider>>,
     ) -> Self {
+        Self::with_configuration(config, options, provider, b"{}").await
+    }
+
+    /// A session whose configuration artifact holds `configuration`.
+    async fn with_configuration(
+        config: DriverConfig,
+        options: WorkerOptions,
+        provider: Option<Arc<dyn ModelProvider>>,
+        configuration: &'static [u8],
+    ) -> Self {
         // Prevent paused time from automatically advancing while a real OS
         // thread is syncing. Only tests' explicit advance() fires timers.
         let awake = tokio::spawn(async {
@@ -93,7 +106,7 @@ impl Fixture {
         std::thread::spawn(move || {
             let temp = tempfile::tempdir().unwrap();
             let root = Arc::new(DataRoot::open(temp.path().join("state"), true).unwrap());
-            let configuration = root.put_artifact(b"{}").unwrap();
+            let configuration = root.put_artifact(configuration).unwrap();
             let header = SessionHeader {
                 workspace: "/workspace".into(),
                 initial_model: ModelRef {
@@ -1179,7 +1192,9 @@ async fn failed_open_leaves_no_worker_and_poisoned_worker_still_answers() {
         .await
         .unwrap();
     let mut env = DeterministicEnv::new(10);
-    let mut core = Runtime::new(snapshot, RuntimeConfig::default(), &mut env);
+    let configuration =
+        SessionConfiguration::load(&fixture.root, snapshot.configuration()).unwrap();
+    let mut core = Runtime::new(snapshot, configuration, RuntimeConfig::default(), &mut env);
     let effects = core.step(
         Input::Command {
             request: RequestId(1),
@@ -1309,8 +1324,14 @@ fn direct_tool_turns(turns: u64) -> Duration {
             .to_string()
             .parse()
             .unwrap();
+        let configuration = SessionConfiguration::load(&root, &header.configuration).unwrap();
         let mut store = JournalStore::create(root, session, header, at).unwrap();
-        let mut runtime = Runtime::new(store.snapshot(), RuntimeConfig::default(), &mut env);
+        let mut runtime = Runtime::new(
+            store.snapshot(),
+            configuration,
+            RuntimeConfig::default(),
+            &mut env,
+        );
         let started = std::time::Instant::now();
         for n in 1..=turns {
             let mut inputs = VecDeque::from([Input::Command {
@@ -1420,4 +1441,234 @@ async fn session_handle_tool_turn_benchmark() {
         per_turn(worker) - per_turn(direct),
         (worker.as_secs_f64() / direct.as_secs_f64() - 1.0) * 100.0
     );
+}
+
+fn test_model() -> ModelRef {
+    ModelRef {
+        provider_instance: "mock".into(),
+        model: "test".into(),
+    }
+}
+
+fn reply(text: &str) -> Script {
+    Script::new([
+        Step::Event(ProviderEvent::Started),
+        Step::text(0, text),
+        Step::completed(FinishReason::Stop),
+    ])
+}
+
+/// A projection that does not fit fails the turn from `Preparing`: no C2,
+/// and the provider is never asked for a stream.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn context_overflow_fails_the_turn_before_any_stream_opens() {
+    let mut config = DriverConfig::default();
+    // The default deductions total 16,384 tokens, leaving one usable token;
+    // "hello" is estimated at two.
+    config.runtime.context.catalog.insert(
+        test_model(),
+        ModelLimits {
+            context_tokens: Some(16_385),
+            max_output_tokens: None,
+        },
+    );
+    let (fixture, provider) =
+        Fixture::scripted(config, WorkerOptions::default(), [reply("unused")]).await;
+    let mut subscription = fixture.handle.subscribe();
+    // Take the reset first, so the turn's events arrive as events.
+    assert!(matches!(
+        subscription.next().await,
+        Some(SubscriptionItem::Reset(_))
+    ));
+    assert!(matches!(
+        fixture.handle.command(Fixture::command(1)).await,
+        Ok(Accepted::TurnStarted { .. })
+    ));
+    let view = fixture.wait(idle).await;
+    assert_eq!(
+        finishes(&view),
+        [(TurnOutcome::Failed, Some("context_overflow".into()))]
+    );
+    assert!(provider.streams().is_empty(), "a stream was opened");
+    assert_eq!(provider.remaining(), 1);
+    let inferring = view.snapshot.events().any(|(_, _, event)| {
+        matches!(event, JournalEvent::StateChanged(c) if c.to == RuntimeState::Inferring)
+    });
+    assert!(!inferring, "C2 was committed");
+    // Subscribers learn why from `ContextBuilt` before the turn finishes.
+    let mut built = None;
+    while let Some(item) = subscription.next().await {
+        match item {
+            SubscriptionItem::Event(RuntimeEvent {
+                kind: EventKind::ContextBuilt { flags, .. },
+                ..
+            }) => built = Some(flags),
+            SubscriptionItem::Event(RuntimeEvent {
+                kind: EventKind::TurnFinished { code, .. },
+                ..
+            }) => {
+                assert_eq!(code.as_deref(), Some("context_overflow"));
+                break;
+            }
+            _ => {}
+        }
+    }
+    let flags = built.expect("ContextBuilt precedes TurnFinished");
+    assert!(flags.overflow && !flags.preview);
+    let report = fixture.handle.inspect_context(None, None).await.unwrap();
+    assert!(report.flags.overflow);
+    fixture.handle.shutdown().await;
+}
+
+/// The worker decodes the configuration artifact, so its instructions reach
+/// every request; `inspect_context` reads any branch without moving the head.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn requests_carry_the_projection_and_inspection_reads_any_branch() {
+    let provider = Arc::new(ScriptedProvider::new([
+        reply("one"),
+        reply("two"),
+        reply("three"),
+    ]));
+    let fixture = Fixture::with_configuration(
+        DriverConfig::default(),
+        WorkerOptions::default(),
+        Some(provider.clone()),
+        br#"{"instructions":[{"level":"system","text":"Be brief."}]}"#,
+    )
+    .await;
+    fixture.handle.command(Fixture::command(1)).await.unwrap();
+    let first = fixture.wait(idle).await.snapshot.head().cloned();
+    fixture.handle.command(Fixture::command(2)).await.unwrap();
+    let second = fixture.wait(idle).await;
+    let second_head = second.snapshot.head().cloned();
+    let [first_stream, second_stream] = &provider.streams()[..] else {
+        panic!("two streams")
+    };
+    let kinds = |items: &[ContextItem]| -> Vec<&'static str> {
+        items
+            .iter()
+            .map(|item| match item {
+                ContextItem::Instructions { .. } => "instructions",
+                ContextItem::User { .. } => "user",
+                ContextItem::Assistant { .. } => "assistant",
+                ContextItem::ToolResult { .. } => "tool_result",
+                ContextItem::Summary { .. } => "summary",
+            })
+            .collect()
+    };
+    assert_eq!(
+        kinds(&first_stream.request.input.items),
+        ["instructions", "user"]
+    );
+    let input = &second_stream.request.input;
+    assert_eq!(
+        kinds(&input.items),
+        ["instructions", "user", "assistant", "user"]
+    );
+    // The request is exactly what inspection rebuilds at its head.
+    let user = input.items[3].entry_id().unwrap().clone();
+    let inspected = fixture
+        .handle
+        .inspect_context(Some(user), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        inspected.fingerprint,
+        fingerprint(&input.model, &input.items)
+    );
+
+    // Start a sibling of the second turn, then inspect the old branch.
+    assert!(matches!(
+        fixture
+            .handle
+            .command(Command::SelectHead {
+                head: first.clone()
+            })
+            .await,
+        Ok(Accepted::HeadSelected { .. })
+    ));
+    fixture.handle.command(Fixture::command(3)).await.unwrap();
+    let third = fixture.wait(idle).await;
+    let current = third.snapshot.head().cloned();
+    let sibling = fixture
+        .handle
+        .inspect_context(second_head.clone(), None)
+        .await
+        .unwrap();
+    assert_eq!(sibling.identity.head, second_head);
+    assert_eq!(sibling.included.last().unwrap().entry_id, second_head);
+    let own = fixture.handle.inspect_context(None, None).await.unwrap();
+    assert_eq!(own.identity.head, current);
+    assert!(own.included.iter().all(|item| item.entry_id != second_head));
+    assert_ne!(own.fingerprint, sibling.fingerprint);
+    let view = fixture.handle.view().await.unwrap();
+    assert_eq!(
+        view.snapshot.head().cloned(),
+        current,
+        "inspection moved the head"
+    );
+    assert_eq!(view.snapshot.sequence(), third.snapshot.sequence());
+    // A preview for another model changes the model and nothing else here.
+    let other = ModelRef {
+        provider_instance: "other".into(),
+        model: "model".into(),
+    };
+    let preview = fixture
+        .handle
+        .inspect_context(None, Some(other.clone()))
+        .await
+        .unwrap();
+    assert!(preview.flags.preview);
+    assert_eq!(preview.identity.model, other);
+    assert!(
+        preview
+            .excluded
+            .iter()
+            .all(|e| e.reason != ExclusionReason::ProviderStateNotPortable)
+    );
+    assert_eq!(
+        fixture
+            .handle
+            .inspect_context(Some(EntryId::new()), None)
+            .await,
+        Err(InspectError::Context(ContextError::UnknownHead))
+    );
+    fixture.handle.shutdown().await;
+    assert_eq!(
+        fixture.handle.inspect_context(None, None).await,
+        Err(InspectError::Closed)
+    );
+}
+
+/// An invalid configuration artifact refuses to open rather than building
+/// projections without its instructions.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn open_refuses_a_configuration_with_invalid_instructions() {
+    let fixture = Fixture::scripted(DriverConfig::default(), WorkerOptions::default(), [])
+        .await
+        .0;
+    fixture.handle.shutdown().await;
+    let root = fixture.root.clone();
+    let configuration = root
+        .put_artifact(br#"{"instructions":"be brief"}"#)
+        .unwrap();
+    let header = SessionHeader {
+        workspace: "/workspace".into(),
+        initial_model: test_model(),
+        policy_revision: "initial".into(),
+        configuration,
+    };
+    let session = SessionId::new();
+    let created = SessionHandle::create(
+        root,
+        session,
+        header,
+        Arc::new(ScriptedProvider::new([])),
+        DriverConfig::default(),
+    )
+    .await;
+    assert!(matches!(
+        created,
+        Err(PersistError::Rejected { code }) if code == "invalid_instructions"
+    ));
 }

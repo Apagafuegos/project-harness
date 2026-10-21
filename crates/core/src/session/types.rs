@@ -13,8 +13,8 @@ pub struct ArtifactRef {
     pub bytes: u64,
 }
 
-/// Persisted model fields.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Persisted model fields. Ordered so it can key a model catalog.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelRef {
     /// Provider instance.

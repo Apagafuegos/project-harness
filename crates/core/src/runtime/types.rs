@@ -2,9 +2,11 @@
 
 use std::{fmt, time::Duration};
 
+use crate::context::{ContextConfig, ContextError, Flags, Totals};
+use crate::model::ModelInput;
 use crate::session::{
-    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, EntryId, ModelRef, ResponseId,
-    SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome, Usage,
+    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, Digest, EntryId, ModelRef,
+    ResponseId, SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome, Usage,
 };
 
 pub use crate::model::{ProviderEvent, ProviderOutcome};
@@ -78,6 +80,8 @@ pub struct RuntimeConfig {
     /// after every event; on expiry the stream is released and the response
     /// recorded as interrupted, failing the turn with `provider_stalled`.
     pub provider_idle_timeout: Duration,
+    /// Model limits, budget deductions and estimator of the context builder.
+    pub context: ContextConfig,
 }
 
 impl Default for RuntimeConfig {
@@ -91,6 +95,7 @@ impl Default for RuntimeConfig {
             max_user_bytes: 1024 * 1024,
             cancel_grace: Duration::from_secs(2),
             provider_idle_timeout: Duration::from_secs(300),
+            context: ContextConfig::default(),
         }
     }
 }
@@ -267,10 +272,12 @@ pub enum Effect {
         inference: InferenceId,
         /// The active turn.
         turn_id: TurnId,
-        /// Head whose ancestry is the context.
+        /// Head whose ancestry was projected.
         head: EntryId,
-        /// Model in effect at that head.
-        model: ModelRef,
+        /// The projection built in `Preparing`, for the model at that head.
+        input: ModelInput,
+        /// The projection's fingerprint.
+        fingerprint: Digest,
         /// Identity the assistant entry will carry.
         response_id: ResponseId,
     },
@@ -398,6 +405,20 @@ pub enum EventKind {
         /// Its stable code, if any.
         code: Option<String>,
     },
+    /// The turn's context was built in `Preparing`. The full report is
+    /// available through `SessionHandle::inspect_context`.
+    ContextBuilt {
+        /// The active turn.
+        turn_id: TurnId,
+        /// Head whose branch was projected.
+        head: EntryId,
+        /// The projection's fingerprint.
+        fingerprint: Digest,
+        /// Estimated tokens by category, and opaque bytes.
+        totals: Totals,
+        /// Overflow fails the turn with `context_overflow` before any inference.
+        flags: Flags,
+    },
     /// A provider stream started; a partial response now exists.
     InferenceStarted {
         /// Stream identity.
@@ -497,6 +518,17 @@ pub enum RuntimeDiagnostic {
         /// Stable reason.
         reason: &'static str,
     },
+}
+
+/// Why `SessionHandle::inspect_context` returned no report.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InspectError {
+    /// The builder refused, for example for an unknown head.
+    #[error(transparent)]
+    Context(#[from] ContextError),
+    /// The driver has exited.
+    #[error("session_closed")]
+    Closed,
 }
 
 /// Why the runtime faulted.

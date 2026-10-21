@@ -1,19 +1,24 @@
 # Runtime core
 
-Status: Milestone 2, steps 2 to 4 are implemented as `harness_core::runtime`
-and `harness_core::model`: a pure synchronous state machine, a dedicated storage
-worker, a Tokio driver/handle with broadcast subscriptions, and the provider
-stream seam with a scripted mock. Context building and startup recovery remain
-future work. Decisions [0004](decisions/0004-pure-runtime-core.md) and
-[0005](decisions/0005-provider-stream.md) record the design.
+Status: Milestone 2, steps 2 to 5 are implemented as `harness_core::runtime`,
+`harness_core::model` and `harness_core::context`: a pure synchronous state
+machine, a dedicated storage worker, a Tokio driver/handle with broadcast
+subscriptions, the provider stream seam with a scripted mock, and the context
+builder that the core runs in `Preparing`. Startup recovery remains future
+work. Decisions [0004](decisions/0004-pure-runtime-core.md),
+[0005](decisions/0005-provider-stream.md) and
+[0006](decisions/0006-context-builder.md) record the design; the builder itself
+is described in [context](context.md).
 
 ## Shape
 
 ```rust,ignore
-let mut runtime = Runtime::new(snapshot, RuntimeConfig::default(), &mut env); // emits nothing
+let mut runtime = Runtime::new(snapshot, configuration, RuntimeConfig::default(), &mut env); // emits nothing
 let effects: Vec<Effect> = runtime.step(input, &mut env);
 ```
 
+`configuration` is the session's decoded configuration artifact
+(`SessionConfiguration`), read by the caller because the core performs no I/O.
 `step` does nothing except what it returns. It performs no file, network or
 channel access, never reads the clock, and creates identities only through
 `Env`: `now()` plus generators for runtime epochs, entry, turn, response and
@@ -63,7 +68,7 @@ fragments itself.
 | --- | --- | --- |
 | `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, `at` | Bind the command if present, append, answer |
-| `StartInference` | `InferenceId`, `TurnId`, head, `ModelRef`, `ResponseId` | Open a stream; context projection arrives in step 5 |
+| `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
 | `CancelInference` | `InferenceId` | Cancel the stream's token; keep delivering it for a confirmation |
 | `ReleaseInference` | `InferenceId` | Stop listening and drop the stream; once per `StartInference` |
 | `SetTimer` / `CancelTimer` | `TimerId`, duration | Driver timer |
@@ -82,8 +87,9 @@ returns `ShuttingDown` for commands it receives while draining; neither reaches
 the core.
 
 `RuntimeConfig` has `max_inferences_per_turn` (32), `max_partial_bytes`
-(4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s) and
-`provider_idle_timeout` (300 s).
+(4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s),
+`provider_idle_timeout` (300 s) and `context`, the builder's `ContextConfig`
+(model catalog, budget deductions, compaction trigger, estimator).
 
 ## Durability
 
@@ -105,10 +111,21 @@ These are the commits the tests assert. Entries come first, then events in order
 | --- | --- | --- |
 | C1 open | user message | `turn_started`, `idle>preparing` (carries the command) |
 | C2 infer | — | `preparing>inferring`; `StartInference` follows its ack |
+| Overflow, instead of C2 | — | `turn_finished(failed, context_overflow)`; no stream |
 | C3 stop | assistant `completed/stop` | `inferring>processing`, `turn_finished(completed)` |
 | C3 tool calls | assistant `completed/tool_calls` | `inferring>processing` |
 | C4 answers | one runtime result per pending call | `processing>continuing`, `continuing>preparing`, then C2 again |
 | C4 at limit | one runtime result per pending call | `processing>continuing`, `turn_finished(failed, inference_limit)` |
+
+Entering `Preparing` (after C1, or after C4's `continuing>preparing`) builds
+the context, unless a cancel is pending or the inference limit is reached. The
+core emits `ContextBuilt` first. If the projection overflows the configured
+budget, the turn fails from `Preparing` with `context_overflow` and the
+provider is never asked for a stream. Otherwise the core keeps the projection,
+commits C2 and sends that projection with `StartInference` after the ack. C2
+adds no entries, so the projection is still the head's; the core checks the
+head matches and that it is not a preview. An unknown context limit never
+overflows. A builder invariant failure faults the core with its code.
 
 Other stream endings record the response and finish the turn in one commit:
 
@@ -176,8 +193,10 @@ flight). Otherwise they get `Busy`, `RecoveryRequired` or `Faulted`. Each is one
 commit, a `navigate` or a `model_changed` entry, and the reply follows its ack.
 Invalid requests (`head_unchanged`, `unknown_head`,
 `head_inside_tool_exchange`, `empty_model`) are rejected before persisting.
-`model_changed` records the `reject` portability policy; the portability preview
-arrives with the context builder.
+`model_changed` records the `reject` portability policy. Before switching, a
+client can preview the switch with `inspect_context(None, Some(model))`: the
+report lists provider state that would stop being portable and the budget
+under the new model's limits. The command itself does not run the preview.
 
 ## Cancellation
 
@@ -211,7 +230,8 @@ Cancellation never claims rollback.
 OperationControl) -> ModelEventStream` returns an owned, pull-driven
 `futures_core::Stream` of `ProviderEvent`s that starts work when polled. Setup
 failures are terminal events. `OperationControl` carries a `CancellationToken`;
-deadlines are deferred. `ModelInput` names only the model until step 5.
+deadlines are deferred. `ModelInput` is the projection: the model and its
+ordered `ContextItem`s (instructions, user, assistant, tool result, summary).
 
 `model::scripted::ScriptedProvider` replays one `Script` per stream. Its steps
 are `Event`, `Wait` (until a test signals), `AwaitCancel` and `Stall` (until
@@ -279,6 +299,10 @@ incarnation generated through `Env` when constructing a runtime. `seq` starts at
 exactly one per event, and is unrelated to journal sequences. Kinds:
 
 - `Committed { ack, snapshot }`: one per `Persisted`, with the new snapshot.
+- `ContextBuilt { turn_id, head, fingerprint, totals, flags }`: a turn's
+  context was built in `Preparing`. It carries the estimate totals and the
+  `overflow`, `compaction_recommended` and `preview` flags, not the report, and
+  changes no view. Clients that want the report call `inspect_context`.
 - `PhaseChanged { phase, active_turn }`: `Phase` is `Durable(RuntimeState)`,
   `RecoveryRequired` or `Faulted`.
 - `TurnFinished { turn_id, outcome, code }`: after the commit holding it.
@@ -315,6 +339,13 @@ subscriptions hold only weak command senders and do not keep the driver alive.
   the bounded command mailbox. Full returns `Overloaded` at once. A second turn
   still gets the core's `Busy`; turns are never queued for later execution.
 - `view().await` returns a coherent view taken between steps.
+- `inspect_context(head, model_override).await -> Result<ContextReport,
+  InspectError>` builds a report between steps from the published snapshot.
+  `head: None` is the current head; any entry can be named, so another branch
+  can be inspected without navigating to it. `model_override` makes it a
+  preview. Nothing is persisted and the head never moves. An unknown head is
+  `InspectError::Context(ContextError::UnknownHead)`; a stopped driver is
+  `InspectError::Closed`. It is answered while draining for shutdown, like views.
 - `subscribe()` immediately registers a broadcast receiver. `next().await`
   yields `Some(SubscriptionItem::Reset(ClientView))` first, then contiguous
   `Event(RuntimeEvent)` items, or `None` after driver shutdown.
@@ -349,9 +380,10 @@ replies, worker exit, timers, artifact failures, commands, and provider events
 last. Each provider event spends Tokio's cooperative budget, so even a stream
 that is always ready makes the task yield, and commands such as `Cancel` are
 served between events. For `StartInference` it calls
-`ModelProvider::stream` with a `ModelRequest { response_id, input: ModelInput
-{ model } }` and a fresh cancellation token, and polls the returned stream one
+`ModelProvider::stream` with a `ModelRequest { response_id, input }` and a
+fresh cancellation token, and polls the returned stream one
 event at a time; nothing is queued between the stream and the core.
+`ModelRequest.input` is exactly the projection the core built.
 `CancelInference` cancels the token, and `ReleaseInference` drops the stream.
 Every drop also cancels the token. It maps effects to worker requests, provider
 receivers, sleep tasks and broadcast events; it makes no turn decisions.
@@ -366,7 +398,10 @@ effect would replace an occupied slot, the driver keeps the existing operation,
 which may already be written, skips the new one and feeds
 `DriverInvariant { code: "storage_overlap" }` to the core.
 
-`StorageWorker::open` and `create` open on a named `std::thread`. Only that
+`StorageWorker::open` and `create` open on a named `std::thread`. After opening
+the journal, the worker reads and decodes the session's configuration artifact
+for the context builder; an artifact that does not decode fails the open with
+its code, such as `invalid_instructions`. Only that
 thread calls `JournalStore`; it owns the store until drop. Requests arrive by
 bounded mpsc and `blocking_recv`, with oneshot replies after sync. No
 `spawn_blocking` or Tokio runtime is created. I/O errors poison later appends,
@@ -391,12 +426,10 @@ epoch even when recovery prevents a new command.
 
 ## Not implemented yet
 
-- **Step 5:** context projection and its report. `StartInference` names the head
-  and model only.
 - **Step 6:** startup recovery. `RecoveryRequired` only rejects commands today.
   Explicit torn-tail repair through the handle also belongs here.
-- Also later: approvals, compaction, configuration changes, real tools and
-  providers.
+- Also later: approvals, summary generation and compaction commands,
+  configuration changes, real tools and providers.
 
 ## Tests
 
@@ -414,5 +447,12 @@ an injected overlapping storage effect, and a stale timer fire after reopen.
 `ScriptedProvider` scripts cover confirmed cancellation without virtual time,
 a stalled stream released at grace end, setup and mid-stream failure,
 interruption, a malformed stream released at once, a cancel that preempts
-an always-ready stream, and an idle timeout that restarts on each event. A randomized test runs 512 seeds. See
+an always-ready stream, and an idle timeout that restarts on each event.
+Context scenarios check that `ContextBuilt` precedes C2 and `StartInference`
+follows its ack with the same fingerprint, that overflow fails the first or a
+later inference from `Preparing` with no stream, and that every projection is
+rebuilt identically after reopening. Driver tests check that a scripted
+provider is never opened on overflow, that requests carry the configured
+instructions, and that `inspect_context` reads a sibling branch without moving
+the head. A randomized test runs 512 seeds. See
 [development](development.md#runtime-tests).
