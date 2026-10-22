@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{config::ModelLimits, estimate::EstimatorInfo};
-use crate::session::{Digest, EntryId, ModelRef, ResponseId, SessionId, Usage};
+use crate::session::{Digest, EntryId, ModelRef, Provenance, ResponseId, SessionId, Usage};
 
 /// Accounts for every entry on one branch for one projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +108,10 @@ pub struct IncludedItem {
     /// For assistant items, each included block and continuation. Their
     /// excluded siblings are in `excluded`.
     pub blocks: Vec<IncludedBlock>,
+    /// For tool results only: `executor`, `runtime`, `user_observed` or
+    /// `user_acknowledged_unknown`. Omitted for other items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 /// Which part of an entry a decision is about.

@@ -5,8 +5,9 @@ use std::{fmt, time::Duration};
 use crate::context::{ContextConfig, ContextError, Flags, Totals};
 use crate::model::ModelInput;
 use crate::session::{
-    ArtifactRef, CallId, CommandId, Commit, CommitAck, ContentBlock, Digest, EntryId, ModelRef,
-    ResponseId, SessionSnapshot, StoreError, Timestamp, TurnId, TurnOutcome, Usage,
+    ArtifactRef, CallId, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, EntryId,
+    Inspection, InvocationId, ModelRef, ResponseId, SessionSnapshot, StoreError, Timestamp,
+    ToolStatus, TurnId, TurnOutcome, Usage,
 };
 
 pub use crate::model::{ProviderEvent, ProviderOutcome};
@@ -107,6 +108,11 @@ impl Default for RuntimeConfig {
 pub enum Input {
     /// Announce the current phase and epoch after attaching a replacement runtime.
     PublishView,
+    /// The driver attached this runtime to an opened, created, reopened or
+    /// repaired journal. If the snapshot needs recovery, plan it: close an
+    /// interrupted turn, or record uncertainty and wait for the user. A
+    /// runtime with nothing to recover emits nothing.
+    Start,
     /// Artifact preflight completed without changing the journal.
     ArtifactsVerified {
         /// Token of the preflight in flight.
@@ -193,6 +199,48 @@ pub enum Command {
         /// The model for later inferences on this branch.
         model: ModelRef,
     },
+    /// State what happened to an invocation whose outcome is unknown. Only
+    /// accepted while the runtime awaits resolution.
+    ResolveUncertain {
+        /// The invocation listed by `ResolutionRequired`.
+        invocation_id: InvocationId,
+        /// The user's statement.
+        resolution: UserResolution,
+    },
+}
+
+/// The user's statement about an uncertain invocation. It becomes the call's
+/// tool result; the tool is never run again.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UserResolution {
+    /// The user checked what happened. Recorded with `user_observed`
+    /// provenance and this status, which cannot be `uncertain`.
+    Observed {
+        /// What the user found.
+        status: ToolStatus,
+        /// The user's account, bounded by `max_user_bytes`; not empty.
+        text: String,
+    },
+    /// The user accepts not knowing. Recorded with status `uncertain` and
+    /// `user_acknowledged_unknown` provenance.
+    AcknowledgedUnknown,
+}
+
+/// An invocation that may or may not have run, as a client shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UncertainInvocation {
+    /// Invocation identity, named by `ResolveUncertain`.
+    pub invocation_id: InvocationId,
+    /// The turn that authorized it.
+    pub turn_id: TurnId,
+    /// The proposed call.
+    pub call: CallRef,
+    /// Tool name from the proposal.
+    pub tool: String,
+    /// Digest of the authorized plan.
+    pub plan_digest: Digest,
+    /// Record time of the execution intent.
+    pub intent_at: Timestamp,
 }
 
 /// Why a commit was not persisted.
@@ -204,6 +252,10 @@ pub enum PersistError {
     /// An earlier I/O failure poisoned this worker until reopen.
     #[error("writer_poisoned")]
     Poisoned,
+    /// The journal ends in a torn tail. Nothing was repaired; the inspection
+    /// says what `repair_tail` would quarantine.
+    #[error("torn journal tail: {0}")]
+    TornTail(TornTail),
     /// Storage/open/upload was rejected with a stable code. Rejection of a
     /// core-generated append is a core bug.
     #[error("storage rejected: {code}")]
@@ -217,6 +269,73 @@ pub enum PersistError {
         /// Operating-system description, without journal content.
         message: String,
     },
+}
+
+/// The inspection of a journal whose last record was never fully written:
+/// valid bytes, file bytes, fingerprint and the valid prefix's snapshot. Pass
+/// its fingerprint and file size to `repair_tail` once the user confirms.
+#[derive(Clone, Debug)]
+pub struct TornTail(pub Box<Inspection>);
+
+impl TornTail {
+    /// The full inspection.
+    pub fn inspection(&self) -> &Inspection {
+        &self.0
+    }
+    /// Bytes that repair would quarantine.
+    pub fn tail_bytes(&self) -> u64 {
+        self.0.file_bytes - self.0.valid_bytes
+    }
+}
+
+/// Inspections compare by their numbers and the valid prefix's identity.
+impl PartialEq for TornTail {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        let prefix = |i: &Inspection| {
+            i.snapshot
+                .as_ref()
+                .map(|s| (s.session_id().clone(), s.sequence(), s.checksum().clone()))
+        };
+        a.valid_bytes == b.valid_bytes
+            && a.file_bytes == b.file_bytes
+            && a.fingerprint == b.fingerprint
+            && a.diagnostic == b.diagnostic
+            && prefix(a) == prefix(b)
+    }
+}
+impl Eq for TornTail {}
+
+impl fmt::Display for TornTail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} of {} bytes are valid; fingerprint {}",
+            self.0.valid_bytes, self.0.file_bytes, self.0.fingerprint
+        )
+    }
+}
+
+/// Why `repair_tail` refused or failed. Nothing is repaired automatically.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RepairError {
+    /// The journal's fingerprint or size differs from the inspected values:
+    /// the file changed since inspection. Inspect again.
+    #[error("stale_repair")]
+    StaleRepair,
+    /// No torn tail to repair: a complete corrupt record, a missing header or
+    /// a valid journal. Nothing is skipped or rewritten.
+    #[error("tail_not_repairable")]
+    NotRepairable,
+    /// Another engine holds the session.
+    #[error("session_locked")]
+    Locked,
+    /// The handle is not faulted, so its journal is open and has no torn tail.
+    #[error("not_faulted")]
+    NotFaulted,
+    /// Repair succeeded or was not needed, but opening or I/O failed.
+    #[error(transparent)]
+    Persist(#[from] PersistError),
 }
 
 impl PersistError {
@@ -336,6 +455,13 @@ pub enum Accepted {
         /// The commit that made it so.
         ack: CommitAck,
     },
+    /// The user's resolution and `recovery_resolved` are durable.
+    Resolved {
+        /// The resolved invocation.
+        invocation_id: InvocationId,
+        /// The commit holding them.
+        ack: CommitAck,
+    },
     /// The navigation commit is durable.
     HeadSelected {
         /// Its acknowledgement.
@@ -355,8 +481,10 @@ pub enum Rejection {
     Overloaded,
     /// A turn is active or a commit is in flight. Commands are never queued.
     Busy,
-    /// The session needs recovery, which this runtime does not perform yet.
+    /// Automatic recovery is planned or in flight. Retry when it ends.
     RecoveryRequired,
+    /// An uncertain invocation waits for the user; send `ResolveUncertain`.
+    ResolutionRequired,
     /// A persistence failure stopped this runtime; reopen the store.
     Faulted,
     /// The driver is draining for shutdown; the command never reached the core.
@@ -490,6 +618,23 @@ pub enum EventKind {
     PartialCleared {
         /// Stream identity.
         inference: InferenceId,
+    },
+    /// Recovery closed a turn that a restart interrupted. Nothing was run,
+    /// retried or invented: calls that never started were answered as
+    /// cancelled and the turn finished as interrupted.
+    Recovered {
+        /// The closed turn.
+        turn_id: TurnId,
+        /// Calls answered as cancelled because they never started.
+        answered: Vec<CallRef>,
+        /// Why, such as `process_restart`.
+        code: String,
+    },
+    /// Invocations whose outcome is unknown wait for `ResolveUncertain`. The
+    /// list replaces the view's; it is the whole set still waiting.
+    ResolutionRequired {
+        /// Each unresolved invocation.
+        invocations: Vec<UncertainInvocation>,
     },
     /// Non-fatal observation.
     Diagnostic(RuntimeDiagnostic),

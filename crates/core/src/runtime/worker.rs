@@ -6,11 +6,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::context::SessionConfiguration;
 use crate::session::{
-    ArtifactRef, CommandId, Commit, CommitAck, DataRoot, JournalStore, SessionHeader, SessionId,
-    SessionSnapshot, StoreError, Timestamp,
+    ArtifactRef, CommandId, Commit, CommitAck, DataRoot, DiagnosticKind, Digest, JournalStore,
+    SessionHeader, SessionId, SessionSnapshot, StoreError, Timestamp,
 };
 
-use super::PersistError;
+use super::{PersistError, TornTail};
 
 type AppendResult = Result<(CommitAck, SessionSnapshot), PersistError>;
 type Opened = Result<(SessionSnapshot, SessionConfiguration), PersistError>;
@@ -29,6 +29,20 @@ enum Request {
     VerifyArtifacts {
         refs: Vec<ArtifactRef>,
         reply: oneshot::Sender<Result<Vec<ArtifactRef>, PersistError>>,
+    },
+}
+
+/// How the worker obtains its journal.
+pub(super) enum Opening {
+    /// Open an existing journal. A torn tail fails with its inspection.
+    Open,
+    /// Create and sync a new session.
+    Create(SessionHeader, Timestamp),
+    /// Repair the inspected torn tail, then open the repaired journal.
+    Repair {
+        fingerprint: Digest,
+        size: u64,
+        at: Timestamp,
     },
 }
 
@@ -108,7 +122,7 @@ impl StorageWorker {
         root: Arc<DataRoot>,
         session_id: SessionId,
     ) -> Result<(Self, SessionSnapshot), PersistError> {
-        Self::start(root, session_id, None, 8, WorkerOptions::default())
+        Self::start(root, session_id, Opening::Open, 8, WorkerOptions::default())
             .await
             .map(|(worker, snapshot, _)| (worker, snapshot))
     }
@@ -123,7 +137,7 @@ impl StorageWorker {
         Self::start(
             root,
             session_id,
-            Some((header, at)),
+            Opening::Create(header, at),
             8,
             WorkerOptions::default(),
         )
@@ -134,7 +148,7 @@ impl StorageWorker {
     pub(super) async fn start(
         root: Arc<DataRoot>,
         session_id: SessionId,
-        create: Option<(SessionHeader, Timestamp)>,
+        opening: Opening,
         capacity: usize,
         options: WorkerOptions,
     ) -> Result<(Self, SessionSnapshot, SessionConfiguration), PersistError> {
@@ -146,7 +160,7 @@ impl StorageWorker {
             .spawn(move || {
                 // The receiver, store and file all drop before the exit notification,
                 // including when unwinding. No panic crosses this thread boundary.
-                let run = || run(root, session_id, create, receiver, opened, &options);
+                let run = || run(root, session_id, opening, receiver, opened, &options);
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     #[cfg(test)]
                     if options.without_oracle {
@@ -182,19 +196,32 @@ impl StorageWorker {
 fn run(
     root: Arc<DataRoot>,
     session_id: SessionId,
-    create: Option<(SessionHeader, Timestamp)>,
+    opening: Opening,
     mut requests: mpsc::Receiver<Request>,
     opened: oneshot::Sender<Opened>,
     options: &WorkerOptions,
 ) {
-    let result = match create {
-        Some((header, at)) => JournalStore::create(root.clone(), session_id, header, at),
-        None => JournalStore::open(root.clone(), &session_id),
+    let result = match opening {
+        Opening::Create(header, at) => {
+            JournalStore::create(root.clone(), session_id.clone(), header, at)
+        }
+        Opening::Open => JournalStore::open(root.clone(), &session_id),
+        Opening::Repair {
+            fingerprint,
+            size,
+            at,
+        } => JournalStore::repair_inspected_tail(root.clone(), &session_id, &fingerprint, size, at),
     };
     let mut store = match result {
         Ok(store) => store,
         Err(error) => {
-            let _ = opened.send(Err(PersistError::from_store(&error)));
+            let error = match error {
+                StoreError::Journal(diagnostic) if diagnostic.kind == DiagnosticKind::TornTail => {
+                    torn_tail(&root, &session_id, diagnostic)
+                }
+                error => PersistError::from_store(&error),
+            };
+            let _ = opened.send(Err(error));
             return;
         }
     };
@@ -286,5 +313,27 @@ fn run(
                 let _ = reply.send(result.map_err(|error| PersistError::from_store(&error)));
             }
         }
+    }
+}
+
+/// Inspect a journal whose open failed on a torn tail, so the caller can show
+/// the user what repair would quarantine. Opening released its lock; if the
+/// file changed meanwhile, the newer finding is reported instead.
+fn torn_tail(
+    root: &DataRoot,
+    session_id: &SessionId,
+    diagnostic: crate::session::Diagnostic,
+) -> PersistError {
+    match JournalStore::inspect(root, session_id) {
+        Ok(inspection)
+            if inspection
+                .diagnostic
+                .as_ref()
+                .is_some_and(|d| d.kind == DiagnosticKind::TornTail) =>
+        {
+            PersistError::TornTail(TornTail(Box::new(inspection)))
+        }
+        Ok(_) => PersistError::from_store(&StoreError::Journal(diagnostic)),
+        Err(error) => PersistError::from_store(&error),
     }
 }

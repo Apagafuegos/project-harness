@@ -1,13 +1,14 @@
 # Runtime core
 
-Status: Milestone 2, steps 2 to 5 are implemented as `harness_core::runtime`,
+Status: Milestone 2 is implemented as `harness_core::runtime`,
 `harness_core::model` and `harness_core::context`: a pure synchronous state
 machine, a dedicated storage worker, a Tokio driver/handle with broadcast
-subscriptions, the provider stream seam with a scripted mock, and the context
-builder that the core runs in `Preparing`. Startup recovery remains future
-work. Decisions [0004](decisions/0004-pure-runtime-core.md),
-[0005](decisions/0005-provider-stream.md) and
-[0006](decisions/0006-context-builder.md) record the design; the builder itself
+subscriptions, the provider stream seam with a scripted mock, the context
+builder that the core runs in `Preparing`, and startup recovery with explicit
+tail repair. Decisions [0004](decisions/0004-pure-runtime-core.md),
+[0005](decisions/0005-provider-stream.md),
+[0006](decisions/0006-context-builder.md) and
+[0007](decisions/0007-startup-recovery.md) record the design; the builder itself
 is described in [context](context.md).
 
 ## Shape
@@ -45,12 +46,14 @@ active turn, timers, and a requested cancel.
 | `StorageFailed` | `PersistError` | Worker exit or failed artifact I/O |
 | `DriverInvariant` | stable `code` | Driver refused an effect that would break its own invariant |
 | `PublishView` | — | Driver attaching a replacement runtime; emits the current phase |
+| `Start` | — | Driver, right after constructing a runtime; plans any recovery |
 | `Provider` | `InferenceId`, `ProviderEvent` | Provider stream |
 | `ProviderEnded` | `InferenceId` | Stream closed, with or without `Finished` |
 | `TimerFired` | `TimerId` | Driver timer |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
-`SelectHead { head }` and `SwitchModel { model }`. `RequestId`, `CommitToken`,
+`SelectHead { head }`, `SwitchModel { model }` and
+`ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)). `RequestId`, `CommitToken`,
 `InferenceId` and `TimerId` are `u64` values local to one runtime and never
 journaled.
 
@@ -80,8 +83,9 @@ fragments itself.
 the assistant entry will carry, which RFC-001 gives the provider request.
 
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
-`HeadSelected { ack }` or `ModelSwitched { ack }`. `Rejection` is `Busy`,
-`RecoveryRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
+`Resolved { invocation_id, ack }`, `HeadSelected { ack }` or
+`ModelSwitched { ack }`. `Rejection` is `Busy`, `RecoveryRequired`,
+`ResolutionRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
 The handle can also return `Overloaded` before submission, and the driver
 returns `ShuttingDown` for commands it receives while draining; neither reaches
 the core.
@@ -172,8 +176,8 @@ those bytes, so the two cannot drift. The order of checks is:
 3. An opening commit or media verification in flight with this command ID: the same fingerprint attaches
    the request to that commit, and both requests are answered on its ack. A
    different fingerprint replies `StaleCommand`.
-4. `RecoveryRequired`, then `Busy` (an active turn or any commit in flight).
-   Nothing is queued.
+4. `RecoveryRequired` or `ResolutionRequired`, then `Busy` (an active turn or
+   any commit in flight). Nothing is queued.
 5. `Invalid`: `empty_content`, `unsupported_content`, `invalid_media`, `content_too_large`,
    `command_id_in_use` (the UUID already names another journal identity) or
    `head_inside_tool_exchange`.
@@ -193,7 +197,8 @@ Storage verifies media again on append. Artifacts are never deleted by the
 harness; disagreement between preflight and append faults the runtime.
 
 **SelectHead / SwitchModel** need an idle session (no active turn, nothing in
-flight). Otherwise they get `Busy`, `RecoveryRequired` or `Faulted`. Each is one
+flight). Otherwise they get `Busy`, `RecoveryRequired`, `ResolutionRequired` or
+`Faulted`. Each is one
 commit, a `navigate` or a `model_changed` entry, and the reply follows its ack.
 Invalid requests (`head_unchanged`, `unknown_head`,
 `head_inside_tool_exchange`, `empty_model`) are rejected before persisting.
@@ -293,8 +298,81 @@ emits `Fault`, and rejects pending requests and every later command with
 bug; tests fail on it.
 
 A snapshot that requires recovery, or is not `idle`, starts the core in
-`RecoveryRequired`. Every command is rejected, except that a `StartTurn` retry
-still learns its durable receipt.
+`RecoveryRequired`; `Input::Start` then recovers it, as described next.
+
+## Recovery
+
+After a crash or a fault, a session returns to `Idle` on its own when that is
+safe, and waits for the user when it is not. It never replays a side effect or
+invents history: no stream opens, no assistant entry is written and no result
+claims `executor` provenance during recovery. Opening still writes nothing;
+recovery is ordinary commits that storage validates. See
+[decision 0007](decisions/0007-startup-recovery.md).
+
+`Runtime::new` emits nothing. The driver feeds `Input::Start` right after
+constructing a runtime on open, create, reopen and repair, before it serves any
+message. A runtime with nothing to recover emits nothing for it. Otherwise the
+core plans one recovery step, and each recovery commit's acknowledgement plans
+the next, until the session is `Idle` or waits for the user. While a step is
+planned or in flight the phase is `RecoveryRequired` and commands get
+`RecoveryRequired`, except that a `StartTurn` retry still learns its durable
+receipt. A failed recovery commit faults the runtime as usual; after
+`reopen()`, `Start` plans again from the new snapshot. Commits are atomic, so
+a half-applied step is impossible and nothing is written twice.
+
+**An interrupted turn with nothing uncertain** closes in one commit:
+
+| Entries | Events |
+| --- | --- |
+| `cancelled` runtime result per pending call without an intent, text `process_restart: …` | `<state>>recovering` unless already `recovering`, `turn_finished(interrupted, process_restart)` |
+
+After its ack the core emits `TurnFinished` and `Recovered { turn_id,
+answered, code }`, where `answered` lists those calls, and the session is
+`Idle`. A partial response that was streaming at the crash was never
+persisted, so nothing is written for it.
+
+**An uncertain invocation**, an execution intent without a result, may or may
+not have run. `Start` commits `execution_uncertain` (reason
+`process_restart: …`) for each one not yet recorded; storage moves to
+`recovering`. If no not-started call follows on the branch, the same commit
+finishes the turn `interrupted` and `Recovered` follows its ack. Otherwise the
+turn stays open: storage answers calls in branch order, and the uncertain call
+is first. The core then enters `AwaitingResolution`. `RuntimeView::awaiting`
+and a `ResolutionRequired { invocations }` event list each one as an
+`UncertainInvocation { invocation_id, turn_id, call, tool, plan_digest,
+intent_at }`. Every command is rejected with `ResolutionRequired` except a
+`StartTurn` retry with a receipt and:
+
+`ResolveUncertain { invocation_id, resolution }`, where `resolution` is
+
+- `Observed { status, text }`: the user checked what happened. It becomes a
+  tool result with `user_observed` provenance and that status. `uncertain` is
+  refused (`observed_status_uncertain`), and `text` must be non-empty and at
+  most `max_user_bytes` (`empty_content`, `content_too_large`).
+- `AcknowledgedUnknown`: a result with status `uncertain` and
+  `user_acknowledged_unknown` provenance.
+
+The result and `recovery_resolved` are one commit, and the reply
+`Accepted::Resolved` follows its ack. When it resolves the last uncertain
+invocation of a still-open turn, the same commit also answers the remaining
+not-started calls as above and finishes the turn `interrupted`; storage
+accepts the four records together. An unknown ID is `Invalid("unknown_invocation")`;
+outside `AwaitingResolution` the command is `Invalid("nothing_to_resolve")`,
+`RecoveryRequired` or `Faulted`, and a resolution already in flight makes a
+second one `Busy`. Nothing is resolved automatically and the tool is never run
+again; the user starts a new turn afterwards.
+
+The commits storage accepted for each shape:
+
+| Shape | Commits after `Start` |
+| --- | --- |
+| Unfinished turn | `<state>>recovering finished(interrupted, process_restart)` |
+| Unanswered calls | `result(cancelled)… processing>recovering finished(…)` |
+| Uncertain call alone | `execution_uncertain finished(…)`; on resolution `result(<status>) recovery_resolved` |
+| Uncertain, then not-started | `execution_uncertain`; on resolution `result(<status>) result(cancelled) recovery_resolved finished(…)` |
+
+A torn tail is repaired only on request, before any of this; see
+[repair](#tail-repair).
 
 ## Events and resync
 
@@ -308,8 +386,13 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
   `overflow`, `compaction_recommended` and `preview` flags, not the report, and
   changes no view. Clients that want the report call `inspect_context`.
 - `PhaseChanged { phase, active_turn }`: `Phase` is `Durable(RuntimeState)`,
-  `RecoveryRequired` or `Faulted`.
+  `RecoveryRequired`, `AwaitingResolution` or `Faulted`. A phase other than
+  `AwaitingResolution` clears the view's `awaiting`.
 - `TurnFinished { turn_id, outcome, code }`: after the commit holding it.
+- `Recovered { turn_id, answered, code }`: recovery closed this turn, after
+  its `TurnFinished`.
+- `ResolutionRequired { invocations }`: the invocations waiting for the user;
+  it replaces the view's `awaiting`.
 - `InferenceStarted`, `TextDelta`, `ReasoningSummaryDelta`, `ToolCallStarted`
   (with the issued `CallId`), `ToolArgumentsDelta`, `ToolCallReady`,
   `UsageUpdated`, and `PartialCleared`. `PartialCleared` comes when the response
@@ -317,7 +400,7 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
 - `Diagnostic` and `Fault`.
 
 `Runtime::view()` returns `RuntimeView { epoch, event_seq, snapshot, phase,
-active_turn, partial }`. It reflects exactly the events with
+active_turn, partial, awaiting }`. It reflects exactly the events with
 `seq <= event_seq`. The runtime maintains its own view by applying each event
 it emits to a `ClientView`, the same reducer clients use, so the invariant holds
 by construction and is also tested. `partial` is bounded like the response.
@@ -368,10 +451,43 @@ subscriptions hold only weak command senders and do not keep the driver alive.
   After the driver has exited, `command` reports `Faulted` because the mailbox
   is closed.
 - `reopen().await -> Result<RuntimeView, PersistError>` requires `Faulted`.
-  It drains and stops the old worker, opens the same journal on a new one, and
-  constructs a new runtime/epoch. Unfinished work stays `RecoveryRequired`.
-  Torn-tail errors are returned without repair; explicit storage repair remains
-  required. No command or uncertain write is automatically retried.
+  It drains and stops the old worker, opens the same journal on a new one,
+  constructs a new runtime/epoch, feeds `PublishView` and then `Start`, which
+  recovers the session as on open. A torn tail is returned as
+  `PersistError::TornTail` without repair. No command or uncertain write is
+  automatically retried.
+- `open_with_env` and `create_with_env` take an `Env` for time and
+  identities, so a handle can run deterministically; `open` and `create` use
+  `SystemEnv`.
+
+### Tail repair
+
+A torn tail is the end of a record that was never fully written. Cutting it
+off is safe only for the exact file the user looked at, so repair always takes
+the inspected fingerprint and size and never runs on its own.
+
+1. `SessionHandle::open` or `reopen()` fails with `PersistError::TornTail`.
+   Its `TornTail` carries the full `Inspection`: valid bytes, file bytes,
+   whole-file fingerprint and the valid prefix's snapshot. `tail_bytes()` is
+   what would be quarantined.
+2. The client shows the user that byte count and where the valid prefix ends
+   (its sequence, head, state and any turn in progress).
+3. On confirmation it calls `SessionHandle::repair_tail(root, session_id,
+   expected_fingerprint, expected_size, provider, config)`.
+4. On the worker thread, `JournalStore::repair_inspected_tail` rescans under
+   the writer lock, checks the fingerprint and size, quarantines the tail into
+   an artifact, truncates and syncs, and commits `tail_repaired`.
+5. The session opens normally and `Start` runs any recovery.
+
+A faulted handle does steps 3 to 5 in place with
+`reopen_repairing_tail(expected_fingerprint, expected_size)`, getting a new
+epoch; existing subscriptions reset. `RepairError` is `StaleRepair` (the file
+changed since inspection), `NotRepairable` (a complete corrupt record, a
+missing header, or no torn tail), `Locked` (another engine holds the session),
+`NotFaulted` (the in-place form on a healthy handle) or `Persist(error)`.
+Nothing is ever skipped or rewritten. `harness journal inspect` and
+`harness journal repair` do the same without an engine; see
+[session storage](session-storage.md#durability-and-recovery).
 
 `DriverConfig` defaults: 16 command slots, 64 broadcast slots, 8 worker slots
 (and at most 8 concurrent artifact tasks), 16 MiB artifact uploads, and the
@@ -425,15 +541,19 @@ the lock and signals exit. Failed opens also await exit before returning.
 partial response is in each reset, so joining or resyncing mid-stream retains
 all text observed so far. Delta history itself is transient; durable session
 history and the current partial response are preserved through resync.
-Reopen feeds `PublishView` to the new core, emitting its phase with the new
-epoch even when recovery prevents a new command.
+Reopen and in-place repair feed `PublishView` to the new core, emitting its
+phase with the new epoch, and then `Start`, so subscribers see the recovery
+events that follow.
 
 ## Not implemented yet
 
-- **Step 6:** startup recovery. `RecoveryRequired` only rejects commands today.
-  Explicit torn-tail repair through the handle also belongs here.
-- Also later: approvals, summary generation and compaction commands,
-  configuration changes, real tools and providers.
+- Approvals, summary generation and compaction commands, configuration
+  changes, real tools and providers.
+- Reconciling an uncertain invocation from evidence, such as a file tool
+  checking the workspace to suggest a resolution (Milestone 3). Here a
+  resolution is always the user's statement.
+- Recovery UI beyond the handle, events and CLI (Milestone 5), and retrying a
+  turn after recovery: the user starts a new turn.
 
 ## Tests
 
@@ -458,5 +578,22 @@ later inference from `Preparing` with no stream, and that every projection is
 rebuilt identically after reopening. Driver tests check that a scripted
 provider is never opened on overflow, that requests carry the configured
 instructions, and that `inspect_context` reads a sibling branch without moving
-the head. A randomized test runs 512 seeds. See
+the head.
+
+Recovery scenarios (`runtime::tests::recovery`) kill the process after a
+chosen commit, without shutdown, and restart it: in `Preparing`, `Inferring`,
+`Processing`, `Authorizing`, `Continuing` and `Cancelling`, with unanswered
+calls, with an uncertain call alone or followed by a not-started call, during
+recovery itself (the commit lost, durable but unacknowledged, or torn), while
+waiting for a resolution, and during a resolution. Records a tool runtime would
+write (authorization and intent) are appended through the dying process's
+writer. The interrupted-execution fixture waits in `AwaitingResolution` and
+returns to `Idle` when resolved either way. While recovering, the test driver
+fails if the core starts a stream or persists an assistant entry or an
+executor result, and every run ends with every started turn finished exactly
+once; `finish` restarts any run left faulted or unfinished. Driver tests cover
+recovery through `SessionHandle::open` with a scripted provider that records
+no stream, resolution through the handle, repair on a faulted handle (stale
+fingerprint and size refused, new epoch, subscription reset) and the static
+`repair_tail` refusals. A randomized test runs 512 seeds, with crashes. See
 [development](development.md#runtime-tests).

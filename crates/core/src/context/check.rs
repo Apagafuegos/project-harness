@@ -35,6 +35,20 @@ fn agrees(items: &[ContextItem], report: &ContextReport) -> Result<(), &'static 
         if kind != record.kind || item.entry_id() != record.entry_id.as_ref() {
             return Err("report_disagrees_with_projection");
         }
+        let provenance = match item {
+            ContextItem::ToolResult {
+                provenance, result, ..
+            } => {
+                if *provenance != result.metadata.provenance {
+                    return Err("tool_result_provenance_mismatch");
+                }
+                Some(*provenance)
+            }
+            _ => None,
+        };
+        if provenance != record.provenance {
+            return Err("report_disagrees_with_projection");
+        }
         if let ContextItem::Assistant {
             content,
             continuation,

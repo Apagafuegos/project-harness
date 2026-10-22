@@ -3,7 +3,9 @@
 Status: Tree-based append-only JSONL storage is implemented in `harness-core`
 under [decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 tests.
 [RFC-001](../rfcs/001-core-types-state-persistence.md) defines its framing/schema.
-Runtime recovery orchestration and tool execution remain future work.
+The runtime performs recovery commits after open
+([decision 0007](../decisions/0007-startup-recovery.md)); tool execution remains
+future work.
 
 ## Inputs and output
 

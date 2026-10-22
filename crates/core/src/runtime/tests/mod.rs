@@ -2,6 +2,7 @@
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
 mod random;
+mod recovery;
 mod scenarios;
 
 use std::{
@@ -44,6 +45,17 @@ struct Segment {
     views: Vec<RuntimeView>,
 }
 
+/// How a simulated process dies with a commit in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Crash {
+    /// The commit was never written.
+    Lost,
+    /// The commit is durable, but its acknowledgement never arrived.
+    Durable,
+    /// Half of the commit was written: a torn tail.
+    Torn,
+}
+
 /// The commit handed to the storage worker and not yet answered.
 struct Pending {
     token: CommitToken,
@@ -81,6 +93,12 @@ struct Driver {
     /// Started and not yet released, in the current runtime.
     listening: BTreeSet<InferenceId>,
     timers: BTreeSet<TimerId>,
+    /// Torn tails repaired after a crash.
+    repairs: u64,
+    /// Simulated process crashes.
+    crashes: u64,
+    /// Identities for records tests write directly, as a tool runtime would.
+    injector: DeterministicEnv,
 }
 
 /// The default configuration with a generous limit for both test models, so
@@ -152,12 +170,61 @@ impl Driver {
             started: Vec::new(),
             listening: BTreeSet::new(),
             timers: BTreeSet::new(),
+            repairs: 0,
+            crashes: 0,
+            injector: DeterministicEnv::new(INJECTOR_STREAM),
         }
+    }
+
+    /// A runtime over an existing journal in `root`, opened and started as a
+    /// process would open it.
+    fn open_existing(
+        temp: tempfile::TempDir,
+        root: Arc<DataRoot>,
+        session: SessionId,
+        config: RuntimeConfig,
+    ) -> Self {
+        let store = JournalStore::open(root.clone(), &session).unwrap();
+        let snapshot = store.snapshot();
+        let decoded = SessionConfiguration::load(&root, snapshot.configuration()).unwrap();
+        let mut env = DeterministicEnv::new(FIRST_STREAM);
+        let mut driver = Self {
+            session,
+            runtime: Runtime::new(snapshot.clone(), decoded.clone(), config.clone(), &mut env),
+            env,
+            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot),
+            done: Vec::new(),
+            _temp: temp,
+            root,
+            store: Some(store),
+            pending: None,
+            verification: None,
+            fail: None,
+            failed: None,
+            requests: BTreeSet::new(),
+            replies: BTreeMap::new(),
+            next_request: 0,
+            next_command: 0,
+            last_seq: 0,
+            inference: None,
+            started: Vec::new(),
+            listening: BTreeSet::new(),
+            timers: BTreeSet::new(),
+            repairs: 0,
+            crashes: 0,
+            injector: DeterministicEnv::new(INJECTOR_STREAM),
+        };
+        driver.step(Input::Start);
+        driver
     }
 
     /// Feed one input, record it, and check the per-step invariants.
     fn step(&mut self, input: Input) -> Vec<Effect> {
+        let before = self.runtime.phase();
         let effects = self.runtime.step(input.clone(), &mut self.env);
+        if matches!(before, Phase::RecoveryRequired | Phase::AwaitingResolution) {
+            invents_nothing(&effects);
+        }
         for effect in &effects {
             self.observe(effect);
         }
@@ -355,8 +422,97 @@ impl Driver {
     /// Drop the runtime and store, reopen the journal and start a new runtime
     /// with the next identity stream, as a restarted process would.
     fn reopen(&mut self) {
+        self.reopen_unstarted();
+        self.step(Input::Start);
+    }
+
+    /// `reopen`, without feeding `Start` to the new runtime.
+    fn reopen_unstarted(&mut self) {
         assert!(self.pending.is_none(), "reopen with a commit in flight");
         self.check_reopened();
+        self.attach();
+    }
+
+    /// Die as a killed process would: no shutdown and no answer for the
+    /// commit in flight, which `crash` decides the fate of. Requests the dead
+    /// process held are never answered.
+    fn kill(&mut self, crash: Crash) {
+        self.crashes += 1;
+        if let Some(pending) = self.pending.take()
+            && crash != Crash::Lost
+        {
+            let store = self.store.as_mut().expect("store is open");
+            if crash == Crash::Torn {
+                self.root.io.test.lock().unwrap().fail = Some(Point::PartialWrite);
+            }
+            let mut commit = pending.commit;
+            let result = (|| {
+                if let Some((id, command)) = &pending.command {
+                    store.bind_command(&mut commit, id.clone(), command)?;
+                }
+                store.append(commit.clone(), pending.at)
+            })();
+            self.root.io.test.lock().unwrap().fail = None;
+            match (crash, result) {
+                (Crash::Durable, Ok(_)) | (Crash::Torn, Err(StoreError::Io(_))) => {}
+                (_, result) => panic!("crash write {crash:?} gave {result:?}\n{commit:#?}"),
+            }
+        }
+        self.verification = None;
+        self.requests
+            .retain(|request| self.replies.contains_key(request));
+        drop(self.store.take());
+    }
+
+    /// Kill the process and restart it.
+    fn crash(&mut self, crash: Crash) {
+        self.kill(crash);
+        self.restart();
+    }
+
+    /// Start a new process over the journal: repair a torn tail as a user who
+    /// inspected it would, open, and feed `Start`.
+    fn restart(&mut self) {
+        drop(self.store.take());
+        self.repair_if_torn();
+        self.failed = None;
+        self.attach();
+        self.step(Input::Start);
+    }
+
+    /// Repair a torn tail with the fingerprint and size just inspected.
+    fn repair_if_torn(&mut self) {
+        let inspection = JournalStore::inspect(&self.root, &self.session).unwrap();
+        match &inspection.diagnostic {
+            None => {}
+            Some(diagnostic) if diagnostic.kind == DiagnosticKind::TornTail => {
+                let at = DeterministicEnv::BASE.parse().unwrap();
+                JournalStore::repair_tail(self.root.clone(), &self.session, &inspection, at)
+                    .unwrap();
+                self.repairs += 1;
+            }
+            Some(diagnostic) => panic!("journal is not repairable: {diagnostic:?}"),
+        }
+    }
+
+    /// Append a commit through this process's writer as a tool runtime
+    /// would, just before the process dies. The runtime never sees it. The
+    /// commit in flight, if any, is dropped unwritten first.
+    fn inject(
+        &mut self,
+        build: impl FnOnce(&SessionSnapshot, &mut DeterministicEnv, &DataRoot) -> Commit,
+    ) {
+        self.pending = None;
+        let store = self.store.as_mut().expect("the dying process's writer");
+        let commit = build(&store.snapshot(), &mut self.injector, &self.root);
+        let at = DeterministicEnv::BASE.parse().unwrap();
+        if let Err(error) = store.append(commit.clone(), at) {
+            panic!("storage rejected an injected commit: {error}\n{commit:#?}");
+        }
+    }
+
+    /// Open the journal under a new runtime with the next identity stream.
+    fn attach(&mut self) {
         let stream = self.segment.stream + 1;
         let store = JournalStore::open(self.root.clone(), &self.session).unwrap();
         let snapshot = store.snapshot();
@@ -416,8 +572,23 @@ impl Driver {
         reopened
     }
 
+    /// Resolve every uncertain invocation the runtime waits for as unknown.
+    fn acknowledge_all(&mut self) {
+        while self.runtime.phase() == Phase::AwaitingResolution {
+            let invocation_id = self.runtime.view().awaiting[0].invocation_id.clone();
+            let request = self.command(Command::ResolveUncertain {
+                invocation_id,
+                resolution: UserResolution::AcknowledgedUnknown,
+            });
+            self.settle();
+            self.accepted(request);
+        }
+    }
+
     /// End of every test: all requests answered once; the journal reopens to
     /// the published snapshot (allowing for an I/O failure's durable commit).
+    /// A run that leaves a turn open or a fault is restarted, so recovery
+    /// closes it: every started turn ends with exactly one `TurnFinished`.
     fn finish(mut self) -> Finished {
         assert!(self.pending.is_none(), "test ended with a commit in flight");
         let missing: Vec<_> = self
@@ -426,12 +597,23 @@ impl Driver {
             .filter(|r| !self.replies.contains_key(r))
             .collect();
         assert!(missing.is_empty(), "requests without a reply: {missing:?}");
+        let faulted = self.failed.is_some() || self.runtime.phase() == Phase::Faulted;
+        if self.runtime.phase() != Phase::Durable(RuntimeState::Idle) {
+            self.check_reopened();
+            self.verification = None;
+            self.restart();
+            self.settle();
+            self.acknowledge_all();
+        }
+        assert_eq!(self.runtime.phase(), Phase::Durable(RuntimeState::Idle));
         let reopened = self.check_reopened();
         self.done.push(self.segment);
         Finished {
             segments: self.done,
             reopened,
-            faulted: self.failed.is_some(),
+            faulted,
+            repairs: self.repairs,
+            crashes: self.crashes,
         }
     }
 }
@@ -475,6 +657,37 @@ struct Finished {
     segments: Vec<Segment>,
     reopened: SessionSnapshot,
     faulted: bool,
+    repairs: u64,
+    crashes: u64,
+}
+
+/// Identity stream of records written directly by tests, as a tool runtime.
+const INJECTOR_STREAM: u16 = 0xffc;
+
+/// While recovering, the core never opens a stream, writes an assistant
+/// response or a result with executor provenance.
+fn invents_nothing(effects: &[Effect]) {
+    for effect in effects {
+        match effect {
+            Effect::StartInference { .. } => panic!("a stream opened during recovery"),
+            Effect::Persist { commit, .. } => {
+                for entry in &commit.entries {
+                    match &entry.payload {
+                        EntryPayload::AssistantResponse(_) => {
+                            panic!("recovery wrote an assistant response")
+                        }
+                        EntryPayload::ToolResult(r) => assert_ne!(
+                            r.result.metadata.provenance,
+                            Provenance::Executor,
+                            "recovery wrote an executor result"
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Snapshot identity: the last record's exact-byte checksum covers the chain.
@@ -489,34 +702,61 @@ fn same(a: &SessionSnapshot, b: &SessionSnapshot) -> bool {
         && a.events().len() == b.events().len()
 }
 
-/// Each started turn has at most one `TurnFinished`, and exactly one unless
-/// a fault stopped the runtime during it.
+/// Every started turn has exactly one `TurnFinished`, including after faults
+/// and crashes, because `finish` lets recovery close what a run left open.
+/// Only recovery interrupts a turn, and the journal holds nothing invented:
+/// every assistant response came from a stream the core started, no result
+/// claims an executor, and each uncertainty is recorded once.
 fn check_turns(finished: &Finished) {
     let snapshot = &finished.reopened;
+    assert!(!snapshot.requires_recovery());
     let mut outcomes: BTreeMap<TurnId, usize> = BTreeMap::new();
+    let mut uncertain = BTreeSet::new();
     for (_, _, event) in snapshot.events() {
         match event {
             JournalEvent::TurnStarted(start) => {
                 assert!(outcomes.insert(start.turn_id.clone(), 0).is_none());
             }
             JournalEvent::TurnFinished(end) => {
-                assert_ne!(
-                    end.outcome,
-                    TurnOutcome::Interrupted,
-                    "only recovery interrupts a turn"
-                );
+                if end.outcome == TurnOutcome::Interrupted {
+                    assert_eq!(end.code.as_deref(), Some("process_restart"));
+                }
                 *outcomes.get_mut(&end.turn_id).unwrap() += 1;
+            }
+            JournalEvent::ExecutionUncertain(v) => {
+                assert!(uncertain.insert(v.invocation_id.clone()), "recorded twice");
             }
             _ => {}
         }
     }
     for (turn, count) in &outcomes {
-        let unfinished_allowed = (finished.faulted || finished.segments.len() > 1)
-            && snapshot.active_turn() == Some(turn);
-        assert!(
-            *count == 1 || (*count == 0 && unfinished_allowed),
-            "turn {turn} has {count} TurnFinished"
-        );
+        assert_eq!(*count, 1, "turn {turn} has {count} TurnFinished");
+    }
+    let streamed: BTreeSet<_> = finished
+        .segments
+        .iter()
+        .flat_map(|segment| &segment.effects)
+        .filter_map(|effect| match effect {
+            Effect::StartInference { response_id, .. } => Some(response_id.clone()),
+            _ => None,
+        })
+        .collect();
+    // A fixture's own history was not written by this runtime.
+    let initial = &finished.segments[0].initial;
+    for (id, stored) in snapshot.entries() {
+        if initial.entry(id).is_some() {
+            continue;
+        }
+        match &stored.entry.payload {
+            EntryPayload::AssistantResponse(r) => assert!(
+                streamed.contains(&r.response_id),
+                "an assistant response no stream produced"
+            ),
+            EntryPayload::ToolResult(r) => {
+                assert_ne!(r.result.metadata.provenance, Provenance::Executor)
+            }
+            _ => {}
+        }
     }
     // The runtime announced exactly the journaled outcomes, once each.
     let announced: Vec<_> = finished
@@ -596,6 +836,10 @@ fn normalized(finished: &Finished) -> Vec<String> {
                     Accepted::Cancelling { turn_id, ack: a } => {
                         format!("Cancelling({turn_id}, {})", ack(a))
                     }
+                    Accepted::Resolved {
+                        invocation_id,
+                        ack: a,
+                    } => format!("Resolved({invocation_id}, {})", ack(a)),
                     Accepted::HeadSelected { ack: a } => format!("HeadSelected({})", ack(a)),
                     Accepted::ModelSwitched { ack: a } => format!("ModelSwitched({})", ack(a)),
                 };
@@ -609,8 +853,13 @@ fn normalized(finished: &Finished) -> Vec<String> {
 /// Run a scenario twice with fresh environments and journals, replay it, and
 /// check resync, reopening and turn outcomes.
 fn scenario(config: RuntimeConfig, body: fn(&mut Driver)) {
+    scenario_from(|| Driver::with_config(config.clone()), body);
+}
+
+/// `scenario` for a driver built by `new`, such as one over a fixture.
+fn scenario_from(new: impl Fn() -> Driver, body: fn(&mut Driver)) {
     let run = || {
-        let mut driver = Driver::with_config(config.clone());
+        let mut driver = new();
         body(&mut driver);
         driver.finish()
     };
@@ -667,6 +916,12 @@ fn shape(commit: &Commit) -> String {
                 Some(code) => format!("finished({:?}, {code})", f.outcome).to_lowercase(),
                 None => format!("finished({:?})", f.outcome).to_lowercase(),
             },
+            JournalEvent::ExecutionUncertain(_) => "execution_uncertain".into(),
+            JournalEvent::RecoveryResolved(r) => {
+                format!("recovery_resolved({:?})", r.resolution).to_lowercase()
+            }
+            JournalEvent::AuthorizationDecided(_) => "authorization_decided".into(),
+            JournalEvent::ExecutionIntent(_) => "execution_intent".into(),
             other => format!("{other:?}"),
         });
     }
@@ -733,7 +988,7 @@ fn replacement_epoch_requires_resync_before_comparing_sequence() {
     driver.fail_pending(PersistError::Io {
         message: "failed".into(),
     });
-    driver.reopen();
+    driver.reopen_unstarted();
     assert_ne!(client.view().epoch, driver.runtime.view().epoch);
     let events = driver.step(Input::PublishView);
     let Effect::Emit(event) = &events[0] else {

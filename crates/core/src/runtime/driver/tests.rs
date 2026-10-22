@@ -129,7 +129,7 @@ impl Fixture {
         let handle = SessionHandle::launch(
             root.clone(),
             session.clone(),
-            Some((header, DeterministicEnv::BASE.parse().unwrap())),
+            Opening::Create(header, DeterministicEnv::BASE.parse().unwrap()),
             config,
             DeterministicEnv::new(1),
             provider,
@@ -428,7 +428,7 @@ async fn fault_reopen_changes_epoch_and_preserves_existing_subscription() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn uncertain_writes_are_never_retried_and_torn_tails_require_explicit_repair() {
     for point in [Point::PartialWrite, Point::BeforeAck] {
-        let fixture = Fixture::new(config()).await;
+        let mut fixture = Fixture::new(config()).await;
         let mut subscription = fixture.handle.subscribe();
         let SubscriptionItem::Reset(mut client) = subscription.next().await.unwrap() else {
             panic!("initial reset")
@@ -442,23 +442,34 @@ async fn uncertain_writes_are_never_retried_and_torn_tails_require_explicit_repa
         assert_eq!(old.snapshot.sequence(), 0);
         let result = fixture.handle.reopen().await;
         if point == Point::PartialWrite {
-            assert!(matches!(result, Err(PersistError::Rejected { .. })));
+            let Err(PersistError::TornTail(torn)) = result else {
+                panic!("expected the torn-tail inspection, got {result:?}")
+            };
+            let inspection = torn.inspection();
+            assert_eq!(inspection.snapshot.as_ref().unwrap().sequence(), 0);
+            assert!(torn.tail_bytes() > 0);
             assert_eq!(fixture.handle.view().await.unwrap().phase, Phase::Faulted);
             // A second open reports the same evidence, not a live leaked lock.
             assert!(
-                matches!(StorageWorker::open(fixture.root.clone(), fixture.session.clone()).await, Err(PersistError::Rejected { code }) if code != "session_locked")
+                matches!(StorageWorker::open(fixture.root.clone(), fixture.session.clone()).await, Err(PersistError::TornTail(again)) if again == torn)
             );
         } else {
             let reopened = result.unwrap();
             assert_ne!(reopened.epoch, old.epoch);
             assert_eq!(catch_up(&mut subscription, &mut client, &reopened).await, 1);
             assert_eq!(reopened.snapshot.sequence(), 1);
-            assert_eq!(reopened.phase, Phase::RecoveryRequired);
+            // The durable opening commit is never repeated: a retry learns it,
+            // and recovery closes the turn without asking.
             let accepted = fixture.handle.command(Fixture::command(1)).await.unwrap();
             assert!(matches!(accepted, Accepted::TurnStarted { ack, .. } if ack.sequence == 1));
+            let live = fixture.wait(idle).await;
             assert_eq!(
-                fixture.handle.command(Fixture::command(2)).await,
-                Err(Rejection::RecoveryRequired)
+                finishes(&live),
+                [(TurnOutcome::Interrupted, Some("process_restart".into()))]
+            );
+            assert!(
+                fixture.streams.try_recv().is_err(),
+                "recovery opened a stream"
             );
         }
         fixture.handle.shutdown().await;
@@ -1698,5 +1709,418 @@ async fn open_refuses_a_configuration_with_invalid_instructions() {
     assert!(matches!(
         created,
         Err(PersistError::Rejected { code }) if code == "invalid_instructions"
+    ));
+}
+
+// ----- startup recovery and tail repair ---------------------------------------
+
+/// Keeps paused time from auto-advancing while real threads do I/O.
+struct Awake(JoinHandle<()>);
+
+impl Awake {
+    fn new() -> Self {
+        Self(tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        }))
+    }
+}
+
+impl Drop for Awake {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Build a journal with plain storage on another thread, as a crashed
+/// process left it.
+fn journal_on_thread<T: Send + 'static>(
+    build: impl FnOnce(&Arc<DataRoot>) -> T + Send + 'static,
+) -> (tempfile::TempDir, Arc<DataRoot>, T) {
+    std::thread::spawn(move || {
+        let temp = tempfile::tempdir().unwrap();
+        let root = Arc::new(DataRoot::open(temp.path().join("state"), true).unwrap());
+        let value = build(&root);
+        (temp, root, value)
+    })
+    .join()
+    .unwrap()
+}
+
+/// Open `session` through a handle whose provider is a scripted mock with no
+/// scripts: any stream it opened would be recorded.
+async fn open_scripted(
+    root: &Arc<DataRoot>,
+    session: &SessionId,
+    config: DriverConfig,
+) -> (SessionHandle, Arc<ScriptedProvider>) {
+    let provider = Arc::new(ScriptedProvider::new([]));
+    let handle = SessionHandle::launch(
+        root.clone(),
+        session.clone(),
+        Opening::Open,
+        config,
+        DeterministicEnv::new(2),
+        provider.clone(),
+        WorkerOptions::default(),
+    )
+    .await
+    .unwrap();
+    (handle, provider)
+}
+
+async fn wait_for(handle: &SessionHandle, check: impl Fn(&RuntimeView) -> bool) -> RuntimeView {
+    for _ in 0..100_000 {
+        let view = handle.view().await.unwrap();
+        if check(&view) {
+            return view;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("handle did not reach the expected view");
+}
+
+/// Recovery wrote no assistant response and no executor result: the only
+/// responses are those `before` already had.
+fn invented_nothing(before: usize, view: &RuntimeView) {
+    assert_eq!(responses(view).len(), before, "recovery wrote a response");
+    assert!(view.snapshot.entries().all(|(_, stored)| !matches!(
+        &stored.entry.payload,
+        EntryPayload::ToolResult(r) if r.result.metadata.provenance == Provenance::Executor
+    )));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn open_closes_an_interrupted_turn_without_any_stream() {
+    let _awake = Awake::new();
+    // A crash left a turn in `Inferring`: C1 and C2 are durable.
+    let (_temp, root, session) = journal_on_thread(|root| {
+        let configuration = root.put_artifact(b"{}").unwrap();
+        let header = SessionHeader {
+            workspace: "/workspace".into(),
+            initial_model: test_model(),
+            policy_revision: "initial".into(),
+            configuration: configuration.clone(),
+        };
+        let at: crate::session::Timestamp = DeterministicEnv::BASE.parse().unwrap();
+        let mut env = DeterministicEnv::new(0xffe);
+        let session: SessionId = env.entry_id().to_string().parse().unwrap();
+        let mut store =
+            JournalStore::create(root.clone(), session.clone(), header, at.clone()).unwrap();
+        let (turn, user) = (env.turn_id(), env.entry_id());
+        let state = |from, to| {
+            JournalEvent::StateChanged(StateChanged {
+                turn_id: turn.clone(),
+                from,
+                to,
+            })
+        };
+        let opening = Commit {
+            command_id: None,
+            command_fingerprint: None,
+            head: HeadChange {
+                from: None,
+                to: Some(user.clone()),
+                reason: HeadReason::Advance,
+            },
+            entries: vec![Entry {
+                id: user.clone(),
+                parent_id: None,
+                turn_id: Some(turn.clone()),
+                payload: EntryPayload::UserMessage(UserMessage {
+                    content: vec![ContentBlock::Text {
+                        text: "interrupted".into(),
+                    }],
+                }),
+            }],
+            events: vec![
+                JournalEvent::TurnStarted(TurnStarted {
+                    turn_id: turn.clone(),
+                    user_entry_id: user.clone(),
+                    configuration,
+                }),
+                state(RuntimeState::Idle, RuntimeState::Preparing),
+            ],
+        };
+        store.append(opening, at.clone()).unwrap();
+        let infer = Commit {
+            command_id: None,
+            command_fingerprint: None,
+            head: HeadChange {
+                from: Some(user.clone()),
+                to: Some(user),
+                reason: HeadReason::Retain,
+            },
+            entries: Vec::new(),
+            events: vec![state(RuntimeState::Preparing, RuntimeState::Inferring)],
+        };
+        store.append(infer, at).unwrap();
+        session
+    });
+    let (handle, provider) = open_scripted(&root, &session, config()).await;
+    let live = wait_for(&handle, idle).await;
+    assert_eq!(
+        finishes(&live),
+        [(TurnOutcome::Interrupted, Some("process_restart".into()))]
+    );
+    assert!(provider.streams().is_empty(), "recovery opened a stream");
+    invented_nothing(0, &live);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn uncertain_invocation_waits_for_the_user_through_the_handle() {
+    let _awake = Awake::new();
+    let (_temp, root, session) = journal_on_thread(|root| {
+        let examples =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rfcs/001/examples");
+        for entry in std::fs::read_dir(examples.join("artifacts")).unwrap() {
+            root.put_artifact(&std::fs::read(entry.unwrap().path()).unwrap())
+                .unwrap();
+        }
+        let session: SessionId = "019a0000-0000-7000-8000-000000000002".parse().unwrap();
+        let mut file = root.journal(&session, true, true).unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            &std::fs::read(examples.join("interrupted-execution.jsonl")).unwrap(),
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        session
+    });
+    let (handle, provider) = open_scripted(&root, &session, config()).await;
+    let mut subscription = handle.subscribe();
+    let waiting = wait_for(&handle, |view| view.phase == Phase::AwaitingResolution).await;
+    let SubscriptionItem::Reset(client) = subscription.next().await.unwrap() else {
+        panic!("reset")
+    };
+    assert_eq!(client.view().awaiting, waiting.awaiting);
+    let [uncertain] = &waiting.awaiting[..] else {
+        panic!("one invocation waits")
+    };
+    assert_eq!(uncertain.tool, "read");
+    assert_eq!(
+        handle.command(Fixture::command(1)).await,
+        Err(Rejection::ResolutionRequired)
+    );
+    let before = responses(&waiting).len();
+    let accepted = handle
+        .command(Command::ResolveUncertain {
+            invocation_id: uncertain.invocation_id.clone(),
+            resolution: UserResolution::Observed {
+                status: ToolStatus::Succeeded,
+                text: "README.md was read".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(accepted, Accepted::Resolved { invocation_id, .. } if invocation_id == uncertain.invocation_id)
+    );
+    let live = wait_for(&handle, idle).await;
+    assert!(live.awaiting.is_empty());
+    assert!(provider.streams().is_empty(), "recovery opened a stream");
+    invented_nothing(before, &live);
+    handle.shutdown().await;
+    // Resolved for good: reopening needs no recovery.
+    let (handle, _) = open_scripted(&root, &session, config()).await;
+    assert_eq!(
+        handle.view().await.unwrap().phase,
+        Phase::Durable(RuntimeState::Idle)
+    );
+    handle.shutdown().await;
+}
+
+/// Fault a fixture's open turn with a torn C3: the stream finished, but
+/// only half of its response commit reached the journal.
+async fn tear_response(fixture: &mut Fixture) {
+    let (_, stream, _) = fixture.start(1).await;
+    stream.send(delta("partial")).await.unwrap();
+    fixture.root.io.test.lock().unwrap().fail = Some(Point::PartialWrite);
+    stream.send(finished(FinishReason::Stop)).await.unwrap();
+    drop(stream);
+    fixture.wait(|view| view.phase == Phase::Faulted).await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn torn_tail_is_repaired_on_a_faulted_handle_only_with_its_inspection() {
+    let mut fixture = Fixture::new(config()).await;
+    let mut subscription = fixture.handle.subscribe();
+    let SubscriptionItem::Reset(mut client) = subscription.next().await.unwrap() else {
+        panic!("reset")
+    };
+    tear_response(&mut fixture).await;
+    let old = fixture.handle.view().await.unwrap();
+    let Err(PersistError::TornTail(torn)) = fixture.handle.reopen().await else {
+        panic!("reopen must report the torn tail")
+    };
+    let inspection = torn.inspection().clone();
+    let prefix = inspection.snapshot.as_ref().unwrap();
+    assert_eq!(
+        prefix.state(),
+        RuntimeState::Inferring,
+        "the valid prefix ends mid-turn"
+    );
+    let other = Digest::of(b"another file");
+    for (fingerprint, size) in [
+        (other, inspection.file_bytes),
+        (inspection.fingerprint.clone(), inspection.file_bytes - 1),
+    ] {
+        assert_eq!(
+            fixture
+                .handle
+                .reopen_repairing_tail(fingerprint, size)
+                .await,
+            Err(RepairError::StaleRepair)
+        );
+        assert_eq!(fixture.handle.view().await.unwrap().phase, Phase::Faulted);
+    }
+    let repaired = fixture
+        .handle
+        .reopen_repairing_tail(inspection.fingerprint.clone(), inspection.file_bytes)
+        .await
+        .unwrap();
+    assert_ne!(repaired.epoch, old.epoch);
+    let live = fixture.wait(idle).await;
+    // The old subscription resets to the new epoch, then follows recovery.
+    assert!(catch_up(&mut subscription, &mut client, &live).await >= 1);
+    assert_eq!(
+        finishes(&live),
+        [(TurnOutcome::Interrupted, Some("process_restart".into()))]
+    );
+    let repair = live
+        .snapshot
+        .events()
+        .find_map(|(_, _, event)| match event {
+            JournalEvent::TailRepaired(repair) => Some(repair.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(repair.valid_bytes, inspection.valid_bytes);
+    assert_eq!(repair.quarantine_artifact.bytes, torn.tail_bytes());
+    assert!(
+        responses(&live).is_empty(),
+        "the torn response is not invented"
+    );
+    assert_eq!(
+        fixture
+            .handle
+            .reopen_repairing_tail(inspection.fingerprint, inspection.file_bytes)
+            .await,
+        Err(RepairError::NotFaulted)
+    );
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn repair_tail_refuses_stale_locked_and_complete_corrupt_journals() {
+    let mut fixture = Fixture::new(config()).await;
+    let provider = || -> Arc<dyn ModelProvider> { Arc::new(ScriptedProvider::new([])) };
+    let (root, session) = (fixture.root.clone(), fixture.session.clone());
+    let repair = |fingerprint: Digest, size: u64| {
+        SessionHandle::repair_tail(
+            root.clone(),
+            session.clone(),
+            fingerprint,
+            size,
+            provider(),
+            config(),
+        )
+    };
+    // A live engine holds the session.
+    assert!(matches!(
+        repair(Digest::of(b"x"), 1).await,
+        Err(RepairError::Locked)
+    ));
+    tear_response(&mut fixture).await;
+    fixture.handle.shutdown().await;
+    let Err(PersistError::TornTail(torn)) = SessionHandle::open(
+        fixture.root.clone(),
+        fixture.session.clone(),
+        provider(),
+        config(),
+    )
+    .await
+    else {
+        panic!("open must report the torn tail")
+    };
+    let inspection = torn.inspection();
+    assert!(matches!(
+        repair(Digest::of(b"x"), inspection.file_bytes).await,
+        Err(RepairError::StaleRepair)
+    ));
+    assert!(matches!(
+        repair(inspection.fingerprint.clone(), inspection.file_bytes + 1).await,
+        Err(RepairError::StaleRepair)
+    ));
+    let handle = repair(inspection.fingerprint.clone(), inspection.file_bytes)
+        .await
+        .unwrap();
+    let live = wait_for(&handle, idle).await;
+    assert_eq!(
+        finishes(&live),
+        [(TurnOutcome::Interrupted, Some("process_restart".into()))]
+    );
+    handle.shutdown().await;
+
+    // A complete corrupt record is never repairable, and nothing is written.
+    let path = fixture
+        .root
+        .path()
+        .join("sessions")
+        .join(format!("{}.jsonl", fixture.session));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{\"not\":\"a record\"}\n").unwrap();
+    }
+    let corrupt = JournalStore::inspect(&fixture.root, &fixture.session).unwrap();
+    assert_eq!(
+        corrupt.diagnostic.as_ref().unwrap().kind,
+        DiagnosticKind::Corrupt
+    );
+    assert!(matches!(
+        SessionHandle::open(
+            fixture.root.clone(),
+            fixture.session.clone(),
+            provider(),
+            config()
+        )
+        .await,
+        Err(PersistError::Rejected { .. })
+    ));
+    assert!(matches!(
+        repair(corrupt.fingerprint.clone(), corrupt.file_bytes).await,
+        Err(RepairError::NotRepairable)
+    ));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), corrupt.file_bytes);
+
+    // Nor is a torn file without a valid header.
+    let (_temp, root, session) = journal_on_thread(|root| {
+        let session: SessionId = DeterministicEnv::new(0xffa)
+            .entry_id()
+            .to_string()
+            .parse()
+            .unwrap();
+        let mut file = root.journal(&session, true, true).unwrap();
+        std::io::Write::write_all(&mut file, b"{\"record\":").unwrap();
+        session
+    });
+    let headless = JournalStore::inspect(&root, &session).unwrap();
+    assert!(headless.snapshot.is_none());
+    assert!(matches!(
+        SessionHandle::repair_tail(
+            root,
+            session,
+            headless.fingerprint,
+            headless.file_bytes,
+            provider(),
+            config(),
+        )
+        .await,
+        Err(RepairError::NotRepairable)
     ));
 }

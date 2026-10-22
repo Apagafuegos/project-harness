@@ -1,6 +1,7 @@
 # Roadmap
 
-The scaffold, specification artifacts and first headless storage milestone exist.
+The scaffold, specification artifacts, headless storage (Milestone 1) and the
+headless mock lifecycle with context inspection (Milestone 2) exist.
 Later stages have acceptance criteria; they are not implemented features.
 
 ## 0. Foundation and proposed specification — present
@@ -28,7 +29,7 @@ RFC cases J01–J03 and all serialization fixtures run offline. No tool effects
 exist. See [usage and limitations](session-storage.md): blocking storage API,
 explicit recovery commits, local Linux storage, no salvage/export command.
 
-## 2. Headless mock lifecycle and context inspection — in progress
+## 2. Headless mock lifecycle and context inspection — complete
 
 Step 2, the pure runtime core, is implemented: typed commands, inputs, effects
 and events, the one-turn-per-session state machine, provider-event validation,
@@ -46,22 +47,27 @@ core in `Preparing` (an unknown budget or an overflow fails the turn with
 `context_budget_unknown` or `context_overflow` before any stream), `SessionHandle::inspect_context` and the read-only `harness context`
 command, with golden reports for the three fixtures and C01 coverage
 ([context](context.md), [decision 0006](decisions/0006-context-builder.md)).
-Remaining: startup recovery (step 6).
+Step 6 is implemented: startup recovery and tail repair
+([decision 0007](decisions/0007-startup-recovery.md)). After open, create or
+reopen the core closes an interrupted turn on its own, answering calls that
+never started as cancelled, and records an execution intent without a result
+as uncertain, then waits until the user resolves it. Nothing is retried or
+invented. A torn tail is repaired only through `SessionHandle::repair_tail`,
+`reopen_repairing_tail` or `harness journal repair`, bound to the inspected
+fingerprint and size. Every started turn now ends with exactly one
+`turn_finished`, including after faults and crashes.
 
-Step 6 also adds torn-tail repair as an explicit `SessionHandle` command. Today
-`reopen()` returns the torn-tail diagnostic unchanged, so such a session is
-unreachable through the handle. The command must be bound to the fingerprint and
-size of the inspected journal, as `JournalStore::repair_tail` already is, and
-refuse a stale inspection. It is never run implicitly. Unfinished-turn recovery
-and torn-tail repair then share one inspect-then-confirm recovery flow.
+The milestone goal runs in one place as `cargo run --example scripted_session`.
+[Milestone 2 acceptance](milestone-2-acceptance.md) maps every criterion and
+M01–M04, C01, R02 and E01 to tests. It has no gap rows. Three cases are partial
+because their remainder needs later milestones:
 
-Add the public provider stream lifecycle and a deterministic scripted provider.
-Implement initial branch projection and the inspection API before Ratatui.
-Prove context/report reproducibility, ordered events, usage, partial-response
-handling, bounded buffering, and no execution from incomplete calls.
-
-Use M01–M04, C01, R02, and E01 with mocks/fixtures, without keys or network.
-Native provider differences are represented in types rather than erased.
+- **M03:** per-operation deadlines, queue bounds inside a native adapter and a
+  second native adapter (Milestone 4).
+- **M04:** the explicit `omit` switch policy and native replay state
+  (Milestone 4).
+- **R02:** cancellation while waiting for approval or during execution
+  (Milestone 3).
 
 ## 3. Tools, selective security, and recovery
 

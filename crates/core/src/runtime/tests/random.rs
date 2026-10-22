@@ -1,6 +1,10 @@
 //! Seeded random interleavings of commands, provider events, stale streams,
-//! timers and persist failures, all against real storage.
+//! timers, persist failures and process crashes, all against real storage.
+//! After a crash the process restarts: it repairs a torn tail with the
+//! inspected fingerprint, recovers, and resolves uncertain invocations with
+//! a PRNG-chosen statement before continuing.
 
+use super::recovery::authorize;
 use super::*;
 use crate::context::{ContextBuilder, ModelLimits};
 
@@ -299,12 +303,84 @@ fn random_command(d: &mut Driver, rng: &mut Rng, issued: &mut Vec<(CommandId, St
 
 type Scripts = BTreeMap<InferenceId, std::collections::VecDeque<ProviderEvent>>;
 
+/// A resolution for the first waiting invocation: usually valid, sometimes
+/// one the core must refuse.
+fn resolution(d: &Driver, rng: &mut Rng) -> Command {
+    let invocation_id = if rng.chance(5) {
+        DeterministicEnv::new(0xffb)
+            .entry_id()
+            .to_string()
+            .parse()
+            .unwrap()
+    } else {
+        d.runtime.view().awaiting[0].invocation_id.clone()
+    };
+    let resolution = if rng.chance(50) {
+        UserResolution::AcknowledgedUnknown
+    } else {
+        UserResolution::Observed {
+            status: *rng.pick(&[
+                ToolStatus::Succeeded,
+                ToolStatus::Succeeded,
+                ToolStatus::Failed,
+                ToolStatus::TimedOut,
+                ToolStatus::Uncertain,
+            ]),
+            text: rng.pick(&["it ran", "nothing changed", ""]).to_string(),
+        }
+    };
+    Command::ResolveUncertain {
+        invocation_id,
+        resolution,
+    }
+}
+
+/// Whether a healthy runtime's journal holds a response whose calls are not
+/// answered yet: where a tool runtime would authorize and run them.
+fn processing(d: &Driver) -> bool {
+    matches!(d.runtime.phase(), Phase::Durable(_))
+        && d.store.as_ref().is_some_and(|store| {
+            let snapshot = store.snapshot();
+            snapshot.state() == RuntimeState::Processing
+                && snapshot
+                    .0
+                    .pending(snapshot.head())
+                    .is_ok_and(|pending| !pending.is_empty())
+        })
+}
+
+/// Kill the process at this step and restart it. With a response's calls
+/// pending, a tool runtime sometimes wrote its authorization, and sometimes
+/// its execution intent, just before the crash.
+fn crash(d: &mut Driver, rng: &mut Rng) {
+    if processing(d) && rng.chance(80) {
+        let intent = rng.chance(75);
+        d.inject(|snapshot, env, root| authorize(snapshot, env, root, intent));
+    }
+    let kind = *rng.pick(&[Crash::Lost, Crash::Durable, Crash::Torn]);
+    d.crash(kind);
+}
+
 fn random_step(
     d: &mut Driver,
     rng: &mut Rng,
     issued: &mut Vec<(CommandId, String)>,
     scripts: &mut Scripts,
 ) {
+    // Calls wait for answers only briefly, so crash there more often.
+    if rng.chance(if processing(d) { 60 } else { 2 }) {
+        return crash(d, rng);
+    }
+    match d.runtime.phase() {
+        // A process that faulted is restarted eventually.
+        Phase::Faulted if rng.chance(20) => return d.crash(Crash::Lost),
+        Phase::AwaitingResolution if d.pending.is_none() && rng.chance(25) => {
+            let command = resolution(d, rng);
+            d.command(command);
+            return;
+        }
+        _ => {}
+    }
     if d.verification.is_some() && rng.chance(50) {
         let (token, refs) = d.verification.take().unwrap();
         let missing = if rng.chance(50) {
@@ -376,14 +452,27 @@ fn random_step(
 /// Answer commits, play out or end streams and fire timers until the turn is over.
 fn quiesce(d: &mut Driver, rng: &mut Rng, scripts: &mut Scripts) {
     for _ in 0..10_000 {
+        if processing(d) && rng.chance(60) {
+            crash(d, rng);
+            continue;
+        }
         if d.complete() {
             continue;
         }
         let phase = d.runtime.phase();
-        if matches!(phase, Phase::Faulted | Phase::RecoveryRequired)
-            || d.runtime.snapshot().active_turn().is_none()
-        {
-            return;
+        match phase {
+            Phase::Faulted => {
+                d.crash(Crash::Lost);
+                continue;
+            }
+            Phase::AwaitingResolution => {
+                let command = resolution(d, rng);
+                d.command(command);
+                continue;
+            }
+            Phase::RecoveryRequired => panic!("recovery stalled with nothing in flight"),
+            Phase::Durable(_) if d.runtime.snapshot().active_turn().is_none() => return,
+            Phase::Durable(_) => {}
         }
         let before = d.segment.effects.len();
         if let Some(inference) = d.inference {
@@ -417,6 +506,9 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
     if finished.faulted {
         count("runs faulted by injected I/O".into());
     }
+    *coverage.entry("crashes".into()).or_default() += finished.crashes;
+    *coverage.entry("torn tails repaired".into()).or_default() += finished.repairs;
+    let mut count = |key: String| *coverage.entry(key).or_default() += 1;
     for (_, _, event) in finished.reopened.events() {
         match event {
             JournalEvent::TurnFinished(f) => count(format!(
@@ -425,6 +517,11 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
                 f.code.as_deref().unwrap_or("-")
             )),
             JournalEvent::StateChanged(c) => count(format!("transition {:?}>{:?}", c.from, c.to)),
+            JournalEvent::ExecutionIntent(_) => {
+                count("execution intents written before a crash".into())
+            }
+            JournalEvent::ExecutionUncertain(_) => count("execution uncertain".into()),
+            JournalEvent::RecoveryResolved(r) => count(format!("resolved {:?}", r.resolution)),
             _ => {}
         }
     }
@@ -436,6 +533,10 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
     for effect in finished.segments.iter().flat_map(|s| &s.effects) {
         match effect {
             Effect::Persist { .. } => count("commits".into()),
+            Effect::Emit(RuntimeEvent {
+                kind: EventKind::Recovered { .. },
+                ..
+            }) => count("turns closed by recovery".into()),
             Effect::Emit(RuntimeEvent {
                 kind: EventKind::ContextBuilt { flags, .. },
                 ..

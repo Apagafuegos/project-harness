@@ -333,7 +333,7 @@ fn canonical_projection_bytes_are_compact_with_sorted_argument_keys() {
             r#""call_id":"019a0000-0000-7000-8000-000000000066","name":"read","#,
             r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}],"#,
             r#""continuation":null}],"model":{"provider_instance":"mock","model":"scripted"},"#,
-            r#""projection_version":2}"#
+            r#""projection_version":3}"#
         )
     );
     assert_eq!(fingerprint(&mock(), &items), Digest::of(&bytes));
@@ -1430,6 +1430,27 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
     content.clear();
     hollow.included.last_mut().unwrap().blocks.clear();
     assert_eq!(check(&hollow_items, &hollow), Err("empty_assistant_item"));
+
+    // A result's provenance is the stored one, in the item and the report.
+    assert_eq!(
+        built.report.included[2].provenance,
+        Some(Provenance::Runtime)
+    );
+    let mut relabelled = items.clone();
+    let ContextItem::ToolResult { provenance, .. } = &mut relabelled[2] else {
+        panic!("the third item is the result");
+    };
+    *provenance = Provenance::UserObserved;
+    assert_eq!(
+        check(&relabelled, &built.report),
+        Err("tool_result_provenance_mismatch")
+    );
+    let mut unlabelled = built.report.clone();
+    unlabelled.included[2].provenance = None;
+    assert_eq!(
+        check(items, &unlabelled),
+        Err("report_disagrees_with_projection")
+    );
 
     // Remove the result item and its record: the call is left unanswered.
     let mut unpaired_items = items.clone();

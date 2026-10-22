@@ -53,7 +53,7 @@ external services are needed for storage tests or the CLI checks.
 
 ```text
 crates/core/       Headless session storage, runtime core and context builder (harness-core)
-crates/cli/        CLI with `harness context`, and the future Ratatui client (harness)
+crates/cli/        CLI with `harness context` and `harness journal`, and the future Ratatui client (harness)
 docs/             Architecture, contract drafts, decisions, and roadmap
 scripts/check.sh  Shared local/CI checks
 ```
@@ -70,8 +70,11 @@ The context inspection API belongs to the headless engine from the first slice.
 See [session storage usage](docs/session-storage.md), the
 [storage decision](docs/decisions/0003-jsonl-storage.md), the
 [runtime core](docs/runtime.md) and its [decision](docs/decisions/0004-pure-runtime-core.md),
-and the [context builder](docs/context.md) and its
-[decision](docs/decisions/0006-context-builder.md).
-The rest of the milestone adds startup recovery. See the [roadmap](docs/roadmap.md).
+the [context builder](docs/context.md) and its
+[decision](docs/decisions/0006-context-builder.md), and
+[startup recovery](docs/decisions/0007-startup-recovery.md). Milestone 2 is
+complete; [its acceptance check](docs/milestone-2-acceptance.md) maps each
+criterion to tests, and `cargo run --example scripted_session` runs it end to
+end. See the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

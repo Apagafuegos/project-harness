@@ -9,13 +9,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    worker::{StorageWorker, WorkerOptions},
+    worker::{Opening, StorageWorker, WorkerOptions},
     *,
 };
 use crate::{
     context::ContextReport,
     model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl},
-    session::{ArtifactRef, DataRoot, EntryId, ModelRef, SessionHeader, SessionId},
+    session::{ArtifactRef, DataRoot, Digest, EntryId, ModelRef, SessionHeader, SessionId},
 };
 
 type CommandResult = Result<Accepted, Rejection>;
@@ -60,6 +60,11 @@ enum Message {
     ),
     PutArtifact(Vec<u8>, oneshot::Sender<Result<ArtifactRef, PersistError>>),
     Reopen(oneshot::Sender<Result<RuntimeView, PersistError>>),
+    RepairTail(
+        Digest,
+        u64,
+        oneshot::Sender<Result<RuntimeView, RepairError>>,
+    ),
     Shutdown(oneshot::Sender<()>),
     /// Test-only access to the real timer channel, to inject stale fires.
     #[cfg(test)]
@@ -76,23 +81,49 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Open using the caller's Tokio runtime. No runtime is created here.
-    /// Every inference of this session streams from `provider`.
+    /// Every inference of this session streams from `provider`. A session
+    /// interrupted by a crash is recovered at once: see `Input::Start`. A
+    /// torn tail fails with `PersistError::TornTail` and is never repaired
+    /// implicitly; see [`SessionHandle::repair_tail`].
     pub async fn open(
         root: Arc<DataRoot>,
         session: SessionId,
         provider: Arc<dyn ModelProvider>,
         config: DriverConfig,
     ) -> Result<Self, PersistError> {
+        Self::open_with_env(root, session, provider, config, SystemEnv).await
+    }
+
+    /// Repair the torn tail the user inspected, then open the session as
+    /// `open` does. `expected_fingerprint` and `expected_size` are the whole
+    /// file's SHA-256 and length from that inspection (`TornTail` or
+    /// `JournalStore::inspect`). On the worker thread, under the writer lock,
+    /// storage rescans the file, refuses a changed one, quarantines the tail
+    /// into an artifact, truncates and syncs, and commits `tail_repaired`.
+    pub async fn repair_tail(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        expected_fingerprint: Digest,
+        expected_size: u64,
+        provider: Arc<dyn ModelProvider>,
+        config: DriverConfig,
+    ) -> Result<Self, RepairError> {
+        let at = SystemEnv.now();
         Self::launch(
             root,
             session,
-            None,
+            Opening::Repair {
+                fingerprint: expected_fingerprint,
+                size: expected_size,
+                at,
+            },
             config,
             SystemEnv,
             provider,
             WorkerOptions::default(),
         )
         .await
+        .map_err(repair_error)
     }
 
     /// Create and sync a new session on its dedicated worker thread.
@@ -103,12 +134,45 @@ impl SessionHandle {
         provider: Arc<dyn ModelProvider>,
         config: DriverConfig,
     ) -> Result<Self, PersistError> {
-        let mut env = SystemEnv;
+        Self::create_with_env(root, session, header, provider, config, SystemEnv).await
+    }
+
+    /// `open`, with time and identities from `env` instead of the wall clock
+    /// and random UUIDs, for deterministic runs such as examples and replay.
+    /// Give each process that writes a journal its own identity stream.
+    pub async fn open_with_env<E: Env + Send + 'static>(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        provider: Arc<dyn ModelProvider>,
+        config: DriverConfig,
+        env: E,
+    ) -> Result<Self, PersistError> {
+        Self::launch(
+            root,
+            session,
+            Opening::Open,
+            config,
+            env,
+            provider,
+            WorkerOptions::default(),
+        )
+        .await
+    }
+
+    /// `create`, with the header time and every later identity from `env`.
+    pub async fn create_with_env<E: Env + Send + 'static>(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        header: SessionHeader,
+        provider: Arc<dyn ModelProvider>,
+        config: DriverConfig,
+        mut env: E,
+    ) -> Result<Self, PersistError> {
         let at = env.now();
         Self::launch(
             root,
             session,
-            Some((header, at)),
+            Opening::Create(header, at),
             config,
             env,
             provider,
@@ -120,7 +184,7 @@ impl SessionHandle {
     pub(super) async fn launch<E: Env + Send + 'static>(
         root: Arc<DataRoot>,
         session: SessionId,
-        create: Option<(SessionHeader, crate::session::Timestamp)>,
+        opening: Opening,
         config: DriverConfig,
         mut env: E,
         provider: Arc<dyn ModelProvider>,
@@ -129,7 +193,7 @@ impl SessionHandle {
         let (worker, snapshot, configuration) = StorageWorker::start(
             root.clone(),
             session.clone(),
-            create,
+            opening,
             config.worker_capacity,
             options.clone(),
         )
@@ -220,8 +284,9 @@ impl SessionHandle {
         receive.await.unwrap_or(Err(PersistError::WorkerLost))
     }
 
-    /// Replace a faulted runtime after shutting down its worker. A torn tail is
-    /// reported unchanged; this never performs implicit journal repair.
+    /// Replace a faulted runtime after shutting down its worker, then recover
+    /// as `open` does. A torn tail is returned as `PersistError::TornTail`
+    /// with its inspection; this never performs implicit journal repair.
     pub async fn reopen(&self) -> Result<RuntimeView, PersistError> {
         let (reply, receive) = oneshot::channel();
         self.commands
@@ -229,6 +294,29 @@ impl SessionHandle {
             .await
             .map_err(|_| PersistError::WorkerLost)?;
         receive.await.unwrap_or(Err(PersistError::WorkerLost))
+    }
+
+    /// Repair a faulted handle's torn tail in place, bound to the inspected
+    /// fingerprint and size, then reopen with a new epoch and recover. The
+    /// refusals are those of [`SessionHandle::repair_tail`]; a handle that is
+    /// not faulted is refused with `NotFaulted`.
+    pub async fn reopen_repairing_tail(
+        &self,
+        expected_fingerprint: Digest,
+        expected_size: u64,
+    ) -> Result<RuntimeView, RepairError> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Message::RepairTail(
+                expected_fingerprint,
+                expected_size,
+                reply,
+            ))
+            .await
+            .map_err(|_| PersistError::WorkerLost)?;
+        receive
+            .await
+            .unwrap_or(Err(PersistError::WorkerLost.into()))
     }
 
     /// Cancel inference, finish pending durability work, release the journal
@@ -287,6 +375,19 @@ impl Subscription {
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
+    }
+}
+
+/// Storage refusals of a repair become typed; anything else stays a failure.
+fn repair_error(error: PersistError) -> RepairError {
+    match &error {
+        PersistError::Rejected { code } => match code.as_str() {
+            "stale_repair" => RepairError::StaleRepair,
+            "tail_not_repairable" => RepairError::NotRepairable,
+            "session_locked" => RepairError::Locked,
+            _ => RepairError::Persist(error),
+        },
+        _ => RepairError::Persist(error),
     }
 }
 
@@ -378,6 +479,8 @@ impl<E: Env + Send + 'static> Driver<E> {
     }
 
     async fn run(mut self) {
+        // Before any message: no view is taken between construction and Start.
+        self.step(Input::Start);
         loop {
             if self.closing {
                 if !self.cancel_sent
@@ -395,7 +498,7 @@ impl<E: Env + Send + 'static> Driver<E> {
                     && (self.runtime.view().active_turn.is_none()
                         || matches!(
                             self.runtime.phase(),
-                            Phase::Faulted | Phase::RecoveryRequired
+                            Phase::Faulted | Phase::RecoveryRequired | Phase::AwaitingResolution
                         ))
                 {
                     break;
@@ -613,6 +716,41 @@ impl<E: Env + Send + 'static> Driver<E> {
         }
     }
 
+    /// Stop the faulted runtime's worker and attach a new runtime over the
+    /// journal `opening` yields, with a new epoch, then let it recover.
+    async fn replace(&mut self, opening: Opening) -> Result<RuntimeView, PersistError> {
+        // An uncertain commit is never cancelled or repeated.
+        if let Some(storage) = self.storage.take() {
+            let _ = storage.await;
+        }
+        while self.artifacts.join_next().await.is_some() {}
+        if let Some(worker) = self.worker.take() {
+            worker.shutdown().await;
+        }
+        // The fault cancelled the old runtime's timer; drop any left.
+        for (_, timer) in std::mem::take(&mut self.timers) {
+            timer.abort();
+        }
+        let (worker, snapshot, configuration) = StorageWorker::start(
+            self.root.clone(),
+            self.session.clone(),
+            opening,
+            self.config.worker_capacity,
+            self.options.clone(),
+        )
+        .await?;
+        self.worker = Some(worker);
+        self.runtime = Runtime::new(
+            snapshot,
+            configuration,
+            self.config.runtime.clone(),
+            &mut self.env,
+        );
+        self.step(Input::PublishView);
+        self.step(Input::Start);
+        Ok(self.runtime.view())
+    }
+
     async fn message(&mut self, message: Message) {
         let shutting_down = || PersistError::Rejected {
             code: "shutting_down".into(),
@@ -626,6 +764,9 @@ impl<E: Env + Send + 'static> Driver<E> {
             }
             Message::Reopen(reply) if self.closing => {
                 let _ = reply.send(Err(shutting_down()));
+            }
+            Message::RepairTail(_, _, reply) if self.closing => {
+                let _ = reply.send(Err(shutting_down().into()));
             }
             Message::Command(command, reply) => {
                 self.next_request += 1;
@@ -677,40 +818,22 @@ impl<E: Env + Send + 'static> Driver<E> {
                         code: "not_faulted".into(),
                     })
                 } else {
-                    // An uncertain commit is never cancelled or repeated.
-                    if let Some(storage) = self.storage.take() {
-                        let _ = storage.await;
-                    }
-                    while self.artifacts.join_next().await.is_some() {}
-                    if let Some(worker) = self.worker.take() {
-                        worker.shutdown().await;
-                    }
-                    // The fault cancelled the old runtime's timer; drop any left.
-                    for (_, timer) in std::mem::take(&mut self.timers) {
-                        timer.abort();
-                    }
-                    match StorageWorker::start(
-                        self.root.clone(),
-                        self.session.clone(),
-                        None,
-                        self.config.worker_capacity,
-                        self.options.clone(),
-                    )
+                    self.replace(Opening::Open).await
+                };
+                let _ = reply.send(result);
+            }
+            Message::RepairTail(fingerprint, size, reply) => {
+                let result = if self.runtime.phase() != Phase::Faulted {
+                    Err(RepairError::NotFaulted)
+                } else {
+                    let at = self.env.now();
+                    self.replace(Opening::Repair {
+                        fingerprint,
+                        size,
+                        at,
+                    })
                     .await
-                    {
-                        Ok((worker, snapshot, configuration)) => {
-                            self.worker = Some(worker);
-                            self.runtime = Runtime::new(
-                                snapshot,
-                                configuration,
-                                self.config.runtime.clone(),
-                                &mut self.env,
-                            );
-                            self.step(Input::PublishView);
-                            Ok(self.runtime.view())
-                        }
-                        Err(error) => Err(error),
-                    }
+                    .map_err(repair_error)
                 };
                 let _ = reply.send(result);
             }

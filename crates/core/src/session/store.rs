@@ -248,11 +248,22 @@ impl JournalStore {
         expected: &Inspection,
         at: Timestamp,
     ) -> Result<Self> {
+        Self::repair_inspected_tail(root, id, &expected.fingerprint, expected.file_bytes, at)
+    }
+
+    /// `repair_tail` bound to the whole-file fingerprint and size a user
+    /// inspected, for callers that hold only those two values.
+    pub fn repair_inspected_tail(
+        root: Arc<DataRoot>,
+        id: &SessionId,
+        expected_fingerprint: &Digest,
+        expected_size: u64,
+        at: Timestamp,
+    ) -> Result<Self> {
         let mut file = root.journal(id, false, true)?;
         lock(&file, true)?;
         let inspection = scan(&root, &mut file, id)?;
-        if inspection.fingerprint != expected.fingerprint
-            || inspection.file_bytes != expected.file_bytes
+        if inspection.fingerprint != *expected_fingerprint || inspection.file_bytes != expected_size
         {
             return Err(StoreError::StaleRepair);
         }

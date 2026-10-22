@@ -7,10 +7,11 @@ use crate::context::{
 };
 use crate::session::{
     AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, Entry, EntryId,
-    EntryPayload, HeadChange, HeadReason, JournalEvent, MAX_COUNTER, ModelChanged, ModelError,
-    ModelErrorCode, ModelRef, Portability, Provenance, ResponseOutcome, RuntimeState,
-    SessionSnapshot, StateChanged, ToolMetadata, ToolResult, ToolResultEntry, ToolStatus,
-    TurnFinished, TurnId, TurnOutcome, TurnStarted, UserMessage, codec, store,
+    EntryPayload, ExecutionUncertain, HeadChange, HeadReason, InvocationId, JournalEvent,
+    MAX_COUNTER, ModelChanged, ModelError, ModelErrorCode, ModelRef, Portability, Provenance,
+    RecoveryResolved, Resolution, ResponseOutcome, RuntimeState, SessionSnapshot, StateChanged,
+    ToolMetadata, ToolResult, ToolResultEntry, ToolStatus, TurnFinished, TurnId, TurnOutcome,
+    TurnStarted, UnresolvedInvocation, UserMessage, codec, store,
 };
 
 use super::{
@@ -27,6 +28,15 @@ const BLOCK_OVERHEAD: usize = 160;
 const TOOLS_UNAVAILABLE: &str = "tools_unavailable: this runtime executes no tools";
 /// Text of the runtime result answering each call a cancellation left unstarted.
 const NOT_STARTED: &str = "cancelled: the turn was cancelled before this call started";
+/// Code of every turn recovery closes, and of the uncertainty it records.
+const PROCESS_RESTART: &str = "process_restart";
+/// Text of the runtime result answering each call a restart left unstarted.
+const RESTART_NOT_STARTED: &str = "process_restart: the process stopped before this call started";
+/// Reason recorded with `execution_uncertain` for an intent without a result.
+const RESTART_UNCERTAIN: &str =
+    "process_restart: the process stopped after the execution intent; the outcome is unknown";
+/// Text of the result recording a user's acknowledged unknown outcome.
+const ACKNOWLEDGED_UNKNOWN: &str = "uncertain: the user acknowledged that the outcome is unknown";
 
 /// The pure agent runtime. `step` performs no I/O, reads no clock and creates
 /// no identity except through `Env`; everything it does is in the effects.
@@ -58,7 +68,11 @@ pub struct Runtime {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Ready,
-    RecoveryRequired,
+    /// The snapshot needs recovery; `Input::Start` and each recovery
+    /// commit's acknowledgement plan the next step.
+    Recovering,
+    /// Uncertain invocations wait for `ResolveUncertain`.
+    AwaitingResolution,
     Faulted,
 }
 
@@ -69,6 +83,8 @@ struct InFlight {
     waiters: Vec<(RequestId, Waiter)>,
     opening: Option<Opening>,
     finished: Option<TurnFinished>,
+    /// A turn recovery closes, with the not-started calls it answered.
+    recovered: Option<(TurnId, Vec<CallRef>)>,
     ends_inference: bool,
 }
 
@@ -82,6 +98,7 @@ struct Opening {
 #[derive(Debug)]
 enum Waiter {
     TurnStarted(TurnId),
+    Resolved(InvocationId),
     HeadSelected,
     ModelSwitched,
 }
@@ -173,7 +190,8 @@ struct Recorded {
 
 impl Runtime {
     /// Wrap a published snapshot. Emits nothing; the first input produces the
-    /// first effects. A snapshot with unfinished work starts `RecoveryRequired`.
+    /// first effects. A snapshot with unfinished work starts `RecoveryRequired`
+    /// and is recovered by `Input::Start`, which a driver feeds at once.
     /// `configuration` is the decoded configuration artifact of `snapshot`,
     /// read by the caller; the context builder refuses any other.
     pub fn new(
@@ -183,7 +201,7 @@ impl Runtime {
         env: &mut impl Env,
     ) -> Self {
         let mode = if snapshot.requires_recovery() || snapshot.state() != RuntimeState::Idle {
-            Mode::RecoveryRequired
+            Mode::Recovering
         } else {
             Mode::Ready
         };
@@ -194,6 +212,7 @@ impl Runtime {
             active_turn: snapshot.active_turn().cloned(),
             snapshot,
             partial: None,
+            awaiting: Vec::new(),
         };
         Self {
             config,
@@ -272,6 +291,7 @@ impl Runtime {
                 phase: self.phase(),
                 active_turn: self.snapshot().active_turn().cloned(),
             }),
+            Input::Start => self.recover(env),
             Input::ArtifactsVerified { token, missing } => {
                 self.artifacts_verified(token, missing.is_empty(), env)
             }
@@ -319,6 +339,10 @@ impl Runtime {
             Command::Cancel { turn_id } => self.cancel(request, turn_id, env),
             Command::SelectHead { head } => self.select_head(request, head, env),
             Command::SwitchModel { model } => self.switch_model(request, model, env),
+            Command::ResolveUncertain {
+                invocation_id,
+                resolution,
+            } => self.resolve_uncertain(request, invocation_id, resolution, env),
         };
         if let Some(result) = result {
             self.reply(request, result);
@@ -329,7 +353,8 @@ impl Runtime {
     fn idle_check(&self) -> Result<(), Rejection> {
         match self.mode {
             Mode::Faulted => Err(Rejection::Faulted),
-            Mode::RecoveryRequired => Err(Rejection::RecoveryRequired),
+            Mode::Recovering => Err(Rejection::RecoveryRequired),
+            Mode::AwaitingResolution => Err(Rejection::ResolutionRequired),
             Mode::Ready
                 if self.in_flight.is_some()
                     || self.verifying.is_some()
@@ -519,8 +544,7 @@ impl Runtime {
                     fingerprint,
                     turn_id,
                 }),
-                finished: None,
-                ends_inference: false,
+                ..idle_flight()
             },
             Some((command_id, command)),
             env,
@@ -535,7 +559,8 @@ impl Runtime {
     ) -> Option<Result<Accepted, Rejection>> {
         match self.mode {
             Mode::Faulted => return Some(Err(Rejection::Faulted)),
-            Mode::RecoveryRequired => return Some(Err(Rejection::RecoveryRequired)),
+            Mode::Recovering => return Some(Err(Rejection::RecoveryRequired)),
+            Mode::AwaitingResolution => return Some(Err(Rejection::ResolutionRequired)),
             Mode::Ready => {}
         }
         if self.snapshot().active_turn() != Some(&turn_id) {
@@ -646,6 +671,240 @@ impl Runtime {
         None
     }
 
+    // ----- recovery -------------------------------------------------------
+
+    /// Plan the next recovery step from the published snapshot, if nothing is
+    /// in flight. Each step is an ordinary commit that storage validates;
+    /// nothing is run, retried or invented. An interrupted turn with nothing
+    /// uncertain is closed without asking. An intent without a result is
+    /// recorded as uncertain, and only the user can resolve it.
+    fn recover(&mut self, env: &mut dyn Env) {
+        if !matches!(self.mode, Mode::Recovering | Mode::AwaitingResolution)
+            || self.in_flight.is_some()
+        {
+            return;
+        }
+        let snapshot = self.snapshot().clone();
+        let unresolved = snapshot.unresolved_invocations();
+        let Ok(pending) = snapshot.0.pending(snapshot.head()).map(<[CallRef]>::to_vec) else {
+            return self.fault(FaultCause::Internal("recovery_head_unknown"));
+        };
+        let uncertain = |call: &CallRef| unresolved.iter().any(|v| v.intent.call == *call);
+        // Storage answers calls in branch order and finishes a turn only when
+        // every call left pending has an intent: a not-started call after an
+        // uncertain one keeps the turn open until the user resolves it.
+        let finishable = pending.iter().all(uncertain);
+        let active = snapshot.active_turn().cloned();
+        let unrecorded: Vec<_> = unresolved
+            .iter()
+            .filter(|v| !v.uncertainty_recorded)
+            .collect();
+        if !unrecorded.is_empty() {
+            let mut events: Vec<_> = unrecorded
+                .iter()
+                .map(|v| {
+                    JournalEvent::ExecutionUncertain(ExecutionUncertain {
+                        turn_id: v.intent.turn_id.clone(),
+                        invocation_id: v.intent.invocation_id.clone(),
+                        reason: RESTART_UNCERTAIN.into(),
+                    })
+                })
+                .collect();
+            let finished = active.filter(|_| finishable).map(|turn| interrupted(&turn));
+            events.extend(finished.clone().map(JournalEvent::TurnFinished));
+            return self.persist_recovery(audit(&snapshot, events), finished, Vec::new(), env);
+        }
+        if let Some(turn) = active {
+            if !pending.first().is_some_and(uncertain) {
+                // Nothing is uncertain: answer what never started and close.
+                if pending.iter().any(uncertain) {
+                    return self.fault(FaultCause::Internal("uncertain_call_out_of_order"));
+                }
+                let entries = chain(
+                    &snapshot,
+                    pending
+                        .iter()
+                        .map(|call| {
+                            runtime_result(&turn, call, ToolStatus::Cancelled, RESTART_NOT_STARTED)
+                        })
+                        .collect(),
+                    env,
+                );
+                let mut events = Vec::new();
+                if snapshot.state() != RuntimeState::Recovering {
+                    events.push(transition(
+                        &turn,
+                        snapshot.state(),
+                        RuntimeState::Recovering,
+                    ));
+                }
+                let finished = interrupted(&turn);
+                events.push(JournalEvent::TurnFinished(finished.clone()));
+                let commit = if entries.is_empty() {
+                    audit(&snapshot, events)
+                } else {
+                    advancing(&snapshot, entries, events)
+                };
+                return self.persist_recovery(commit, Some(finished), pending, env);
+            }
+            if finishable {
+                // Uncertainty is recorded but the turn is still open.
+                let finished = interrupted(&turn);
+                let commit = audit(
+                    &snapshot,
+                    vec![JournalEvent::TurnFinished(finished.clone())],
+                );
+                return self.persist_recovery(commit, Some(finished), Vec::new(), env);
+            }
+        }
+        if unresolved.is_empty() {
+            self.mode = Mode::Ready;
+            return self.sync_phase();
+        }
+        let invocations: Vec<_> = unresolved
+            .iter()
+            .map(|v| uncertain_invocation(&snapshot, v))
+            .collect();
+        self.mode = Mode::AwaitingResolution;
+        self.sync_phase();
+        if self.view.view().awaiting != invocations {
+            self.emit(EventKind::ResolutionRequired { invocations });
+        }
+    }
+
+    fn persist_recovery(
+        &mut self,
+        commit: Commit,
+        finished: Option<TurnFinished>,
+        answered: Vec<CallRef>,
+        env: &mut dyn Env,
+    ) {
+        let recovered = finished.as_ref().map(|f| (f.turn_id.clone(), answered));
+        self.persist(
+            commit,
+            InFlight {
+                finished,
+                recovered,
+                ..idle_flight()
+            },
+            None,
+            env,
+        );
+        self.sync_phase();
+    }
+
+    /// Record the user's statement as the call's result, with
+    /// `recovery_resolved`. Once nothing is uncertain, the same commit answers
+    /// the turn's remaining not-started calls and finishes it as interrupted.
+    fn resolve_uncertain(
+        &mut self,
+        request: RequestId,
+        invocation_id: InvocationId,
+        resolution: UserResolution,
+        env: &mut dyn Env,
+    ) -> Option<Result<Accepted, Rejection>> {
+        match self.mode {
+            Mode::Faulted => return Some(Err(Rejection::Faulted)),
+            Mode::Recovering => return Some(Err(Rejection::RecoveryRequired)),
+            Mode::Ready => return Some(Err(Rejection::Invalid("nothing_to_resolve"))),
+            Mode::AwaitingResolution => {}
+        }
+        if self.in_flight.is_some() {
+            return Some(Err(Rejection::Busy));
+        }
+        let snapshot = self.snapshot().clone();
+        let unresolved = snapshot.unresolved_invocations();
+        let Some(invocation) = unresolved
+            .iter()
+            .find(|v| v.intent.invocation_id == invocation_id)
+        else {
+            return Some(Err(Rejection::Invalid("unknown_invocation")));
+        };
+        let intent = &invocation.intent;
+        let Ok(pending) = snapshot.0.pending(snapshot.head()) else {
+            return Some(Err(Rejection::Invalid("unknown_invocation")));
+        };
+        if pending.first() != Some(&intent.call) {
+            return Some(Err(Rejection::Invalid("invocation_not_next")));
+        }
+        let (status, provenance, text, kind, note) = match resolution {
+            UserResolution::Observed { status, text } => {
+                if status == ToolStatus::Uncertain {
+                    return Some(Err(Rejection::Invalid("observed_status_uncertain")));
+                }
+                if text.is_empty() {
+                    return Some(Err(Rejection::Invalid("empty_content")));
+                }
+                if text.len() > self.config.max_user_bytes {
+                    return Some(Err(Rejection::Invalid("content_too_large")));
+                }
+                let note = "the user observed the outcome";
+                (
+                    status,
+                    Provenance::UserObserved,
+                    text,
+                    Resolution::Observed,
+                    note,
+                )
+            }
+            UserResolution::AcknowledgedUnknown => (
+                ToolStatus::Uncertain,
+                Provenance::UserAcknowledgedUnknown,
+                ACKNOWLEDGED_UNKNOWN.to_owned(),
+                Resolution::AcknowledgedUnknown,
+                "the user acknowledged that the outcome is unknown",
+            ),
+        };
+        let turn = intent.turn_id.clone();
+        let mut payloads = vec![(
+            Some(turn.clone()),
+            EntryPayload::ToolResult(ToolResultEntry {
+                result: ToolResult {
+                    call: intent.call.clone(),
+                    invocation_id: Some(invocation_id.clone()),
+                    status,
+                    content: vec![ContentBlock::Text { text }],
+                    metadata: metadata(provenance),
+                },
+            }),
+        )];
+        let rest = pending[1..].to_vec();
+        let closes = unresolved.len() == 1 && snapshot.active_turn() == Some(&turn);
+        if closes {
+            if rest
+                .iter()
+                .any(|call| unresolved.iter().any(|v| v.intent.call == *call))
+            {
+                return Some(Err(Rejection::Invalid("invocation_not_next")));
+            }
+            payloads.extend(rest.iter().map(|call| {
+                runtime_result(&turn, call, ToolStatus::Cancelled, RESTART_NOT_STARTED)
+            }));
+        }
+        let entries = chain(&snapshot, payloads, env);
+        let mut events = vec![JournalEvent::RecoveryResolved(RecoveryResolved {
+            turn_id: turn.clone(),
+            invocation_id: invocation_id.clone(),
+            result_entry_id: entries[0].id.clone(),
+            resolution: kind,
+            note: note.into(),
+        })];
+        let finished = closes.then(|| interrupted(&turn));
+        events.extend(finished.clone().map(JournalEvent::TurnFinished));
+        let recovered = finished.as_ref().map(|f| (f.turn_id.clone(), rest));
+        self.persist(
+            advancing(&snapshot, entries, events),
+            InFlight {
+                finished,
+                recovered,
+                ..waiting(request, Waiter::Resolved(invocation_id))
+            },
+            None,
+            env,
+        );
+        None
+    }
+
     // ----- storage answers ------------------------------------------------
 
     fn persisted(
@@ -683,6 +942,13 @@ impl Runtime {
                 code: finished.code,
             });
         }
+        if let Some((turn_id, answered)) = in_flight.recovered {
+            self.emit(EventKind::Recovered {
+                turn_id,
+                answered,
+                code: PROCESS_RESTART.into(),
+            });
+        }
         if in_flight.ends_inference
             && let Some(inference) = self.inference.take()
         {
@@ -693,11 +959,21 @@ impl Runtime {
                 inference: inference.id,
             });
         }
-        self.sync_phase();
+        // Recovery plans its next step, or leaves it, from the new snapshot.
+        let recovering = matches!(self.mode, Mode::Recovering | Mode::AwaitingResolution);
+        if recovering {
+            self.recover(env);
+        } else {
+            self.sync_phase();
+        }
         for (request, waiter) in in_flight.waiters {
             let accepted = match waiter {
                 Waiter::TurnStarted(turn_id) => Accepted::TurnStarted {
                     turn_id,
+                    ack: ack.clone(),
+                },
+                Waiter::Resolved(invocation_id) => Accepted::Resolved {
+                    invocation_id,
                     ack: ack.clone(),
                 },
                 Waiter::HeadSelected => Accepted::HeadSelected { ack: ack.clone() },
@@ -706,7 +982,9 @@ impl Runtime {
             self.reply(request, Ok(accepted));
         }
         self.resolve_cancel(&ack);
-        self.advance(env);
+        if !recovering {
+            self.advance(env);
+        }
     }
 
     /// Answer cancellation requests once storage shows their outcome.
@@ -1375,27 +1653,8 @@ impl Runtime {
             (ToolStatus::Denied, TOOLS_UNAVAILABLE)
         };
         let results = pending
-            .into_iter()
-            .map(|call| {
-                (
-                    Some(turn.clone()),
-                    EntryPayload::ToolResult(ToolResultEntry {
-                        result: ToolResult {
-                            call,
-                            invocation_id: None,
-                            status,
-                            content: vec![ContentBlock::Text { text: text.into() }],
-                            metadata: ToolMetadata {
-                                exit_code: None,
-                                duration_ms: None,
-                                output_truncated: false,
-                                provenance: Provenance::Runtime,
-                                artifacts: Vec::new(),
-                            },
-                        },
-                    }),
-                )
-            })
+            .iter()
+            .map(|call| runtime_result(&turn, call, status, text))
             .collect();
         let entries = chain(snapshot, results, env);
         use RuntimeState::*;
@@ -1588,7 +1847,8 @@ impl Recorded {
 fn phase(mode: Mode, snapshot: &SessionSnapshot) -> Phase {
     match mode {
         Mode::Ready => Phase::Durable(snapshot.state()),
-        Mode::RecoveryRequired => Phase::RecoveryRequired,
+        Mode::Recovering => Phase::RecoveryRequired,
+        Mode::AwaitingResolution => Phase::AwaitingResolution,
         Mode::Faulted => Phase::Faulted,
     }
 }
@@ -1599,7 +1859,72 @@ fn idle_flight() -> InFlight {
         waiters: Vec::new(),
         opening: None,
         finished: None,
+        recovered: None,
         ends_inference: false,
+    }
+}
+
+fn metadata(provenance: Provenance) -> ToolMetadata {
+    ToolMetadata {
+        exit_code: None,
+        duration_ms: None,
+        output_truncated: false,
+        provenance,
+        artifacts: Vec::new(),
+    }
+}
+
+/// A result the runtime records for a call it never started: no invocation,
+/// `runtime` provenance, and a text that leads with its code.
+fn runtime_result(
+    turn: &TurnId,
+    call: &CallRef,
+    status: ToolStatus,
+    text: &str,
+) -> (Option<TurnId>, EntryPayload) {
+    (
+        Some(turn.clone()),
+        EntryPayload::ToolResult(ToolResultEntry {
+            result: ToolResult {
+                call: call.clone(),
+                invocation_id: None,
+                status,
+                content: vec![ContentBlock::Text { text: text.into() }],
+                metadata: metadata(Provenance::Runtime),
+            },
+        }),
+    )
+}
+
+/// How a client sees an unresolved invocation.
+fn uncertain_invocation(
+    snapshot: &SessionSnapshot,
+    unresolved: &UnresolvedInvocation,
+) -> UncertainInvocation {
+    let intent = &unresolved.intent;
+    let tool = snapshot
+        .entry(&intent.call.response_entry_id)
+        .and_then(|stored| match &stored.entry.payload {
+            EntryPayload::AssistantResponse(response) => {
+                response.content.iter().find_map(|block| match block {
+                    ContentBlock::ToolCall { call_id, name, .. }
+                        if *call_id == intent.call.call_id =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+    UncertainInvocation {
+        invocation_id: intent.invocation_id.clone(),
+        turn_id: intent.turn_id.clone(),
+        call: intent.call.clone(),
+        tool,
+        plan_digest: intent.plan_digest.clone(),
+        intent_at: unresolved.at.clone(),
     }
 }
 
@@ -1679,6 +2004,10 @@ fn turn_finished(turn: &TurnId, outcome: TurnOutcome, code: Option<&str>) -> Tur
 
 fn cancelled(turn: &TurnId) -> TurnFinished {
     turn_finished(turn, TurnOutcome::Cancelled, None)
+}
+
+fn interrupted(turn: &TurnId) -> TurnFinished {
+    turn_finished(turn, TurnOutcome::Interrupted, Some(PROCESS_RESTART))
 }
 
 /// Persisted content of a partial response. Tool calls appear only in an

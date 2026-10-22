@@ -526,6 +526,7 @@ impl Walk<'_> {
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
+                provenance: None,
             },
         );
         Ok(InstructionsReport::Included {
@@ -559,6 +560,7 @@ impl Walk<'_> {
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
+                provenance: None,
             },
         );
         Ok(())
@@ -659,6 +661,7 @@ impl Walk<'_> {
                 estimated_tokens: tokens,
                 opaque_bytes: opaque,
                 blocks,
+                provenance: None,
             },
         );
         Ok(())
@@ -707,6 +710,7 @@ impl Walk<'_> {
         self.push(
             ContextItem::ToolResult {
                 entry_id: id.clone(),
+                provenance: result.result.metadata.provenance,
                 result: result.result.clone(),
             },
             IncludedItem {
@@ -715,6 +719,7 @@ impl Walk<'_> {
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
+                provenance: Some(result.result.metadata.provenance),
             },
         );
         Ok(())
@@ -734,6 +739,7 @@ impl Walk<'_> {
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
+                provenance: None,
             },
         );
         Ok(())

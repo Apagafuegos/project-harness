@@ -4,16 +4,20 @@ use std::collections::BTreeMap;
 
 use crate::session::{CallId, ModelRef, ResponseId, RuntimeState, SessionSnapshot, TurnId, Usage};
 
-use super::types::{EventKind, InferenceId, RuntimeEpoch, RuntimeEvent};
+use super::types::{EventKind, InferenceId, RuntimeEpoch, RuntimeEvent, UncertainInvocation};
 
 /// Operational phase as a client sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// The journaled operational state of the published snapshot.
     Durable(RuntimeState),
-    /// The snapshot has unfinished work; every command is rejected until
-    /// recovery is implemented.
+    /// The snapshot has unfinished work and automatic recovery is planned or
+    /// in flight. Commands are rejected with `RecoveryRequired`.
     RecoveryRequired,
+    /// Invocations whose outcome is unknown wait for `ResolveUncertain`; the
+    /// view's `awaiting` lists them. Other commands are rejected with
+    /// `ResolutionRequired`.
+    AwaitingResolution,
     /// Persistence failed; only a new runtime over a reopened store continues.
     Faulted,
 }
@@ -74,6 +78,8 @@ pub struct RuntimeView {
     pub active_turn: Option<TurnId>,
     /// In-flight response, if an inference is running or being persisted.
     pub partial: Option<PartialResponse>,
+    /// Invocations waiting for the user, while `AwaitingResolution`.
+    pub awaiting: Vec<UncertainInvocation>,
 }
 
 /// Snapshots compare by identity: the exact-byte checksum of their last record
@@ -88,6 +94,7 @@ impl PartialEq for RuntimeView {
             && self.phase == other.phase
             && self.active_turn == other.active_turn
             && self.partial == other.partial
+            && self.awaiting == other.awaiting
     }
 }
 
@@ -137,6 +144,12 @@ impl ClientView {
             EventKind::PhaseChanged { phase, active_turn } => {
                 view.phase = *phase;
                 view.active_turn = active_turn.clone();
+                if *phase != Phase::AwaitingResolution {
+                    view.awaiting.clear();
+                }
+            }
+            EventKind::ResolutionRequired { invocations } => {
+                view.awaiting = invocations.clone();
             }
             EventKind::InferenceStarted {
                 inference,
@@ -235,6 +248,7 @@ impl ClientView {
                 }
             }
             EventKind::TurnFinished { .. }
+            | EventKind::Recovered { .. }
             | EventKind::ContextBuilt { .. }
             | EventKind::Diagnostic(_)
             | EventKind::Fault(_) => {}

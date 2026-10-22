@@ -54,7 +54,7 @@ the closed enum `ExclusionReason`.
 | Provider-state block or continuation owned by the projection's model | Included, attached to its response | — |
 | The same, owned by another model | Excluded, listed under `portability` | `provider_state_not_portable` |
 | Assistant response, failed | Excluded, with all its parts | `failed_response` |
-| Tool result | Included as a `tool_result` item, directly after its call | — |
+| Tool result | Included as a `tool_result` item with its `provenance`, directly after its call | — |
 | `model_changed` | Excluded from dialogue; it decides the model | `model_change_marker` |
 | Compaction summary listed in a later summary's `supersedes` | Excluded | `superseded_summary` |
 | Entry covered by a summary that is not superseded | Excluded | `covered_by_summary` |
@@ -86,6 +86,14 @@ Notes:
   its part exclusions account for it. A response with no parts at all is
   excluded as `empty_response`. An `assistant` item always has content or a
   continuation.
+- **Provenance.** A `tool_result` item carries the result's `provenance`:
+  `executor`, `runtime`, `user_observed` or `user_acknowledged_unknown`. A
+  result the user supplied while resolving an uncertain invocation (see
+  [recovery](runtime.md#recovery)) is shown to the model in later turns, so the
+  model must be able to tell it from real tool output. The same value is in
+  `result.metadata.provenance`; the top-level field makes it explicit, and a
+  check rejects a mismatch. How each provider labels it is left to the
+  Milestone 4 adapters.
 - **Siblings.** Entries off the selected branch never appear, in either list.
   RFC-001's `other_branch` reason is not used; inspect another branch by
   passing its head.
@@ -168,7 +176,7 @@ label every number: `estimated_*` (from the named estimator), `*_bytes`
 | `identity` | `session_id`, `journal_sequence`, `head`, `model`, configuration digest, `builder_version`, `projection_version` |
 | `fingerprint` | The projection's fingerprint |
 | `instructions` | `absent`, `empty` or `included` |
-| `included` | One record per projection item, in order: `entry_id` (`null` for instructions), `kind`, `estimated_tokens`, `opaque_bytes`, and for assistant items each included `block`/`continuation` part |
+| `included` | One record per projection item, in order: `entry_id` (`null` for instructions), `kind`, `estimated_tokens`, `opaque_bytes`, for assistant items each included `block`/`continuation` part, and for tool results their `provenance` (omitted for other items) |
 | `excluded` | Per entry, block or continuation, in branch order: `entry_id`, `part` (`entry`, `block` with `index`, or `continuation`), `reason`, `summary_id`, and `effective_summary` under nested summaries |
 | `summaries` | Each summary that no later one supersedes: covered entry IDs, superseded IDs, `included`, estimate |
 | `totals` | `estimator` (method, version, parameters); estimated instructions, user text, assistant text, tool calls, tool results, summaries, media and total; `opaque_provider_state_bytes` |
@@ -179,8 +187,8 @@ label every number: `estimated_*` (from the named estimator), `*_bytes`
 | `flags` | `budget_unknown`, `overflow`, `compaction_recommended`, `preview` |
 
 **Checks.** After every build, in every build profile, the builder verifies:
-the report describes exactly the projection's items, and no `assistant` item
-is empty; every branch entry is decided exactly once, by one entry-level
+the report describes exactly the projection's items, including each tool
+result's provenance, and no `assistant` item is empty; every branch entry is decided exactly once, by one entry-level
 decision or, for a response with no included part, by its part exclusions
 alone; every block and continuation of a response decided by parts has exactly
 one part decision; nothing from another branch appears; only summary reasons
@@ -208,9 +216,10 @@ later snapshot rebuilds the same fingerprint for an earlier head.
 **`PROJECTION_VERSION` policy.** It is hashed into every fingerprint. Bump it
 whenever an inclusion rule, an item type or its serialization changes, so old
 and new fingerprints can never collide. `BUILDER_VERSION` versions the report
-and checks; bump it when report fields change. Both are 2: version 2 omits
+and checks; bump it when report fields change. Both are 3. Version 2 omits
 responses with nothing to project, and adds `empty_response`,
-`effective_summary` and the `budget_unknown` flag.
+`effective_summary` and the `budget_unknown` flag. Version 3 adds
+`provenance` to `tool_result` items and to their report records.
 
 ## Integration
 

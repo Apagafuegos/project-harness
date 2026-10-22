@@ -47,5 +47,8 @@ RFC cases R01–R02 and E01 cover recovery ordering, turn exclusion, cancellatio
 event lag, and coherent client snapshots. The core's tests cover turn exclusion,
 cancellation during inference and in-flight commits, and coherent views with
 explicit gaps. The driver also tests subscriber lag in a real broadcast, runtime replacement,
-worker faults and shutdown. Approval cancellation and recovery orchestration
-(R01, the rest of R02 and E01) remain for later steps.
+worker faults and shutdown. Startup recovery is implemented under
+[decision 0007](../decisions/0007-startup-recovery.md): interrupted turns close
+after open, and uncertain intents wait for the user's resolution without being
+rerun. Approval cancellation, execution and tool reconciliation (R01 and the
+rest of R02) remain for Milestone 3.

@@ -44,6 +44,8 @@ pub struct UnresolvedInvocation {
     pub intent: ExecutionIntent,
     /// Sequence at which dispatch first became possible.
     pub sequence: u64,
+    /// Record time of the intent.
+    pub at: Timestamp,
     /// Whether an explicit uncertainty event has been recorded.
     pub uncertainty_recorded: bool,
 }
@@ -143,6 +145,7 @@ impl SessionSnapshot {
             .map(|v| UnresolvedInvocation {
                 intent: v.intent.clone(),
                 sequence: v.sequence,
+                at: v.at.clone(),
                 uncertainty_recorded: v.uncertain,
             })
             .collect()
@@ -164,6 +167,7 @@ impl SessionSnapshot {
 pub(crate) struct Invocation {
     intent: ExecutionIntent,
     sequence: u64,
+    at: Timestamp,
     uncertain: bool,
     result: Option<EntryId>,
     recovery_resolved: bool,
@@ -890,6 +894,7 @@ impl State {
                     Invocation {
                         intent: intent.clone(),
                         sequence: record.seq,
+                        at: record.at.clone(),
                         uncertain: false,
                         result: None,
                         recovery_resolved: false,

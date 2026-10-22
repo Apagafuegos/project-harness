@@ -31,13 +31,15 @@ cargo run --locked -p harness -- --version
 
 The check script verifies formatting, Clippy with warnings denied, workspace
 tests and doctests, a development build, documentation with warnings denied,
-CLI help/version smoke checks, and a `harness context` smoke test that must
-print the compaction fixture's golden report. It can also be invoked from
-another working directory. CI runs the same script with the repository
+CLI help/version smoke checks, a `harness context` smoke test that must
+print the compaction fixture's golden report, and two runs of the
+`scripted_session` example whose output must match. It can also be invoked
+from another working directory. CI runs the same script with the repository
 toolchain.
 
 The checks exercise J01–J03 storage behavior, the runtime core against real
-storage, the context builder and its golden reports, and the Rust API usage
+storage including crashes and recovery, the context builder and its golden
+reports, and the Rust API usage
 examples, including the specification journals and injected durability
 failures. They do not prove provider compatibility, workspace tools or sandbox
 enforcement.
@@ -63,13 +65,29 @@ provider events, timer firings and storage failures directly; injected failures
 use the storage I/O failure points. Nothing reads the wall clock.
 
 After every step the driver checks that at most one `Persist` is in flight, that
-no request gets a second reply, and that event `seq` values are contiguous. At
-the end it checks that every request got one reply, then reopens the journal and
-compares the reopened snapshot with the core's last published one. An injected
+no request gets a second reply, and that event `seq` values are contiguous.
+While the core is recovering it also checks that the step starts no stream and
+persists no assistant entry and no executor result. At the end it checks that
+every request got one reply, then reopens the journal and compares the reopened
+snapshot with the core's last published one. A run left faulted or unfinished
+is then restarted, so recovery closes it: every started turn must end with
+exactly one `turn_finished`, `interrupted` only with `process_restart`, every
+assistant entry must come from a stream the core started, and each uncertainty
+must be recorded once. An injected
 I/O failure after a complete write leaves the failed commit durable. In that case
 the reopened journal must be exactly one record ahead and contain that commit.
 For a torn partial write, the inspected valid prefix must equal the published
 snapshot.
+
+The driver also simulates a killed process. `kill(crash)` decides the fate of
+the commit in flight: `Lost` (never written), `Durable` (written, never
+acknowledged) or `Torn` (half written). Requests the dead process held are
+never answered. `restart()` inspects the journal, repairs a torn tail with the
+inspected fingerprint and size, opens it under a new runtime with the next
+identity stream and feeds `Start`. `inject` appends records through the dying
+process's writer, as a tool runtime would have: an authorization, an
+execution intent. `runtime/tests/recovery.rs` uses these for a crash in every
+phase and for the uncertain cases.
 
 Each scenario runs twice with fresh environments, and the effects are compared
 with storage-chosen record IDs and checksums abstracted. The first run's
@@ -82,9 +100,14 @@ a SplitMix64 PRNG across threads. Each seed interleaves commands (including
 retries, stale command IDs and media), PRNG-chosen artifact verification
 answers, scripted streams with occasional corrupt
 events, stale stream IDs, timer firings and injected persist failures. Each run
-is then driven to quiescence. Every started turn must have exactly one
-`turn_finished` in the journal; only a turn stopped by an injected fault may
-have none. A second generator derived from the seed picks a context limit
+is then driven to quiescence. Each step may also kill the process (2%, or 60%
+while a healthy runtime has calls waiting for answers) with a lost, durable or
+torn commit in flight. Before such a crash a tool runtime sometimes wrote its
+authorization or execution intent. The process restarts at once, repairs a
+torn tail, recovers, and resolves each uncertain invocation with a
+PRNG-chosen statement (sometimes an invalid one the core must refuse). A
+faulted runtime is restarted too. Every started turn must have exactly one
+`turn_finished` in the journal, and storage must reject nothing. A second generator derived from the seed picks a context limit
 (none in one seed in eight, two small ones that overflow after a few turns, or
 a large one) and whether switch target `b` is listed, without changing the
 seed's interleavings. Every context the core built is rebuilt from the reopened
@@ -116,12 +139,34 @@ The injected I/O trace records worker thread names and sync ordering.
 Coverage includes tool loops/limits, cancellation, upload limits and media
 preflight, joining mid-stream, broadcast lag, epoch changes, unacknowledged
 records, torn writes, poison, panic, dropped replies, overload and concurrent
-shutdown during a commit. A torn tail blocks reopen until explicit repair;
-reopen never repairs history or performs step-6 recovery.
+shutdown during a commit. A torn tail blocks open and reopen with
+`PersistError::TornTail` until an explicit repair bound to its fingerprint and
+size; stale values, a locked session and corrupt or headless journals are
+refused. Recovery on open closes an interrupted turn without opening a stream,
+and an uncertain invocation waits for `ResolveUncertain` through the handle.
 
 ```sh
 cargo test -p harness-core --locked runtime::driver::tests
 ```
+
+## End-to-end example
+
+`crates/core/examples/scripted_session.rs` runs Milestone 2 in one place,
+offline and deterministically: a session with a context limit and an
+instruction, a turn that stops, a turn whose tool call is answered
+`tools_unavailable`, a process killed while a third turn streams, a reopen that
+recovers on its own, and the final context report. `check.sh` runs it twice
+and diffs the output.
+
+```sh
+cargo run --locked -p harness-core --example scripted_session
+```
+
+## Journal inspection and repair
+
+`harness journal inspect` and `harness journal repair` are described in
+[session storage](session-storage.md#journal-commands); `crates/cli/tests/journal.rs`
+smoke-tests both on a torn copy of the compaction fixture.
 
 ## Context inspection
 

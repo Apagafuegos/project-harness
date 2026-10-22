@@ -76,6 +76,7 @@ Timer fires carry their runtime's epoch, and fires from a replaced runtime are
 dropped. Reopen is allowed only in `Faulted`, drains the old worker and
 opens the same journal on a new worker. It never repairs a torn tail implicitly.
 An unfinished reopened snapshot stays `RecoveryRequired` until step 6.
+([Decision 0007](0007-startup-recovery.md) now recovers it after open.)
 
 ## Consequences
 

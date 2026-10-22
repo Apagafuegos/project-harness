@@ -2,8 +2,8 @@
 
 `harness_core::session` implements the first headless storage milestone on Linux.
 It stores one checksummed JSONL journal per session and content-addressed artifact
-sidecars. It does not run an agent, project context, execute workspace tools, or
-supply CLI session commands.
+sidecars. It does not run an agent, project context or execute workspace tools.
+The runtime, the context builder and the `harness journal` commands build on it.
 
 ## Rust API
 
@@ -104,8 +104,9 @@ SHA-256. It retains an immutable valid-prefix snapshot. An engine already holdin
 the writer lock supplies its own snapshot for live inspection.
 
 An unterminated final suffix, even a complete JSON object lacking LF, blocks
-normal writable open. Pass the inspection to `JournalStore::repair_tail` only
-when repair is explicitly requested. Under the exclusive lock, it checks the
+normal writable open. Pass the inspection to `JournalStore::repair_tail`, or its
+fingerprint and size to `repair_inspected_tail`, only when repair is explicitly
+requested. Under the exclusive lock, it checks the
 expected size and digest, durably quarantines the exact suffix, truncates only
 those uncommitted bytes, syncs the journal, then appends/syncs `tail_repaired`.
 A file without a valid header cannot be repaired into an invented session.
@@ -125,7 +126,39 @@ not-started proposals receive runtime cancelled results before turn termination;
 uncertain intents require `execution_uncertain`, an interrupted turn, and an
 explicit observed or acknowledged-unknown result plus `recovery_resolved`.
 Pending approval/authorization records cannot be used to resume dispatch after
-restart. Automatic recovery orchestration belongs to the next runtime slices.
+restart. The runtime core makes these commits after open: it closes an
+interrupted turn on its own and waits for the user to resolve each uncertain
+intent. See [runtime recovery](runtime.md#recovery).
+
+### Journal commands
+
+Two CLI commands expose inspection and repair without an engine. Both take the
+data root and session ID, and both refuse at once a session a running engine
+holds.
+
+```sh
+cargo run --locked -p harness -- journal inspect <data-root> <session-id>
+cargo run --locked -p harness -- journal repair <data-root> <session-id> \
+  --fingerprint <sha256> --size <bytes>
+```
+
+`journal inspect` prints `JournalStore::inspect` as JSON: `file_bytes`,
+`valid_bytes`, the whole-file `fingerprint`, the first `diagnostic` (offset,
+kind such as `torn_tail` or `corrupt`, and code), whether it is `repairable`
+(a torn tail after a valid header), the `quarantine_bytes` repair would move,
+and the `valid_prefix`: sequence, head, state, active turn, whether it requires
+recovery, and its unresolved invocations. It writes nothing.
+
+`journal repair` calls `JournalStore::repair_inspected_tail` with the
+fingerprint and size the user copied from that inspection. Neither is ever
+chosen for the user. A changed file is refused as `stale_repair`, and a
+complete corrupt record, a missing header or a journal without a torn tail as
+`tail_not_repairable`; nothing is changed. On success it prints the
+`quarantine_artifact` reference, the original and valid sizes, the new
+sequence and whether the session still requires recovery. That recovery
+happens when an engine next opens the session; through a `SessionHandle` the
+same flow is `PersistError::TornTail` and `SessionHandle::repair_tail` (see
+[tail repair](runtime.md#tail-repair)).
 
 ## Validation and limits
 

@@ -7,7 +7,8 @@ use super::PROJECTION_VERSION;
 use crate::{
     model::ModelInput,
     session::{
-        ContentBlock, Digest, EntryId, ModelRef, ProviderContinuation, ResponseOutcome, ToolResult,
+        ContentBlock, Digest, EntryId, ModelRef, Provenance, ProviderContinuation, ResponseOutcome,
+        ToolResult,
     },
 };
 
@@ -64,6 +65,11 @@ pub enum ContextItem {
     ToolResult {
         /// Source entry.
         entry_id: EntryId,
+        /// Who produced the result: an executor, the runtime, or a user who
+        /// resolved an uncertain invocation. Adapters must let the model tell
+        /// a user's statement from real tool output; how each provider labels
+        /// it belongs to its adapter. Equal to `result.metadata.provenance`.
+        provenance: Provenance,
         /// The stored result.
         result: ToolResult,
     },

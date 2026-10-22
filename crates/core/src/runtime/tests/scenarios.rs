@@ -6,43 +6,47 @@ use crate::context::{Budget, ContextConfig, ContextItem, ModelLimits, UnknownLim
 use crate::runtime::tests::scenario;
 
 /// `Started` changes nothing visible; it only restarts the idle timer.
-fn started(d: &mut Driver) {
+pub(super) fn started(d: &mut Driver) {
     assert!(matches!(
         d.provider(ProviderEvent::Started)[..],
         [Effect::CancelTimer { .. }, Effect::SetTimer { duration, .. }]
             if duration == d.runtime.config().provider_idle_timeout
     ));
 }
-fn say(d: &mut Driver, block_index: u32, text: &str) -> Vec<Effect> {
+pub(super) fn say(d: &mut Driver, block_index: u32, text: &str) -> Vec<Effect> {
     d.provider(ProviderEvent::TextDelta {
         block_index,
         text: text.into(),
     })
 }
-fn finish(d: &mut Driver, outcome: ProviderOutcome, reason: Option<FinishReason>) -> Vec<Effect> {
+pub(super) fn finish(
+    d: &mut Driver,
+    outcome: ProviderOutcome,
+    reason: Option<FinishReason>,
+) -> Vec<Effect> {
     d.provider(ProviderEvent::Finished {
         outcome,
         finish_reason: reason,
         error: None,
     })
 }
-fn stop(d: &mut Driver) -> Vec<Effect> {
+pub(super) fn stop(d: &mut Driver) -> Vec<Effect> {
     finish(d, ProviderOutcome::Completed, Some(FinishReason::Stop))
 }
-fn call(d: &mut Driver, block_index: u32, name: &str) {
+pub(super) fn call(d: &mut Driver, block_index: u32, name: &str) {
     d.provider(ProviderEvent::ToolCallStarted {
         block_index,
         name: name.into(),
         provider_call_id: Some(format!("native-{block_index}")),
     });
 }
-fn args(d: &mut Driver, block_index: u32, fragment: &str) {
+pub(super) fn args(d: &mut Driver, block_index: u32, fragment: &str) {
     d.provider(ProviderEvent::ToolArgumentsDelta {
         block_index,
         fragment: fragment.into(),
     });
 }
-fn ready(d: &mut Driver, block_index: u32) -> Vec<Effect> {
+pub(super) fn ready(d: &mut Driver, block_index: u32) -> Vec<Effect> {
     d.provider(ProviderEvent::ToolCallReady { block_index })
 }
 fn usage(input: Option<u64>, output: Option<u64>) -> Usage {
@@ -55,7 +59,7 @@ fn usage(input: Option<u64>, output: Option<u64>) -> Usage {
 }
 
 /// Start a turn and settle until its inference runs.
-fn begin(d: &mut Driver, prompt: &str) -> RequestId {
+pub(super) fn begin(d: &mut Driver, prompt: &str) -> RequestId {
     let (request, _) = d.start(prompt);
     d.settle();
     assert!(matches!(d.accepted(request), Accepted::TurnStarted { .. }));
@@ -64,7 +68,7 @@ fn begin(d: &mut Driver, prompt: &str) -> RequestId {
 }
 
 /// A whole turn that answers `reply` and stops.
-fn plain_turn(d: &mut Driver, prompt: &str, reply: &str) {
+pub(super) fn plain_turn(d: &mut Driver, prompt: &str, reply: &str) {
     begin(d, prompt);
     say(d, 0, reply);
     stop(d);
@@ -72,7 +76,7 @@ fn plain_turn(d: &mut Driver, prompt: &str, reply: &str) {
 }
 
 /// Two interleaved tool calls, finished with `tool_calls`.
-fn two_calls(d: &mut Driver) {
+pub(super) fn two_calls(d: &mut Driver) {
     call(d, 1, "read");
     call(d, 3, "write");
     args(d, 3, r#"{"path":"b","#);
@@ -83,19 +87,19 @@ fn two_calls(d: &mut Driver) {
     ready(d, 1);
 }
 
-fn persists(effects: &[Effect]) -> usize {
+pub(super) fn persists(effects: &[Effect]) -> usize {
     effects
         .iter()
         .filter(|e| matches!(e, Effect::Persist { .. }))
         .count()
 }
 
-fn has(effects: &[Effect], f: impl Fn(&Effect) -> bool) -> bool {
+pub(super) fn has(effects: &[Effect], f: impl Fn(&Effect) -> bool) -> bool {
     effects.iter().any(f)
 }
 
 /// The assistant responses on the current branch, oldest first.
-fn responses(d: &Driver) -> Vec<AssistantResponse> {
+pub(super) fn responses(d: &Driver) -> Vec<AssistantResponse> {
     let snapshot = d.runtime.snapshot();
     snapshot
         .ancestry(snapshot.head())
@@ -108,7 +112,7 @@ fn responses(d: &Driver) -> Vec<AssistantResponse> {
         .collect()
 }
 
-fn results(d: &Driver) -> Vec<ToolResult> {
+pub(super) fn results(d: &Driver) -> Vec<ToolResult> {
     let snapshot = d.runtime.snapshot();
     snapshot
         .ancestry(snapshot.head())
@@ -121,18 +125,18 @@ fn results(d: &Driver) -> Vec<ToolResult> {
         .collect()
 }
 
-fn outcome(d: &Driver, turn: &TurnId) -> Option<TurnOutcome> {
+pub(super) fn outcome(d: &Driver, turn: &TurnId) -> Option<TurnOutcome> {
     d.runtime.snapshot().turn(turn).unwrap().outcome
 }
 
-fn turn_of(d: &Driver, request: RequestId) -> TurnId {
+pub(super) fn turn_of(d: &Driver, request: RequestId) -> TurnId {
     match d.accepted(request) {
         Accepted::TurnStarted { turn_id, .. } => turn_id.clone(),
         other => panic!("not a turn start: {other:?}"),
     }
 }
 
-fn texts(response: &AssistantResponse) -> Vec<String> {
+pub(super) fn texts(response: &AssistantResponse) -> Vec<String> {
     response
         .content
         .iter()
@@ -143,9 +147,9 @@ fn texts(response: &AssistantResponse) -> Vec<String> {
         .collect()
 }
 
-const OPEN: &str = "user turn_started idle>preparing";
-const INFER: &str = "preparing>inferring";
-const STOP: &str = "assistant(completed/stop) inferring>processing finished(completed)";
+pub(super) const OPEN: &str = "user turn_started idle>preparing";
+pub(super) const INFER: &str = "preparing>inferring";
+pub(super) const STOP: &str = "assistant(completed/stop) inferring>processing finished(completed)";
 
 macro_rules! scenarios {
     ($($name:ident $(with $config:expr)?),+ $(,)?) => {$(
@@ -192,9 +196,9 @@ fn context_limit(context_tokens: u32) -> RuntimeConfig {
 
 /// Every `ContextBuilt` and `StartInference` so far, as
 /// `(head, fingerprint, overflow)` and `(head, fingerprint, items)`.
-type Built = (EntryId, Digest, bool);
-type Started = (EntryId, Digest, Vec<ContextItem>);
-fn contexts(d: &Driver) -> (Vec<Built>, Vec<Started>) {
+pub(super) type Built = (EntryId, Digest, bool);
+pub(super) type Started = (EntryId, Digest, Vec<ContextItem>);
+pub(super) fn contexts(d: &Driver) -> (Vec<Built>, Vec<Started>) {
     let effects = d
         .done
         .iter()
@@ -839,40 +843,57 @@ mod bodies {
         let turn = turn_of(d, request);
         started(d);
         say(d, 0, "half");
-        d.reopen();
+        d.reopen_unstarted();
         assert_eq!(d.runtime.phase(), Phase::RecoveryRequired);
         assert_eq!(d.runtime.view().event_seq, 0, "construction emits nothing");
-        // A retry of the accepted command still learns its durable outcome.
-        let retry = d.command(Command::StartTurn {
-            command_id: id,
-            content: text("interrupted"),
-        });
-        assert!(
-            matches!(d.accepted(retry), Accepted::TurnStarted { turn_id, .. } if *turn_id == turn)
-        );
-        for command in [
-            Command::StartTurn {
-                command_id: d.new_command_id(),
-                content: text("new"),
-            },
-            Command::Cancel { turn_id: turn },
-            Command::SelectHead { head: None },
-            Command::SwitchModel {
-                model: ModelRef {
-                    provider_instance: "mock".into(),
-                    model: "other".into(),
+        let reject_all = |d: &mut Driver| {
+            // A retry of the accepted command still learns its durable outcome.
+            let retry = d.command(Command::StartTurn {
+                command_id: id.clone(),
+                content: text("interrupted"),
+            });
+            assert!(
+                matches!(d.accepted(retry), Accepted::TurnStarted { turn_id, .. } if *turn_id == turn)
+            );
+            for command in [
+                Command::StartTurn {
+                    command_id: d.new_command_id(),
+                    content: text("new"),
                 },
-            },
-        ] {
-            let request = d.command(command);
-            assert_eq!(d.rejected(request), Rejection::RecoveryRequired);
-        }
+                Command::Cancel {
+                    turn_id: turn.clone(),
+                },
+                Command::SelectHead { head: None },
+                Command::SwitchModel {
+                    model: ModelRef {
+                        provider_instance: "mock".into(),
+                        model: "other".into(),
+                    },
+                },
+            ] {
+                let request = d.command(command);
+                assert_eq!(d.rejected(request), Rejection::RecoveryRequired);
+            }
+        };
+        reject_all(d);
         let stale = d.step(Input::Provider {
             inference: InferenceId(1),
             event: ProviderEvent::Started,
         });
         assert_eq!(persists(&stale), 0);
-        assert_eq!(shapes(d), [OPEN, INFER]);
+        // Start plans recovery; until its commit is durable, commands wait.
+        assert_eq!(persists(&d.step(Input::Start)), 1);
+        reject_all(d);
+        d.settle();
+        assert_eq!(d.runtime.phase(), Phase::Durable(RuntimeState::Idle));
+        assert_eq!(
+            shapes(d),
+            [
+                OPEN,
+                INFER,
+                "inferring>recovering finished(interrupted, process_restart)"
+            ]
+        );
     }
 
     pub fn command_retry_after_ack_returns_the_original_receipt(d: &mut Driver) {

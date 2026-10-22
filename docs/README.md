@@ -21,8 +21,11 @@ describing a future component is not evidence that it is implemented.
   `ModelProvider` seam, cancel-then-release lifecycle and scripted mock.
 - [Context builder decision](decisions/0006-context-builder.md): accepted pure
   builder in `step`, unpersisted projection, closed reasons and honest budgets.
+- [Startup recovery decision](decisions/0007-startup-recovery.md): accepted
+  recovery as core commits after open, explicit resolution and bound tail repair.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
-  cancellation, worker/driver, provider stream, media and resync; what step 6 adds.
+  cancellation, worker/driver, provider stream, media, resync, recovery and
+  tail repair.
 - [Context builder](context.md): implemented inclusion rules, budget, report,
   fingerprint, `inspect_context` and `harness context`.
 - [Model provider](contracts/model.md): native APIs, hybrid multimodal content,
@@ -38,6 +41,8 @@ describing a future component is not evidence that it is implemented.
 - [Agent runtime](contracts/runtime.md): commands/events, one turn per session,
   state transitions, cancellation, and write-ahead execution intent.
 - [Roadmap](roadmap.md): small vertical slices with observable acceptance criteria.
+- [Milestone 2 acceptance](milestone-2-acceptance.md): each criterion and RFC
+  case mapped to tests, with partial rows stated.
 
 ## Document status
 
@@ -51,9 +56,9 @@ options such as SQLite or parallel initial tool execution.
 **RFC details** specify how to implement those boundaries. Storage details are
 accepted and tested under decision 0003; the pure runtime core's turn commits
 and async worker/driver under decision 0004; the provider stream seam under
-decision 0005; the context builder and report under decision 0006. Other
-details, including approval defaults, native adapters, compaction generation
-and recovery orchestration, remain proposed. Schema/examples alone are
+decision 0005; the context builder and report under decision 0006; startup
+recovery and tail repair under decision 0007. Other details, including
+approval defaults, native adapters and compaction generation, remain proposed. Schema/examples alone are
 not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is
