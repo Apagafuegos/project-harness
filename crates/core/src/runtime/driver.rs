@@ -138,8 +138,9 @@ impl SessionHandle {
     }
 
     /// `open`, with time and identities from `env` instead of the wall clock
-    /// and random UUIDs, for deterministic runs such as examples and replay.
-    /// Give each process that writes a journal its own identity stream.
+    /// and random UUIDs. Meant for deterministic tests, examples, and replay;
+    /// applications should use `open`. Give each process that writes a
+    /// journal its own identity stream.
     pub async fn open_with_env<E: Env + Send + 'static>(
         root: Arc<DataRoot>,
         session: SessionId,
@@ -160,6 +161,8 @@ impl SessionHandle {
     }
 
     /// `create`, with the header time and every later identity from `env`.
+    /// Meant for deterministic tests, examples, and replay; applications
+    /// should use `create`.
     pub async fn create_with_env<E: Env + Send + 'static>(
         root: Arc<DataRoot>,
         session: SessionId,
