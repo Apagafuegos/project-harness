@@ -24,8 +24,9 @@ jobs:
 
   host-capabilities:
     # Milestone 3 step 1 spike: report what the runner offers the file tools
-    # and the shell sandbox. Informational: it never fails the workflow. The
-    # workarounds below change the runner only and are not product behavior.
+    # and the shell sandbox, before and after loading the committed AppArmor
+    # profile (ADR 0008). Informational until the shell security suite exists:
+    # it never fails the workflow. The profile changes the runner only.
     name: Host capabilities (harness doctor)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -42,44 +43,18 @@ jobs:
           mkdir doctor
           ./target/debug/harness doctor > doctor/1-baseline.json
           jq .summary doctor/1-baseline.json
-      - name: "Workaround: AppArmor profile granting bwrap userns"
+      - name: Load the committed AppArmor profile for bwrap
         run: |
-          if jq -e '.summary.shell_sandbox == "available"' doctor/1-baseline.json; then
-            echo "not needed"; exit 0
-          fi
-          printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' \
-            '/usr/bin/bwrap flags=(unconfined) {' '  userns,' '}' \
-            | sudo tee /etc/apparmor.d/harness-ci-bwrap
-          sudo apparmor_parser -r /etc/apparmor.d/harness-ci-bwrap
-          ./target/debug/harness doctor > doctor/2-apparmor-profile.json
-          jq .summary doctor/2-apparmor-profile.json
-      - name: "Workaround: lift the AppArmor userns restriction"
-        run: |
-          last=$(ls doctor/*.json | tail -1)
-          if jq -e '.summary.shell_sandbox == "available"' "$last"; then
-            echo "not needed"; exit 0
-          fi
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          ./target/debug/harness doctor > doctor/3-sysctl.json
-          jq .summary doctor/3-sysctl.json
-      - name: "Workaround: start a systemd user manager"
-        run: |
-          last=$(ls doctor/*.json | tail -1)
-          if jq -e '.summary.process_limit == "cgroup"' "$last"; then
-            echo "not needed"; exit 0
-          fi
-          sudo loginctl enable-linger "$USER"
-          export XDG_RUNTIME_DIR=/run/user/$(id -u)
-          for _ in $(seq 20); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
-          ./target/debug/harness doctor > doctor/4-user-manager.json
-          jq .summary doctor/4-user-manager.json
+          sudo apparmor_parser -r ci/apparmor/harness-ci-bwrap
+          ./target/debug/harness doctor > doctor/2-with-profile.json
+          jq .summary doctor/2-with-profile.json
       - name: Summary
         if: always()
         run: |
           for report in doctor/*.json; do
             echo "### $(basename "$report" .json)"
             echo '```json'
-            jq '{summary, bubblewrap: {version: .bubblewrap.version, setuid: .bubblewrap.setuid, failures: .bubblewrap.failures, stderr: .bubblewrap.probe.stderr}, cgroup: {reason: .cgroup.reason, stderr: .cgroup.probe.stderr}, host}' "$report"
+            jq '{summary, bubblewrap: {version: .bubblewrap.version, setuid: .bubblewrap.setuid, failures: .bubblewrap.failures, host_maps: .bubblewrap.probe.host_maps, stderr: .bubblewrap.probe.stderr}, cgroup: {bus_source: .cgroup.bus_source, reason: .cgroup.reason, stderr: .cgroup.probe.stderr}, host}' "$report"
             echo '```'
           done >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4

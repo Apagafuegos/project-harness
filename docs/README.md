@@ -23,6 +23,8 @@ describing a future component is not evidence that it is implemented.
   builder in `step`, unpersisted projection, closed reasons and honest budgets.
 - [Startup recovery decision](decisions/0007-startup-recovery.md): accepted
   recovery as core commits after open, explicit resolution and bound tail repair.
+- [Host sandbox decision](decisions/0008-host-sandbox.md): accepted shell
+  security suite placement, the CI AppArmor profile and the opt-out.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
   cancellation, worker/driver, provider stream, media, resync, recovery and
   tail repair.

@@ -1,0 +1,18 @@
+# AppArmor profile for the CI runner only. See docs/decisions/0008-host-sandbox.md.
+#
+# Ubuntu 24.04 sets kernel.apparmor_restrict_unprivileged_userns=1, so an
+# unconfined /usr/bin/bwrap gets a user namespace without capabilities and
+# cannot set up the sandbox. This profile attaches to /usr/bin/bwrap only and
+# grants what Ubuntu's usr.bin.bwrap profile grants: no confinement, plus
+# userns. Nothing else.
+#
+# CI loads it with `apparmor_parser -r`. The harness never installs AppArmor
+# profiles.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile harness-ci-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

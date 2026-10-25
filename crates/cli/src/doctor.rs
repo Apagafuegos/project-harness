@@ -7,11 +7,13 @@
 //! confirm is reported as unavailable, with the reason.
 
 use std::{
+    ffi::OsString,
     fs,
-    io::Read,
-    os::unix::fs::{PermissionsExt, symlink},
+    io::{BufRead, BufReader, Read},
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +21,7 @@ use std::{
 use rustix::{
     fs::{CWD, Mode, OFlags, ResolveFlags, openat2},
     io::Errno,
+    process::{getegid, geteuid},
 };
 use serde_json::{Value, json};
 
@@ -32,6 +35,8 @@ const MIN_BWRAP: (u32, u32, u32) = (0, 5, 0);
 const TASKS_MAX: u32 = 64;
 /// Upper bound on any probe process.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Where to read when the shell sandbox is unavailable.
+const SANDBOX_HELP: &str = "docs/development.md#when-the-shell-sandbox-is-unavailable";
 /// The only variables the sandbox may see, with their fixed values.
 const SANDBOX_ENV: [(&str, &str); 4] = [
     ("PATH", "/usr/bin:/bin"),
@@ -41,6 +46,8 @@ const SANDBOX_ENV: [(&str, &str); 4] = [
 ];
 
 /// Runs inside the probe sandbox and prints one `key=value` line per fact.
+/// After `ready=yes` it waits for its stdin to close, so the doctor can
+/// inspect the live sandbox from the host.
 const SANDBOX_SCRIPT: &str = r#"
 echo "uid_map=$(tr -s ' ' < /proc/self/uid_map | sed 's/^ //')"
 echo "interfaces=$(sed -n '3,$p' /proc/net/dev | cut -d: -f1 | tr -d ' ' | tr '\n' ',')"
@@ -49,7 +56,8 @@ echo "session=$(cut -d' ' -f6 /proc/$$/stat)"
 (echo inside > /workspace/inside) 2>/dev/null && echo workspace_write=ok || echo workspace_write=refused
 (echo escape > /outside/escape) 2>/dev/null && echo outside_write=ok || echo outside_write=refused
 (echo escape > /usr/harness-doctor-escape) 2>/dev/null && echo usr_write=ok || echo usr_write=refused
-echo done=yes
+echo ready=yes
+read -r _ || true
 "#;
 
 /// Paths of the external programs the doctor probes.
@@ -224,17 +232,35 @@ impl Run {
 
 /// Run `command` with a timeout; the child is killed when it expires.
 fn spawn(command: &mut Command) -> Result<Run, String> {
+    spawn_with(command, None)
+}
+
+/// Like [`spawn`]. With `on_ready`, the child's stdin is a pipe held open
+/// until it prints `ready=yes`; `on_ready` then runs with the child's pid
+/// while the child waits, and closing stdin lets it finish.
+fn spawn_with(command: &mut Command, on_ready: Option<&mut dyn FnMut(u32)>) -> Result<Run, String> {
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(if on_ready.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("cannot start {:?}: {error}", command.get_program()))?;
-    let mut stdout = child.stdout.take().expect("piped");
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
+    let (lines, received) = mpsc::channel();
     let out = thread::spawn(move || {
         let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            text.push_str(&line);
+            text.push('\n');
+            let _ = lines.send(line);
+        }
         text
     });
     let err = thread::spawn(move || {
@@ -243,6 +269,18 @@ fn spawn(command: &mut Command) -> Result<Run, String> {
         text
     });
     let deadline = Instant::now() + PROBE_TIMEOUT;
+    if let Some(on_ready) = on_ready {
+        // Stops at ready, at the end of stdout, or at the deadline.
+        while let Ok(line) =
+            received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            if line == "ready=yes" {
+                on_ready(child.id());
+                break;
+            }
+        }
+    }
+    drop(stdin);
     let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
@@ -341,11 +379,8 @@ fn bwrap_probe(bwrap: &Path, scratch: &Path) -> Value {
     let metadata = match fs::metadata(bwrap) {
         Ok(metadata) => metadata,
         Err(error) => {
-            return json!({
-                "path": bwrap,
-                "status": "unavailable",
-                "reason": format!("cannot stat {}: {error}", bwrap.display()),
-            });
+            let failure = format!("cannot stat {}: {error}", bwrap.display());
+            return finish(json!({ "path": bwrap }), vec![failure], Value::Null);
         }
     };
     let setuid = metadata.permissions().mode() & 0o4000 != 0;
@@ -374,14 +409,32 @@ fn bwrap_probe(bwrap: &Path, scratch: &Path) -> Value {
         failures.push(format!("setup failed: {error}"));
         return finish(base, failures, Value::Null);
     }
-    let run =
-        match spawn(Command::new(bwrap).args(sandbox_args(&workspace, &outside, SANDBOX_SCRIPT))) {
-            Ok(run) => run,
-            Err(error) => {
-                failures.push(error);
-                return finish(base, failures, Value::Null);
-            }
-        };
+    // Checked from the host while the sandbox waits after `ready=yes`.
+    let mut host_maps = Vec::new();
+    let mut map_failures = Vec::new();
+    let mut inspect = |pid: u32| {
+        let sandboxed = descendants(pid);
+        if sandboxed.is_empty() {
+            map_failures.push("no sandbox process found to check its id maps from the host".into());
+        }
+        for pid in sandboxed {
+            let uid = map_check(pid, "uid_map", "euid", geteuid().as_raw());
+            let gid = map_check(pid, "gid_map", "egid", getegid().as_raw());
+            host_maps.push(json!({ "pid": pid, "uid_map": uid.0, "gid_map": gid.0 }));
+            map_failures.extend(uid.1.into_iter().chain(gid.1));
+        }
+    };
+    let run = spawn_with(
+        Command::new(bwrap).args(sandbox_args(&workspace, &outside, SANDBOX_SCRIPT)),
+        Some(&mut inspect),
+    );
+    let run = match run {
+        Ok(run) => run,
+        Err(error) => {
+            failures.push(error);
+            return finish(base, failures, Value::Null);
+        }
+    };
     let facts: serde_json::Map<String, Value> = run
         .stdout
         .lines()
@@ -389,7 +442,7 @@ fn bwrap_probe(bwrap: &Path, scratch: &Path) -> Value {
         .map(|(key, value)| (key.to_owned(), json!(value.trim_end_matches(','))))
         .collect();
     let fact = |key: &str| facts.get(key).and_then(Value::as_str).unwrap_or("");
-    if run.code != Some(0) || fact("done") != "yes" {
+    if run.code != Some(0) || fact("ready") != "yes" {
         failures.push("the probe sandbox did not start and exit cleanly".into());
     } else {
         // An identity map of the whole range means no new user namespace.
@@ -428,9 +481,11 @@ fn bwrap_probe(bwrap: &Path, scratch: &Path) -> Value {
         if fact("usr_write") != "refused" {
             failures.push("a write to /usr was not refused".into());
         }
+        failures.extend(map_failures);
     }
     let mut probe = run.json();
     probe["facts"] = Value::Object(facts);
+    probe["host_maps"] = json!(host_maps);
     finish(base, failures, probe)
 }
 
@@ -440,9 +495,69 @@ fn finish(mut base: Value, failures: Vec<String>, probe: Value) -> Value {
     } else {
         "unavailable"
     });
+    if !failures.is_empty() {
+        base["help"] = json!(SANDBOX_HELP);
+    }
     base["failures"] = json!(failures);
     base["probe"] = probe;
     base
+}
+
+/// Every descendant of `root`, found through the parent pids in `/proc`.
+fn descendants(root: u32) -> Vec<u32> {
+    let parents: Vec<(u32, u32)> = fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            // The command name may hold spaces; the fields after it do not.
+            let (_, rest) = stat.rsplit_once(')')?;
+            let ppid = rest.split_whitespace().nth(1)?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect();
+    let mut found = vec![root];
+    let mut next = 0;
+    while let Some(&parent) = found.get(next) {
+        for &(pid, ppid) in &parents {
+            if ppid == parent && !found.contains(&pid) {
+                found.push(pid);
+            }
+        }
+        next += 1;
+    }
+    found.remove(0);
+    found
+}
+
+/// Read `/proc/<pid>/<file>` from the host and require exactly one line
+/// mapping one id to `outside`, the invoking user's effective id. Seen from
+/// the host, the second field is relative to the host's namespace, unlike the
+/// map the sandbox reads about itself.
+fn map_check(pid: u32, file: &str, id: &str, outside: u32) -> (Value, Option<String>) {
+    let text = match fs::read_to_string(format!("/proc/{pid}/{file}")) {
+        Ok(text) => text,
+        Err(error) => {
+            let failure = format!("cannot read {file} of sandbox pid {pid} from the host: {error}");
+            return (Value::Null, Some(failure));
+        }
+    };
+    let lines: Vec<Vec<&str>> = text
+        .lines()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    let outside = outside.to_string();
+    let ok = matches!(lines.as_slice(), [line] if line.len() == 3 && line[1] == outside && line[2] == "1");
+    let shown: Vec<String> = lines.iter().map(|line| line.join(" ")).collect();
+    let failure = (!ok).then(|| {
+        format!(
+            "{file} seen from the host is not one id mapped to {id} {outside}: pid {pid}: {}",
+            shown.join("; ")
+        )
+    });
+    (json!(shown), failure)
 }
 
 fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
@@ -453,10 +568,17 @@ fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
         "root_controllers": controllers,
         "own_cgroup": own,
         "systemd_run": programs.systemd_run,
-        "xdg_runtime_dir_set": std::env::var_os("XDG_RUNTIME_DIR").is_some(),
         "dbus_session_bus_address_set": std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some(),
         "tasks_max_requested": TASKS_MAX,
     });
+    let bus = user_bus(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        Path::new("/run/user"),
+        geteuid().as_raw(),
+    );
+    let mut base = base;
+    base["bus_source"] = json!(bus.source);
+    base["bus_runtime_dir"] = json!(bus.runtime_dir);
     let unavailable = |mut base: Value, reason: String, probe: Value| {
         base["status"] = json!("unavailable");
         base["reason"] = json!(reason);
@@ -467,7 +589,14 @@ fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
         let reason = format!("{} is missing", programs.systemd_run.display());
         return unavailable(base, reason, Value::Null);
     }
+    if let Some(reason) = bus.reason {
+        return unavailable(base, reason, Value::Null);
+    }
     let scope = |command: &mut Command| {
+        // Only this child sees a derived runtime directory.
+        if let Some(dir) = &bus.runtime_dir {
+            command.env("XDG_RUNTIME_DIR", dir);
+        }
         command
             .arg("--user")
             .arg("--scope")
@@ -516,15 +645,144 @@ fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
             Err(error) => json!({ "error": error }),
         };
     }
-    let mut base = base;
     base["status"] = json!("available");
     base["probe"] = probe;
     base
 }
 
+/// Where `systemd-run --user` finds the user bus.
+struct Bus {
+    /// `env`, `derived` or `none`.
+    source: &'static str,
+    /// A derived runtime directory, passed only to the systemd-run child.
+    runtime_dir: Option<PathBuf>,
+    /// Why there is no bus, when `source` is `none`.
+    reason: Option<String>,
+}
+
+/// Use `XDG_RUNTIME_DIR` when it is set. Otherwise derive
+/// `<run_user>/<euid>` and accept it only when [`runtime_dir_check`] passes;
+/// there is no other fallback.
+fn user_bus(env: Option<OsString>, run_user: &Path, euid: u32) -> Bus {
+    if env.is_some_and(|value| !value.is_empty()) {
+        return Bus {
+            source: "env",
+            runtime_dir: None,
+            reason: None,
+        };
+    }
+    let dir = run_user.join(euid.to_string());
+    match runtime_dir_check(&dir, euid) {
+        Ok(()) => Bus {
+            source: "derived",
+            runtime_dir: Some(dir),
+            reason: None,
+        },
+        Err(reason) => Bus {
+            source: "none",
+            runtime_dir: None,
+            reason: Some(format!(
+                "XDG_RUNTIME_DIR is unset and {} was not accepted: {reason}",
+                dir.display()
+            )),
+        },
+    }
+}
+
+/// The directory must be a real directory owned by `euid` and not group- or
+/// world-writable, and `bus` in it a socket owned by `euid`.
+fn runtime_dir_check(dir: &Path, euid: u32) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(dir).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
+        return Err("not a directory".into());
+    }
+    if metadata.uid() != euid {
+        return Err(format!("owned by uid {}, not euid {euid}", metadata.uid()));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(format!(
+            "mode {:o} is group- or world-writable",
+            metadata.mode() & 0o7777
+        ));
+    }
+    let bus = fs::symlink_metadata(dir.join("bus")).map_err(|error| format!("bus: {error}"))?;
+    if !bus.file_type().is_socket() {
+        return Err("bus is not a socket".into());
+    }
+    if bus.uid() != euid {
+        return Err(format!(
+            "bus is owned by uid {}, not euid {euid}",
+            bus.uid()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `/run/user` stand-in holding `<euid>/bus` as a live socket.
+    fn run_user() -> (tempfile::TempDir, PathBuf, std::os::unix::net::UnixListener) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(geteuid().as_raw().to_string());
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = std::os::unix::net::UnixListener::bind(dir.join("bus")).unwrap();
+        (temp, dir, socket)
+    }
+
+    #[test]
+    fn derives_a_valid_runtime_dir_when_unset() {
+        let (temp, dir, _socket) = run_user();
+        let bus = user_bus(None, temp.path(), geteuid().as_raw());
+        assert_eq!(bus.source, "derived");
+        assert_eq!(bus.runtime_dir, Some(dir));
+        assert_eq!(bus.reason, None);
+        let empty = user_bus(Some("".into()), temp.path(), geteuid().as_raw());
+        assert_eq!(empty.source, "derived");
+    }
+
+    #[test]
+    fn an_inherited_runtime_dir_is_used_as_is() {
+        let bus = user_bus(Some("/run/user/1".into()), Path::new("/nonexistent"), 1);
+        assert_eq!(bus.source, "env");
+        assert_eq!(bus.runtime_dir, None);
+    }
+
+    #[test]
+    fn refuses_a_runtime_dir_of_another_owner() {
+        let (temp, dir, _socket) = run_user();
+        let other = geteuid().as_raw() + 1;
+        fs::rename(&dir, temp.path().join(other.to_string())).unwrap();
+        let bus = user_bus(None, temp.path(), other);
+        assert_eq!(bus.source, "none");
+        assert_eq!(bus.runtime_dir, None);
+        assert!(bus.reason.unwrap().contains("not euid"));
+    }
+
+    #[test]
+    fn refuses_a_world_writable_runtime_dir() {
+        let (temp, dir, _socket) = run_user();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let bus = user_bus(None, temp.path(), geteuid().as_raw());
+        assert_eq!(bus.source, "none");
+        assert!(bus.reason.unwrap().contains("world-writable"));
+    }
+
+    #[test]
+    fn refuses_a_runtime_dir_without_a_bus_socket() {
+        let (temp, dir, socket) = run_user();
+        drop(socket);
+        fs::remove_file(dir.join("bus")).unwrap();
+        let missing = user_bus(None, temp.path(), geteuid().as_raw());
+        assert_eq!(missing.source, "none");
+        assert!(missing.reason.unwrap().contains("bus:"));
+        fs::write(dir.join("bus"), b"").unwrap();
+        let file = user_bus(None, temp.path(), geteuid().as_raw());
+        assert_eq!(file.source, "none");
+        assert!(file.reason.unwrap().contains("not a socket"));
+    }
 
     #[test]
     fn parses_bubblewrap_versions() {

@@ -231,18 +231,38 @@ changes host configuration.
 - **Bubblewrap:** an absolute `--bwrap` path (default `/usr/bin/bwrap`, never
   searched in `PATH`), version 0.5.0 or later (`--clearenv`), and a probe
   sandbox with `--unshare-all --unshare-user --die-with-parent --new-session
-  --clearenv`. Inside it there must be a user namespace, only `lo`, only the
-  fixed environment, a new session, a writable workspace and refused writes
-  outside it.
+  --clearenv`. Inside it there must be only `lo`, only the fixed environment,
+  a new session, a writable workspace and refused writes outside it. From the
+  host, each sandbox process's `uid_map` and `gid_map` must be exactly one
+  line mapping one id to the invoking effective uid and gid.
 - **Process limit:** `systemd-run --user --scope -p TasksMax=64` must start
-  and its cgroup must show that `pids.max`. Without a reachable user manager
-  (for example when `XDG_RUNTIME_DIR` is unset) this is reported as a gap.
+  and its cgroup must show that `pids.max`. The user bus comes from
+  `XDG_RUNTIME_DIR` (`bus_source: env`) or, when that is unset, from
+  `/run/user/<euid>` if the directory is owned by the effective uid and not
+  group- or world-writable and its `bus` is a socket owned by the same uid
+  (`derived`). The derived value is passed to the `systemd-run` child only.
+  Otherwise `bus_source` is `none`, with the reason, and the limit is
+  reported as a gap.
 
-CI runs it in a separate, non-failing job and uploads the reports as the
-`harness-doctor` artifact. If the sandbox or the cgroup is unavailable there,
-the job retries after runner-only workarounds (an AppArmor profile for
-`bwrap`, then lifting `kernel.apparmor_restrict_unprivileged_userns`, then
-enabling linger for a user manager), one report per attempt.
+CI runs it in a separate, non-failing job, before and after loading the
+committed AppArmor profile, and uploads the reports as the `harness-doctor`
+artifact. [Decision 0008](decisions/0008-host-sandbox.md) records where the
+shell security suite will run.
+
+### When the shell sandbox is unavailable
+
+The doctor's `bubblewrap.failures` says what failed. The most common cause on
+Ubuntu 23.10 and later is `kernel.apparmor_restrict_unprivileged_userns=1`
+with no AppArmor profile for `bwrap`: the user namespace is created without
+capabilities and `bwrap` fails with `loopback: Failed RTM_NEWADDR: Operation
+not permitted`. `host.apparmor_profiles_naming_bwrap` lists the profiles
+in `/etc/apparmor.d` that name the `bwrap` path.
+
+The harness never installs a profile. Allowing `bwrap` to create user
+namespaces is a host security decision; `ci/apparmor/harness-ci-bwrap` is the
+reviewed profile CI uses, and its grant matches Ubuntu's `usr.bin.bwrap`.
+Without a working sandbox the shell tool stays unregistered, and the file
+tools are unaffected.
 
 ## Scaling benchmark
 

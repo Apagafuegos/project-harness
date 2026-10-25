@@ -55,7 +55,7 @@ fn unsandboxed_bwrap_is_unavailable() {
          echo 'workspace_write=refused'\n\
          echo 'outside_write=ok'\n\
          echo 'usr_write=ok'\n\
-         echo 'done=yes'\n",
+         echo 'ready=yes'\n",
     )
     .unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
@@ -78,7 +78,60 @@ fn unsandboxed_bwrap_is_unavailable() {
             "the workspace mount is not writable from inside",
             "a write outside the workspace was not refused",
             "a write to /usr was not refused",
+            "no sandbox process found to check its id maps from the host",
         ]
+    );
+}
+
+/// A sandbox that reports a correct map about itself but whose process maps
+/// to outside uid 0 from the host must be rejected. The fake answers every
+/// in-sandbox check correctly and then waits in `cat`, a host process whose
+/// maps are the host's identity maps of the whole range.
+#[test]
+fn mapping_to_outside_root_is_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = temp.path().join("bwrap");
+    fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         [ \"$1\" = --version ] && { echo 'bubblewrap 0.9.0'; exit 0; }\n\
+         while [ $# -gt 0 ]; do [ \"$1\" = --bind ] && ws=$2; shift; done\n\
+         echo inside > \"$ws/inside\"\n\
+         echo 'uid_map=1001 0 1'\n\
+         echo 'interfaces=lo,'\n\
+         echo 'env=HOME,LANG,PATH,PWD,TERM,'\n\
+         echo 'session=1'\n\
+         echo 'workspace_write=ok'\n\
+         echo 'outside_write=refused'\n\
+         echo 'usr_write=refused'\n\
+         echo 'ready=yes'\n\
+         cat > /dev/null\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&["--bwrap", fake.to_str().unwrap()]);
+    let bubblewrap = &report["bubblewrap"];
+    assert_eq!(bubblewrap["status"], "unavailable");
+    assert_eq!(
+        bubblewrap["help"],
+        "docs/development.md#when-the-shell-sandbox-is-unavailable"
+    );
+    let failures = bubblewrap["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    let uid = failures[0].as_str().unwrap();
+    let gid = failures[1].as_str().unwrap();
+    assert!(
+        uid.starts_with("uid_map seen from the host is not one id mapped to euid"),
+        "{uid}"
+    );
+    assert!(uid.ends_with(": 0 0 4294967295"), "{uid}");
+    assert!(
+        gid.starts_with("gid_map seen from the host is not one id mapped to egid"),
+        "{gid}"
+    );
+    assert_eq!(
+        bubblewrap["probe"]["host_maps"][0]["uid_map"][0],
+        "0 0 4294967295"
     );
 }
 
