@@ -219,6 +219,31 @@ On 2026-10-21, Rust 1.99.1, aarch64, tmpfs: median **59.6 ms** per build
 report is **1.81 MB** compact and 2.93 MB pretty-printed. This is a local
 measurement, not a production promise.
 
+## Host capabilities
+
+`harness doctor` probes the host for what the Milestone 3 tools will need and
+prints JSON. It is a diagnostic only: no tool uses it yet, and it never
+changes host configuration.
+
+- **openat2:** resolution beneath a directory with `RESOLVE_BENEATH`,
+  `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_XDEV`; an
+  in-tree open must succeed and `..`, absolute and symlink paths must fail.
+- **Bubblewrap:** an absolute `--bwrap` path (default `/usr/bin/bwrap`, never
+  searched in `PATH`), version 0.5.0 or later (`--clearenv`), and a probe
+  sandbox with `--unshare-all --unshare-user --die-with-parent --new-session
+  --clearenv`. Inside it there must be a user namespace, only `lo`, only the
+  fixed environment, a new session, a writable workspace and refused writes
+  outside it.
+- **Process limit:** `systemd-run --user --scope -p TasksMax=64` must start
+  and its cgroup must show that `pids.max`. Without a reachable user manager
+  (for example when `XDG_RUNTIME_DIR` is unset) this is reported as a gap.
+
+CI runs it in a separate, non-failing job and uploads the reports as the
+`harness-doctor` artifact. If the sandbox or the cgroup is unavailable there,
+the job retries after runner-only workarounds (an AppArmor profile for
+`bwrap`, then lifting `kernel.apparmor_restrict_unprivileged_userns`, then
+enabling linger for a user manager), one report per attempt.
+
 ## Scaling benchmark
 
 An opt-in, ignored test measures storage cost against history length. It runs

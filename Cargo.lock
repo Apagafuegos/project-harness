@@ -384,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "harness-core",
+ "rustix",
  "serde_json",
  "tempfile",
 ]

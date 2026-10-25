@@ -53,7 +53,7 @@ external services are needed for storage tests or the CLI checks.
 
 ```text
 crates/core/       Headless session storage, runtime core and context builder (harness-core)
-crates/cli/        CLI with `harness context` and `harness journal`, and the future Ratatui client (harness)
+crates/cli/        CLI with `harness context`, `harness journal` and `harness doctor`, and the future Ratatui client (harness)
 docs/             Architecture, contract drafts, decisions, and roadmap
 scripts/check.sh  Shared local/CI checks
 ```

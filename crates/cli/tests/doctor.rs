@@ -1,0 +1,109 @@
+//! `harness doctor` reports host capabilities and fails closed.
+
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+
+use serde_json::Value;
+
+fn doctor(arguments: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+        .arg("doctor")
+        .args(arguments)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// The report has every section whatever the host offers.
+#[test]
+fn reports_every_capability() {
+    let report = doctor(&[]);
+    for (key, values) in [
+        ("file_tools", &["available", "unavailable"][..]),
+        ("shell_sandbox", &["available", "unavailable"]),
+        ("process_limit", &["cgroup", "recorded_gap"]),
+    ] {
+        let value = report["summary"][key].as_str().unwrap();
+        assert!(values.contains(&value), "{key}: {value}");
+    }
+    assert_eq!(report["bubblewrap"]["path"], "/usr/bin/bwrap");
+    assert!(report["host"]["kernel"].is_string());
+}
+
+#[test]
+fn missing_bwrap_is_unavailable() {
+    let report = doctor(&["--bwrap", "/nonexistent/bwrap"]);
+    assert_eq!(report["summary"]["shell_sandbox"], "unavailable");
+    assert_eq!(report["bubblewrap"]["status"], "unavailable");
+}
+
+/// A `bwrap` that starts but sandboxes nothing must be caught. The fake
+/// prints what the probe script would see on an unsandboxed host rather than
+/// running it, so the test never writes outside its directory.
+#[test]
+fn unsandboxed_bwrap_is_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = temp.path().join("bwrap");
+    fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         [ \"$1\" = --version ] && { echo 'bubblewrap 0.9.0'; exit 0; }\n\
+         echo 'uid_map=0 0 4294967295'\n\
+         echo 'interfaces=lo,eth0,'\n\
+         echo 'env=HOME,PATH,SSH_AUTH_SOCK,'\n\
+         echo 'session=0'\n\
+         echo 'workspace_write=refused'\n\
+         echo 'outside_write=ok'\n\
+         echo 'usr_write=ok'\n\
+         echo 'done=yes'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&["--bwrap", fake.to_str().unwrap()]);
+    assert_eq!(report["bubblewrap"]["version"], "0.9.0");
+    assert_eq!(report["bubblewrap"]["status"], "unavailable");
+    let failures: Vec<&str> = report["bubblewrap"]["failures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|failure| failure.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        failures,
+        [
+            "no user namespace",
+            "network interfaces besides lo: lo,eth0",
+            "environment leaked: SSH_AUTH_SOCK",
+            "--new-session did not start a new session",
+            "the workspace mount is not writable from inside",
+            "a write outside the workspace was not refused",
+            "a write to /usr was not refused",
+        ]
+    );
+}
+
+#[test]
+fn old_bwrap_is_unavailable() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = temp.path().join("bwrap");
+    fs::write(&fake, "#!/bin/sh\necho 'bubblewrap 0.4.1'\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&["--bwrap", fake.to_str().unwrap()]);
+    assert_eq!(report["bubblewrap"]["status"], "unavailable");
+    let failures = report["bubblewrap"]["failures"][0].as_str().unwrap();
+    assert!(
+        failures.contains("older than the required 0.5.0"),
+        "{failures}"
+    );
+}
+
+#[test]
+fn relative_program_paths_are_refused() {
+    let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+        .args(["doctor", "--bwrap", "bwrap"])
+        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected an absolute path"));
+}

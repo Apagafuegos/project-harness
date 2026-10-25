@@ -1,5 +1,7 @@
 //! Command-line entry point for the future Ratatui client.
 
+mod doctor;
+
 use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
 
 use clap::{Arg, ArgMatches, Command, value_parser};
@@ -21,8 +23,8 @@ fn command() -> Command {
              Session storage, the runtime core and the context builder are \
              implemented in harness-core. Model providers, tools and the \
              terminal UI are not implemented yet. This CLI provides read-only \
-             context inspection, journal inspection and explicit torn-tail \
-             repair.\n\n\
+             context inspection, journal inspection, explicit torn-tail \
+             repair and a host capability probe.\n\n\
              Start with README.md and docs/README.md in the repository.",
         )
         .subcommand(
@@ -58,6 +60,38 @@ fn command() -> Command {
                         .value_name("N")
                         .value_parser(value_parser!(u32))
                         .help("Context limit of the projected model"),
+                ),
+        )
+        .subcommand(
+            Command::new("doctor")
+                .about("Probe the host for the file-tool and sandbox capabilities as JSON")
+                .long_about(
+                    "Probe the host for the capabilities the Milestone 3 tools need, \
+                     and print what was found as JSON: openat2 path resolution for \
+                     the file tools, a Bubblewrap sandbox with an explicit user \
+                     namespace, no network and a cleared environment for the shell, \
+                     and a cgroup process limit through a systemd user scope. \
+                     Anything that cannot be confirmed is reported unavailable, with \
+                     the reason; the exit status is success whenever the report was \
+                     printed. Host configuration is never changed: the doctor only \
+                     uses a private temporary directory, probe sandboxes and one \
+                     transient user scope.",
+                )
+                .arg(
+                    Arg::new("bwrap")
+                        .long("bwrap")
+                        .value_name("PATH")
+                        .default_value(doctor::DEFAULT_BWRAP)
+                        .value_parser(absolute)
+                        .help("Absolute path of bwrap; PATH is never searched"),
+                )
+                .arg(
+                    Arg::new("systemd-run")
+                        .long("systemd-run")
+                        .value_name("PATH")
+                        .default_value(doctor::DEFAULT_SYSTEMD_RUN)
+                        .value_parser(absolute)
+                        .help("Absolute path of systemd-run"),
                 ),
         )
         .subcommand(
@@ -127,6 +161,15 @@ fn session_id() -> Arg {
         .help("Session UUIDv7")
 }
 
+fn absolute(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err("expected an absolute path".into())
+    }
+}
+
 fn model(value: &str) -> Result<ModelRef, String> {
     match value.split_once('/') {
         Some((provider, model)) if !provider.is_empty() && !model.is_empty() => Ok(ModelRef {
@@ -142,6 +185,7 @@ fn main() -> ExitCode {
     let matches = command.get_matches_mut();
     match matches.subcommand() {
         Some(("context", arguments)) => print("harness context", context(arguments)),
+        Some(("doctor", arguments)) => print("harness doctor", run_doctor(arguments)),
         Some(("journal", journal)) => match journal.subcommand() {
             Some(("inspect", arguments)) => print("harness journal inspect", inspect(arguments)),
             Some(("repair", arguments)) => print("harness journal repair", repair(arguments)),
@@ -297,6 +341,21 @@ fn repair(arguments: &ArgMatches) -> Result<String, String> {
         "requires_recovery": snapshot.requires_recovery(),
     }))
     .map_err(|error| error.to_string())
+}
+
+/// Probe the host and print the report.
+fn run_doctor(arguments: &ArgMatches) -> Result<String, String> {
+    let programs = doctor::Programs {
+        bwrap: arguments
+            .get_one::<PathBuf>("bwrap")
+            .expect("default")
+            .clone(),
+        systemd_run: arguments
+            .get_one::<PathBuf>("systemd-run")
+            .expect("default")
+            .clone(),
+    };
+    serde_json::to_string_pretty(&doctor::report(&programs)?).map_err(|error| error.to_string())
 }
 
 /// Build the report for the requested head and print it as pretty JSON.
