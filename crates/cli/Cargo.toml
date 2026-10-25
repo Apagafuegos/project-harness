@@ -11,6 +11,8 @@ clap.workspace = true
 harness-core = { path = "../core" }
 serde_json.workspace = true
 rustix.workspace = true
+
+[dev-dependencies]
 tempfile.workspace = true
 
 [lints]

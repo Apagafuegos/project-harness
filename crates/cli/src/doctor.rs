@@ -8,14 +8,17 @@
 
 use std::{
     ffi::OsString,
-    fs,
-    io::{BufRead, BufReader, Read},
-    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
+    fs::{self, DirBuilder},
+    io::{self, BufRead, BufReader, Read},
+    os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt, symlink},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rustix::{
@@ -70,10 +73,8 @@ pub struct Programs {
 
 /// Probe the host and return the report.
 pub fn report(programs: &Programs) -> Result<Value, String> {
-    let scratch = tempfile::Builder::new()
-        .prefix("harness-doctor-")
-        .tempdir()
-        .map_err(|error| format!("cannot create a scratch directory: {error}"))?;
+    let scratch =
+        Scratch::create().map_err(|error| format!("cannot create a scratch directory: {error}"))?;
     let openat2 = openat2_probe(scratch.path());
     let bubblewrap = bwrap_probe(&programs.bwrap, scratch.path());
     let cgroup = cgroup_probe(programs, bubblewrap["status"] == "available");
@@ -94,6 +95,51 @@ pub fn report(programs: &Programs) -> Result<Value, String> {
         "bubblewrap": bubblewrap,
         "cgroup": cgroup,
     }))
+}
+
+/// A private scratch directory under the system temporary directory,
+/// removed with its contents on drop.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Create a new directory with mode 0700. Creation fails rather than
+    /// reuse an existing path, and a collision retries with a new name.
+    fn create() -> io::Result<Self> {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir();
+        let mut builder = DirBuilder::new();
+        builder.mode(0o700);
+        for _ in 0..16 {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.subsec_nanos());
+            let name = format!(
+                "harness-doctor-{}-{nanos:09}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            let path = base.join(name);
+            match builder.create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "every candidate name was taken",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn read_trimmed(path: &str) -> Option<String> {
@@ -782,6 +828,21 @@ mod tests {
         let file = user_bus(None, temp.path(), geteuid().as_raw());
         assert_eq!(file.source, "none");
         assert!(file.reason.unwrap().contains("not a socket"));
+    }
+
+    #[test]
+    fn scratch_is_private_unique_and_removed_on_drop() {
+        let first = Scratch::create().unwrap();
+        let second = Scratch::create().unwrap();
+        assert_ne!(first.path(), second.path());
+        assert!(first.path().starts_with(std::env::temp_dir()));
+        let metadata = fs::symlink_metadata(first.path()).unwrap();
+        assert!(metadata.is_dir());
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        fs::write(first.path().join("file"), b"x").unwrap();
+        let path = first.path().to_owned();
+        drop(first);
+        assert!(!path.exists());
     }
 
     #[test]

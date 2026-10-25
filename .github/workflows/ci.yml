@@ -28,7 +28,8 @@ jobs:
     # profile (ADR 0008). Informational until the shell security suite exists:
     # it never fails the workflow. The profile changes the runner only.
     name: Host capabilities (harness doctor)
-    runs-on: ubuntu-latest
+    # Pinned: the AppArmor userns restriction is image-specific (ADR 0008).
+    runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
