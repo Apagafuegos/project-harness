@@ -239,6 +239,7 @@ scenarios!(
     context_rebuilds_identically_after_reopen,
     plain_turn_ends_in_stop,
     tool_calls_answered_unavailable_then_second_inference_stops,
+    every_response_records_the_projection_its_inference_was_sent,
     inference_limit_fails_the_turn with limited(3, 4096),
     cancel_during_inference_stream_finishes_first,
     cancel_during_inference_grace_timer_fires_first,
@@ -577,10 +578,102 @@ mod bodies {
             assert_eq!(result.status, ToolStatus::Denied);
             assert_eq!(result.invocation_id, None);
             assert_eq!(result.metadata.provenance, Provenance::Runtime);
+            assert_eq!(result.metadata.code.as_deref(), Some("tools_unavailable"));
             assert!(
                 matches!(&result.content[0], ContentBlock::Text { text } if text.starts_with("tools_unavailable"))
             );
         }
+    }
+
+    pub fn every_response_records_the_projection_its_inference_was_sent(d: &mut Driver) {
+        plain_turn(d, "stop", "done");
+        begin(d, "refuse");
+        finish(d, ProviderOutcome::Completed, Some(FinishReason::Refusal));
+        d.settle();
+        begin(d, "run long");
+        say(d, 0, "cut");
+        finish(
+            d,
+            ProviderOutcome::Completed,
+            Some(FinishReason::OutputLimit),
+        );
+        d.settle();
+        begin(d, "fail");
+        d.provider(ProviderEvent::Finished {
+            outcome: ProviderOutcome::Failed,
+            finish_reason: None,
+            error: Some(ModelError {
+                code: ModelErrorCode::ProviderFailure,
+                message: "down".into(),
+                provider_code: None,
+                retry_after_ms: None,
+            }),
+        });
+        d.settle();
+        begin(d, "user cancels");
+        say(d, 0, "partial");
+        d.cancel();
+        stop(d);
+        d.settle();
+        begin(d, "end early");
+        say(d, 0, "partial");
+        d.ended();
+        d.settle();
+        let request = begin(d, "use tools");
+        two_calls(d);
+        finish(d, ProviderOutcome::Completed, Some(FinishReason::ToolCalls));
+        d.settle();
+        started(d);
+        stop(d);
+        d.settle();
+        let tools = turn_of(d, request);
+
+        let (built, started) = contexts(d);
+        let snapshot = d.runtime.snapshot().clone();
+        let mut outcomes = BTreeSet::new();
+        let mut in_tool_turn = Vec::new();
+        for (_, stored) in snapshot.entries() {
+            let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                continue;
+            };
+            outcomes.insert(format!(
+                "{:?}/{:?}",
+                response.outcome, response.finish_reason
+            ));
+            // The inference started at the response's parent, and its report
+            // and its stream carried this fingerprint.
+            let head = stored.entry.parent_id.clone().unwrap();
+            let fingerprint = response.projection_fingerprint.clone();
+            let [(_, sent, _)] = &started.iter().filter(|s| s.0 == head).collect::<Vec<_>>()[..]
+            else {
+                panic!("one inference at {head}")
+            };
+            assert_eq!(fingerprint.as_ref(), Some(sent));
+            assert!(built.iter().any(|b| b.0 == head && b.1 == *sent));
+            let report = d.runtime.inspect_context(Some(head), None).unwrap();
+            assert_eq!(fingerprint, Some(report.fingerprint));
+            if stored.entry.turn_id.as_ref() == Some(&tools) {
+                in_tool_turn.push(fingerprint);
+            }
+        }
+        assert_eq!(
+            outcomes,
+            [
+                "Completed/Some(Stop)",
+                "Completed/Some(Refusal)",
+                "Completed/Some(OutputLimit)",
+                "Completed/Some(ToolCalls)",
+                "Failed/None",
+                "Cancelled/None",
+                "Interrupted/None",
+            ]
+            .map(String::from)
+            .into()
+        );
+        let [first, second] = &in_tool_turn[..] else {
+            panic!("two inferences in the tool turn")
+        };
+        assert_ne!(first, second, "each inference has its own projection");
     }
 
     pub fn inference_limit_fails_the_turn(d: &mut Driver) {
@@ -753,6 +846,9 @@ mod bodies {
                 "result(cancelled) result(cancelled) processing>cancelling finished(cancelled)",
             ]
         );
+        for result in results(d) {
+            assert_eq!(result.metadata.code.as_deref(), Some("cancelled"));
+        }
         assert_eq!(
             outcome(d, &turn_of(d, request)),
             Some(TurnOutcome::Cancelled)

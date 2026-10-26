@@ -161,6 +161,7 @@ pub(super) fn authorize(
             plan_digest: plan.sha256,
             backend: ExecutionBackend::TrustedFs,
             timeout_ms: 1_000,
+            effects: EffectSet::new([EffectClass::Read]),
         }));
         events.push(state(
             &turn,
@@ -250,6 +251,11 @@ recovery!(
 /// The interrupted-execution fixture: a completed `read` proposal with an
 /// execution intent and no result.
 fn fixture() -> Driver {
+    fixture_prefix(usize::MAX)
+}
+
+/// The first `records` records of the v1 interrupted-execution fixture.
+fn fixture_prefix(records: usize) -> Driver {
     let examples =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rfcs/001/examples");
     let temp = tempfile::tempdir().unwrap();
@@ -258,7 +264,13 @@ fn fixture() -> Driver {
         root.put_artifact(&std::fs::read(entry.unwrap().path()).unwrap())
             .unwrap();
     }
-    let journal = std::fs::read(examples.join("interrupted-execution.jsonl")).unwrap();
+    let journal: Vec<u8> = std::fs::read(examples.join("interrupted-execution.jsonl"))
+        .unwrap()
+        .split_inclusive(|b| *b == b'\n')
+        .take(records)
+        .flatten()
+        .copied()
+        .collect();
     let session: SessionId = "019a0000-0000-7000-8000-000000000002".parse().unwrap();
     {
         use std::io::Write;
@@ -278,6 +290,76 @@ fn fixture() -> Driver {
         },
     );
     Driver::open_existing(temp, root, session, config)
+}
+
+/// The version of every record in the driver's journal, in order.
+fn versions(d: &Driver) -> Vec<u64> {
+    let path = d
+        .root
+        .path()
+        .join("sessions")
+        .join(format!("{}.jsonl", d.session));
+    std::fs::read(path)
+        .unwrap()
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_slice::<serde_json::Value>(line).unwrap()["record"]["version"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn recovery_over_a_v1_turn_answers_its_calls_as_v2() {
+    // The v1 prefix ends in `processing`: the proposal, and no intent.
+    scenario_from(
+        || fixture_prefix(4),
+        |d| {
+            d.settle();
+            assert!(idle(d));
+            assert_eq!(versions(d), [1, 1, 1, 1, 2]);
+            let snapshot = d.runtime.snapshot();
+            let ancestry = snapshot.ancestry(snapshot.head()).unwrap();
+            let [.., proposal, answer] = &ancestry[..] else {
+                panic!("a proposal and its answer")
+            };
+            let (EntryPayload::AssistantResponse(response), EntryPayload::ToolResult(result)) =
+                (&proposal.entry.payload, &answer.entry.payload)
+            else {
+                panic!("a v1 response answered by a v2 result")
+            };
+            assert_eq!(response.projection_fingerprint, None, "v1 has none");
+            let result = &result.result;
+            assert_eq!(result.call.response_entry_id, proposal.entry.id);
+            assert!(response.content.iter().any(|block| matches!(block,
+                ContentBlock::ToolCall { call_id, .. } if *call_id == result.call.call_id)));
+            assert_eq!(result.status, ToolStatus::Cancelled);
+            assert_eq!(result.metadata.code.as_deref(), Some("process_restart"));
+        },
+    );
+}
+
+#[test]
+fn recovery_over_a_v1_intent_records_v2_and_unknown_effects() {
+    scenario_from(fixture, |d| {
+        d.settle();
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 2], "execution_uncertain is v2");
+        let [invocation] = &d.runtime.snapshot().unresolved_invocations()[..] else {
+            panic!("one invocation waits")
+        };
+        assert_eq!(invocation.intent.effects, None, "recorded before v2");
+        let request = resolve(d, observed(ToolStatus::Succeeded, "read"));
+        d.accepted(request);
+        assert!(idle(d));
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 2, 2]);
+        let [result] = &results(d)[..] else {
+            panic!("one result")
+        };
+        assert_eq!(result.metadata.provenance, Provenance::UserObserved);
+        assert_eq!(result.metadata.code, None);
+    });
 }
 
 #[test]
@@ -405,6 +487,7 @@ pub mod bodies {
                 panic!("text result")
             };
             assert!(text.starts_with("process_restart"), "{text}");
+            assert_eq!(result.metadata.code.as_deref(), Some("process_restart"));
         }
         assert_eq!(recovered(d), [(turn, calls, "process_restart".into())]);
     }
@@ -453,6 +536,7 @@ pub mod bodies {
                                 output_truncated: false,
                                 provenance: Provenance::Runtime,
                                 artifacts: Vec::new(),
+                                code: Some("policy_denied".into()),
                             },
                         },
                     }),
@@ -588,6 +672,18 @@ pub mod bodies {
         assert_eq!(
             journal(d).last().unwrap(),
             &format!("result(succeeded) result(cancelled) recovery_resolved(observed) {CLOSE}")
+        );
+        // The user's statement has no code; the call it left unstarted does.
+        let codes: Vec<_> = results(d)
+            .into_iter()
+            .map(|r| (r.metadata.provenance, r.metadata.code))
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                (Provenance::UserObserved, None),
+                (Provenance::Runtime, Some("process_restart".into())),
+            ]
         );
         assert_eq!(
             recovered(d),

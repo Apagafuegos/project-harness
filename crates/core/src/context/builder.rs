@@ -707,11 +707,15 @@ impl Walk<'_> {
         for block in &result.result.content {
             tokens = tokens.saturating_add(self.block(block, Category::ToolResults)?.0);
         }
+        // The model sees the text, which leads with any code; dropping the
+        // v2 code keeps the item equal to what the fingerprint hashes.
+        let mut projected = result.result.clone();
+        projected.metadata.code = None;
         self.push(
             ContextItem::ToolResult {
                 entry_id: id.clone(),
                 provenance: result.result.metadata.provenance,
-                result: result.result.clone(),
+                result: projected,
             },
             IncludedItem {
                 entry_id: Some(id.clone()),

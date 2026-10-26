@@ -9,9 +9,9 @@ use crate::session::{
     AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, Entry, EntryId,
     EntryPayload, ExecutionUncertain, HeadChange, HeadReason, InvocationId, JournalEvent,
     MAX_COUNTER, ModelChanged, ModelError, ModelErrorCode, ModelRef, Portability, Provenance,
-    RecoveryResolved, Resolution, ResponseOutcome, RuntimeState, SessionSnapshot, StateChanged,
-    ToolMetadata, ToolResult, ToolResultEntry, ToolStatus, TurnFinished, TurnId, TurnOutcome,
-    TurnStarted, UnresolvedInvocation, UserMessage, codec, store,
+    RecoveryResolved, Resolution, ResponseOutcome, ResultCode, RuntimeState, SessionSnapshot,
+    StateChanged, ToolMetadata, ToolResult, ToolResultEntry, ToolStatus, TurnFinished, TurnId,
+    TurnOutcome, TurnStarted, UnresolvedInvocation, UserMessage, codec, store,
 };
 
 use super::{
@@ -29,7 +29,7 @@ const TOOLS_UNAVAILABLE: &str = "tools_unavailable: this runtime executes no too
 /// Text of the runtime result answering each call a cancellation left unstarted.
 const NOT_STARTED: &str = "cancelled: the turn was cancelled before this call started";
 /// Code of every turn recovery closes, and of the uncertainty it records.
-const PROCESS_RESTART: &str = "process_restart";
+const PROCESS_RESTART: &str = ResultCode::ProcessRestart.as_str();
 /// Text of the runtime result answering each call a restart left unstarted.
 const RESTART_NOT_STARTED: &str = "process_restart: the process stopped before this call started";
 /// Reason recorded with `execution_uncertain` for an intent without a result.
@@ -124,6 +124,9 @@ struct CancelRequest {
 #[derive(Debug)]
 struct Inference {
     id: InferenceId,
+    /// Fingerprint of the projection this inference was sent, recorded on
+    /// its response whatever the outcome.
+    fingerprint: Digest,
     started: bool,
     bytes: usize,
     status: Stream,
@@ -725,7 +728,13 @@ impl Runtime {
                     pending
                         .iter()
                         .map(|call| {
-                            runtime_result(&turn, call, ToolStatus::Cancelled, RESTART_NOT_STARTED)
+                            runtime_result(
+                                &turn,
+                                call,
+                                ToolStatus::Cancelled,
+                                ResultCode::ProcessRestart,
+                                RESTART_NOT_STARTED,
+                            )
                         })
                         .collect(),
                     env,
@@ -864,7 +873,7 @@ impl Runtime {
                     invocation_id: Some(invocation_id.clone()),
                     status,
                     content: vec![ContentBlock::Text { text }],
-                    metadata: metadata(provenance),
+                    metadata: metadata(provenance, None),
                 },
             }),
         )];
@@ -878,7 +887,13 @@ impl Runtime {
                 return Some(Err(Rejection::Invalid("invocation_not_next")));
             }
             payloads.extend(rest.iter().map(|call| {
-                runtime_result(&turn, call, ToolStatus::Cancelled, RESTART_NOT_STARTED)
+                runtime_result(
+                    &turn,
+                    call,
+                    ToolStatus::Cancelled,
+                    ResultCode::ProcessRestart,
+                    RESTART_NOT_STARTED,
+                )
             }));
         }
         let entries = chain(&snapshot, payloads, env);
@@ -1524,6 +1539,7 @@ impl Runtime {
         self.inferences += 1;
         self.inference = Some(Inference {
             id: inference,
+            fingerprint: projection.fingerprint.clone(),
             started: false,
             bytes: 0,
             status: Stream::Open,
@@ -1569,11 +1585,13 @@ impl Runtime {
     fn record_response(&mut self, snapshot: &SessionSnapshot, turn: TurnId, env: &mut dyn Env) {
         let Some(Inference {
             status: Stream::Ended(end),
+            fingerprint,
             ..
         }) = &self.inference
         else {
             return self.fault(FaultCause::Internal("response_without_end"));
         };
+        let fingerprint = fingerprint.clone();
         let durable = snapshot.state();
         // A requested cancellation records the partial response as cancelled,
         // whatever the stream did after `CancelInference`.
@@ -1602,6 +1620,7 @@ impl Runtime {
                     usage: partial.usage,
                     continuation: None,
                     error: recorded.error,
+                    projection_fingerprint: Some(fingerprint),
                 }),
             )],
             env,
@@ -1647,14 +1666,18 @@ impl Runtime {
             Ok(pending) if !pending.is_empty() => pending.to_vec(),
             _ => return self.fault(FaultCause::Internal("processing_without_calls")),
         };
-        let (status, text) = if cancel {
-            (ToolStatus::Cancelled, NOT_STARTED)
+        let (status, code, text) = if cancel {
+            (ToolStatus::Cancelled, ResultCode::Cancelled, NOT_STARTED)
         } else {
-            (ToolStatus::Denied, TOOLS_UNAVAILABLE)
+            (
+                ToolStatus::Denied,
+                ResultCode::ToolsUnavailable,
+                TOOLS_UNAVAILABLE,
+            )
         };
         let results = pending
             .iter()
-            .map(|call| runtime_result(&turn, call, status, text))
+            .map(|call| runtime_result(&turn, call, status, code, text))
             .collect();
         let entries = chain(snapshot, results, env);
         use RuntimeState::*;
@@ -1864,22 +1887,24 @@ fn idle_flight() -> InFlight {
     }
 }
 
-fn metadata(provenance: Provenance) -> ToolMetadata {
+fn metadata(provenance: Provenance, code: Option<ResultCode>) -> ToolMetadata {
     ToolMetadata {
         exit_code: None,
         duration_ms: None,
         output_truncated: false,
         provenance,
         artifacts: Vec::new(),
+        code: code.map(|code| code.as_str().to_owned()),
     }
 }
 
 /// A result the runtime records for a call it never started: no invocation,
-/// `runtime` provenance, and a text that leads with its code.
+/// `runtime` provenance, its code, and a text that leads with the same code.
 fn runtime_result(
     turn: &TurnId,
     call: &CallRef,
     status: ToolStatus,
+    code: ResultCode,
     text: &str,
 ) -> (Option<TurnId>, EntryPayload) {
     (
@@ -1890,7 +1915,7 @@ fn runtime_result(
                 invocation_id: None,
                 status,
                 content: vec![ContentBlock::Text { text: text.into() }],
-                metadata: metadata(Provenance::Runtime),
+                metadata: metadata(Provenance::Runtime, Some(code)),
             },
         }),
     )

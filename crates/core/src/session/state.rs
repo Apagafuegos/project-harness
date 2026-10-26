@@ -40,7 +40,8 @@ pub struct TurnInfo {
 /// An execution intent that has no durable result; opening never retries it.
 #[derive(Clone, Debug)]
 pub struct UnresolvedInvocation {
-    /// Persisted intent and its binding.
+    /// Persisted intent and its binding. Its `effects` are `None` when it was
+    /// recorded before v2: the effects are unknown, never assumed read-only.
     pub intent: ExecutionIntent,
     /// Sequence at which dispatch first became possible.
     pub sequence: u64,
@@ -208,6 +209,8 @@ pub(crate) struct State {
     pub header: SessionHeader,
     pub sequence: u64,
     pub checksum: Digest,
+    /// Version of the last accepted record; versions never decrease.
+    pub version: u32,
     pub head: Option<EntryId>,
     pub configuration: ArtifactRef,
     pub policy_revision: String,
@@ -260,6 +263,7 @@ impl State {
             header: header.clone(),
             sequence: 0,
             checksum,
+            version: record.version,
             head: None,
             configuration: header.configuration.clone(),
             policy_revision: header.policy_revision.clone(),
@@ -386,6 +390,7 @@ impl State {
                 && record.previous_checksum.as_ref() == Some(&self.checksum),
             "broken_record_chain",
         )?;
+        require(record.version >= self.version, "version_regression")?;
         self.unique(record.record_id.as_str())?;
         let RecordPayload::Commit(commit) = &record.payload else {
             return Err(StoreError::Invalid("repeated_header"));
@@ -461,7 +466,7 @@ impl State {
             if let Some(parent) = &entry.parent_id {
                 require(self.entries.contains_key(parent), "unknown_parent")?;
             }
-            self.entry(entry, record.seq, &starts)?;
+            self.entry(entry, record, &starts)?;
             let facts = step(self.facts(entry.parent_id.as_ref())?, entry)?;
             self.branch.insert(entry.id.clone(), facts);
             self.entries.insert(
@@ -500,6 +505,7 @@ impl State {
         }
         self.sequence = record.seq;
         self.checksum = checksum.clone();
+        self.version = record.version;
         if let (Some(id), Some(fingerprint)) = (&commit.command_id, &commit.command_fingerprint) {
             self.commands.insert(
                 id.clone(),
@@ -517,7 +523,8 @@ impl State {
         Ok(())
     }
 
-    fn entry(&mut self, entry: &Entry, sequence: u64, starts: &[&TurnStarted]) -> Result<()> {
+    fn entry(&mut self, entry: &Entry, record: &Record, starts: &[&TurnStarted]) -> Result<()> {
+        let sequence = record.seq;
         match &entry.payload {
             EntryPayload::UserMessage(message) => {
                 require(
@@ -612,6 +619,9 @@ impl State {
                     "orphan_duplicate_or_reordered_result",
                 )?;
                 valid_content(&result.content)?;
+                if record.version >= 2 {
+                    result_code(result)?;
+                }
                 let recovering = matches!(
                     result.metadata.provenance,
                     Provenance::UserObserved | Provenance::UserAcknowledgedUnknown
@@ -854,6 +864,10 @@ impl State {
                 );
             }
             JournalEvent::ExecutionIntent(intent) => {
+                // The v2 schema requires effects; a v1 intent has none.
+                if let Some(effects) = &intent.effects {
+                    valid_effects(intent.backend, effects)?;
+                }
                 self.active(&intent.turn_id)?;
                 require(
                     self.runtime_state == RuntimeState::Authorizing && !self.has_unresolved(),
@@ -1171,6 +1185,39 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
             }))
         }
     }
+}
+
+/// A v2 result's code: executor and runtime results carry one exactly when
+/// they did not succeed; a user's result never does, its provenance says why.
+fn result_code(result: &ToolResult) -> Result<()> {
+    let code = result.metadata.code.is_some();
+    match result.metadata.provenance {
+        Provenance::Executor | Provenance::Runtime => {
+            if result.status == ToolStatus::Succeeded {
+                require(!code, "code_on_success")
+            } else {
+                require(code, "code_required")
+            }
+        }
+        Provenance::UserObserved | Provenance::UserAcknowledgedUnknown => {
+            require(!code, "code_on_user_result")
+        }
+    }
+}
+
+/// One canonical byte form per set, and only effects the backend can have.
+/// Whether policy allows them is not a storage question.
+fn valid_effects(backend: ExecutionBackend, effects: &EffectSet) -> Result<()> {
+    require(effects.is_canonical(), "effects_not_canonical")?;
+    require(
+        match backend {
+            ExecutionBackend::TrustedFs => effects.as_slice().iter().all(|effect| {
+                matches!(effect, EffectClass::Read | EffectClass::FilesystemMutation)
+            }),
+            ExecutionBackend::Bubblewrap => effects.contains(EffectClass::Process),
+        },
+        "effects_backend_mismatch",
+    )
 }
 
 fn valid_content(content: &[ContentBlock]) -> Result<()> {

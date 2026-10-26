@@ -8,6 +8,8 @@ use std::{
     sync::Arc,
 };
 
+mod versions;
+
 fn at() -> Timestamp {
     "2026-10-17T12:00:00Z".parse().unwrap()
 }
@@ -260,6 +262,7 @@ impl ToolTurns {
                             plan_digest: self.plan.sha256.clone(),
                             backend: ExecutionBackend::TrustedFs,
                             timeout_ms: 30_000,
+                            effects: EffectSet::new([EffectClass::Read]),
                         }),
                     ],
                 )
@@ -556,12 +559,27 @@ fn j01_all_specification_fixtures_round_trip_and_replay() {
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
         {
-            let (record, _) = codec::decode(line).unwrap();
-            let (encoded, _) = codec::encode(&record).unwrap();
-            assert_eq!(
-                codec::decode(&encoded[..encoded.len() - 1]).unwrap().0,
-                record
-            );
+            let (mut record, _) = codec::decode(line).unwrap();
+            assert_eq!(record.version, 1, "{name}");
+            assert!(matches!(
+                codec::encode(&record),
+                Err(StoreError::Invalid("write_version"))
+            ));
+            // Rewritten as v2, a record round-trips unless it holds an
+            // intent: v1 intents lack the effects v2 requires.
+            record.version = CURRENT_VERSION;
+            let intent = matches!(&record.payload, RecordPayload::Commit(commit)
+                if commit.events.iter().any(|e| matches!(e, JournalEvent::ExecutionIntent(_))));
+            match codec::encode(&record) {
+                Ok((encoded, _)) => assert_eq!(
+                    codec::decode(&encoded[..encoded.len() - 1]).unwrap().0,
+                    record
+                ),
+                Err(error) => {
+                    assert!(intent, "{name}: {error}");
+                    assert!(matches!(error, StoreError::Invalid("schema_violation")));
+                }
+            }
         }
         let inspection = JournalStore::inspect(&root, &id).unwrap();
         assert_eq!(
@@ -573,6 +591,10 @@ fn j01_all_specification_fixtures_round_trip_and_replay() {
         assert_eq!(
             snapshot.sequence() as usize + 1,
             records(&source(name)).len()
+        );
+        assert_eq!(
+            inspection.versions,
+            [(1, records(&source(name)).len() as u64)].into()
         );
         assert_eq!(
             snapshot.requires_recovery(),
@@ -668,7 +690,7 @@ fn j01_invalid_complete_records_fail_closed_without_losing_valid_prefix() {
                     json!("reasoning_summary")
             }),
         ),
-        ("version", Box::new(|r| r[8]["version"] = json!(2))),
+        ("version", Box::new(|r| r[8]["version"] = json!(3))),
         ("sequence", Box::new(|r| r[8]["seq"] = json!(100))),
         ("unknown_field", Box::new(|r| r[8]["extra"] = json!(true))),
         (
@@ -1316,6 +1338,7 @@ fn recovery_blocks_navigation_and_never_reexecutes_uncertain_intents() {
                         output_truncated: false,
                         provenance: Provenance::UserAcknowledgedUnknown,
                         artifacts: vec![],
+                        code: None,
                     },
                 },
             }),
@@ -1372,6 +1395,7 @@ fn response_commit(
                 usage: None,
                 continuation: None,
                 error: None,
+                projection_fingerprint: None,
             }),
         }],
         events: vec![JournalEvent::StateChanged(StateChanged {
@@ -1465,12 +1489,20 @@ fn tool_result(
                         output_truncated: false,
                         provenance,
                         artifacts: vec![],
+                        code: code_for(status, provenance),
                     },
                 },
             }),
         }],
         events: vec![],
     }
+}
+/// The code v2 storage requires: one on an unsuccessful executor or runtime
+/// result, none otherwise.
+fn code_for(status: ToolStatus, provenance: Provenance) -> Option<String> {
+    (matches!(provenance, Provenance::Executor | Provenance::Runtime)
+        && status != ToolStatus::Succeeded)
+        .then(|| "test_failure".into())
 }
 fn runtime_result(snapshot: &SessionSnapshot, call: CallRef) -> Commit {
     tool_result(
@@ -1920,6 +1952,7 @@ fn one_inference_cannot_commit_two_response_snapshots() {
                     usage: None,
                     continuation: None,
                     error: None,
+                    projection_fingerprint: None,
                 }),
             }],
             events: vec![],
@@ -2040,6 +2073,12 @@ fn append_fixture(name: &str) -> (tempfile::TempDir, Arc<DataRoot>, JournalStore
             RecordPayload::Commit(mut commit) => {
                 let store = store.as_mut().unwrap();
                 let snapshot = store.snapshot();
+                // Written again as v2, the fixture's read intent declares its effect.
+                for event in &mut commit.events {
+                    if let JournalEvent::ExecutionIntent(intent) = event {
+                        intent.effects = EffectSet::new([EffectClass::Read]);
+                    }
+                }
                 for entry in &mut commit.entries {
                     if let EntryPayload::Compaction(compaction) = &mut entry.payload {
                         let references = |ids: &[EntryId]| -> Vec<Value> {

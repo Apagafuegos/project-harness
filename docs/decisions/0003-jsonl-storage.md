@@ -104,3 +104,46 @@ The append-only exception applies only to uncommitted suffix bytes. Complete
 corruption requires a separate preserved-source salvage/export workflow, which
 is not implemented by ordinary opening or repair. No workspace tool or process
 sandbox is implemented or implied by private storage filesystem operations.
+
+## Update 2026-10-26: per-record versions (Milestone 3)
+
+Schema v2 adds what tools need: a machine-readable `code` on tool results,
+the declared `effects` of an execution intent, and the projection
+`fingerprint` of each assistant response. The format changes as follows.
+
+- **Versions are per record.** Readers support versions 1 and 2. Each record
+  is validated against its own version's bundled schema, and the two schema
+  files share no `$ref`, so each version is read alone. Writers write only
+  the current version, 2. A v1 session continues as a v1 prefix and a v2
+  suffix on one checksum chain. A version lower than its predecessor's is
+  corrupt (`version_regression`); any other version is `unsupported_version`.
+  The v1 schema's bytes are pinned by a test.
+- **No migration.** Opening never rewrites a v1 record, as RFC-001 §5.1
+  requires. The checksum chain, framing, deduplication and tail repair are
+  unchanged. A repair commit is an ordinary v2 commit.
+- **One shape per version.** As v1 spells every optional field, each new
+  field is a required key whose value may be `null`. The Rust types serve
+  both versions: the new fields are `Option`s that read as `None` from v1 and
+  always serialize. They have no `skip_serializing_if`.
+- **`code` is a pattern, not an enum.** The schema accepts any
+  `^[a-z][a-z0-9_]{0,63}$`, so adding a code never needs schema v3, and readers
+  keep codes they do not know. The set this build writes is closed in Rust by
+  `ResultCode`: `tools_unavailable` (calls answered while tools are
+  unavailable), `cancelled` (calls a cancelled turn left unstarted) and
+  `process_restart` (calls a restart left unstarted). Executor and runtime
+  results carry a code exactly when they did not succeed; a user's result
+  never does, because its provenance already says why. Result text keeps its
+  code prefix.
+- **`effects` have one byte form.** Storage requires the contract's order
+  and the backend's possible effects: `trusted_fs` only `read` and
+  `filesystem_mutation`, and `bubblewrap` always `process`. Whether policy
+  allows an effect is not a storage rule. Storage cannot compare `effects`
+  with the plan artifact, whose contents it does not read; the tool pipeline
+  must build both from one value. `None` means the intent predates v2 and its
+  effects are unknown, never read-only.
+- **The projection does not change.** The context projection leaves out a
+  result's `code`, both from its items and from the hashed bytes, so a v1 and
+  a v2 copy of the same entries give the same report and fingerprint, and
+  `PROJECTION_VERSION` stays 3. The model sees the code through the text
+  prefix. The runtime records on every response, whatever its outcome, the
+  fingerprint of the projection that inference was sent.

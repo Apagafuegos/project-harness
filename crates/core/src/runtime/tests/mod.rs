@@ -706,7 +706,9 @@ fn same(a: &SessionSnapshot, b: &SessionSnapshot) -> bool {
 /// and crashes, because `finish` lets recovery close what a run left open.
 /// Only recovery interrupts a turn, and the journal holds nothing invented:
 /// every assistant response came from a stream the core started, no result
-/// claims an executor, and each uncertainty is recorded once.
+/// claims an executor, and each uncertainty is recorded once. Each response
+/// records the fingerprint its stream was sent, and each result the code
+/// its text leads with.
 fn check_turns(finished: &Finished) {
     let snapshot = &finished.reopened;
     assert!(!snapshot.requires_recovery());
@@ -732,12 +734,16 @@ fn check_turns(finished: &Finished) {
     for (turn, count) in &outcomes {
         assert_eq!(*count, 1, "turn {turn} has {count} TurnFinished");
     }
-    let streamed: BTreeSet<_> = finished
+    let streamed: BTreeMap<_, _> = finished
         .segments
         .iter()
         .flat_map(|segment| &segment.effects)
         .filter_map(|effect| match effect {
-            Effect::StartInference { response_id, .. } => Some(response_id.clone()),
+            Effect::StartInference {
+                response_id,
+                fingerprint,
+                ..
+            } => Some((response_id.clone(), fingerprint.clone())),
             _ => None,
         })
         .collect();
@@ -748,12 +754,14 @@ fn check_turns(finished: &Finished) {
             continue;
         }
         match &stored.entry.payload {
-            EntryPayload::AssistantResponse(r) => assert!(
-                streamed.contains(&r.response_id),
-                "an assistant response no stream produced"
-            ),
+            EntryPayload::AssistantResponse(r) => {
+                let sent = streamed.get(&r.response_id);
+                assert!(sent.is_some(), "an assistant response no stream produced");
+                assert_eq!(r.projection_fingerprint.as_ref(), sent, "{:?}", r.outcome);
+            }
             EntryPayload::ToolResult(r) => {
-                assert_ne!(r.result.metadata.provenance, Provenance::Executor)
+                assert_ne!(r.result.metadata.provenance, Provenance::Executor);
+                check_code(&r.result);
             }
             _ => {}
         }
@@ -772,6 +780,34 @@ fn check_turns(finished: &Finished) {
     assert_eq!(unique.len(), announced.len(), "a turn finished twice");
     for turn in &announced {
         assert_eq!(outcomes.get(turn), Some(&1));
+    }
+}
+
+/// A result the runtime wrote: a user's result has no code, and any other
+/// result has the code its text leads with. Tests inject other texts.
+fn check_code(result: &ToolResult) {
+    let code = result.metadata.code.as_deref();
+    let [ContentBlock::Text { text }] = &result.content[..] else {
+        panic!("a runtime result is one text block")
+    };
+    let prefix = text.split_once(':').map(|(prefix, _)| prefix);
+    match result.metadata.provenance {
+        Provenance::UserObserved | Provenance::UserAcknowledgedUnknown => {
+            assert_eq!(code, None, "{text}")
+        }
+        _ if result.status == ToolStatus::Succeeded => assert_eq!(code, None, "{text}"),
+        _ => {
+            let known = [
+                ResultCode::ToolsUnavailable,
+                ResultCode::Cancelled,
+                ResultCode::ProcessRestart,
+            ]
+            .map(ResultCode::as_str);
+            assert!(code.is_some(), "{text}");
+            if prefix.is_some_and(|p| known.contains(&p)) {
+                assert_eq!(code, prefix, "{text}");
+            }
+        }
     }
 }
 

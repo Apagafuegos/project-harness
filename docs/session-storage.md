@@ -88,6 +88,52 @@ before every append. User entries require a matching `turn_started` and
 complete tool groups require ordered associated results. Persisted audit types
 are available now so the later runtime can use the same representation.
 
+## Record versions
+
+Each record carries its own `version`. Readers accept versions 1 and 2
+(`SUPPORTED_VERSIONS`) and validate every record against its own version's
+bundled schema. Writers write only version 2 (`CURRENT_VERSION`), including
+when they append to a session created under v1. A v1 journal therefore
+continues as a v1 prefix and a v2 suffix, one unbroken checksum chain; the
+tail-repair commit is an ordinary v2 commit. Opening never rewrites a record.
+
+| Rule | Error code |
+| --- | --- |
+| `version` is not the integer 1 or 2 (`0`, `3`, `"2"`, `2.0`, missing) | `unsupported_version` |
+| A record's shape is not that of its own version | `schema_violation` |
+| A record's version is lower than the previous record's | `version_regression` |
+| A writer is handed a record whose version is not `CURRENT_VERSION` | `write_version` |
+
+v2 adds three fields to v1, each a required key in v2 and absent in v1:
+
+| Field | v2 value | Read from v1 as |
+| --- | --- | --- |
+| `tool_metadata.code` | `null` or a code matching `^[a-z][a-z0-9_]{0,63}$` | `None` |
+| `execution_intent.effects` | a nonempty set from `read`, `filesystem_mutation`, `process`, `network`, `external_side_effect` | `None`: effects unknown |
+| `assistant_response.projection_fingerprint` | `null` or the SHA-256 of the context projection the inference was sent | `None` |
+
+The Rust types serve both versions: the fields are `Option`s that read as
+`None` from v1 bytes and always serialize. Storage checks these rules on
+v2 records:
+
+| Rule | Error code |
+| --- | --- |
+| An executor or runtime result that succeeded carries a code | `code_on_success` |
+| An executor or runtime result that did not succeed has no code | `code_required` |
+| A `user_observed` or `user_acknowledged_unknown` result carries a code | `code_on_user_result` |
+| `effects` are not in the order listed above, so one set has two byte forms | `effects_not_canonical` |
+| A `trusted_fs` intent declares more than `read` and `filesystem_mutation`, or a `bubblewrap` intent lacks `process` | `effects_backend_mismatch` |
+
+The schema accepts any code matching the pattern, so readers keep codes they do
+not know. `ResultCode` names the ones this build writes: `tools_unavailable`,
+`cancelled` and `process_restart`. An intent's `effects` of `None` mean it was
+recorded before v2; it must never be treated as read-only. Whether policy
+allows an effect is not a storage rule, and storage does not compare `effects`
+with the plan artifact it does not read. The context projection leaves out
+`code` and the fingerprint, so a v1 and a v2 copy of the same entries project
+identically. A v1 record carrying a v2 field, or a v2 record missing one, is a
+`schema_violation`.
+
 ## Durability and recovery
 
 The API blocks through file/directory synchronization. The async runtime owns
@@ -143,7 +189,8 @@ cargo run --locked -p harness -- journal repair <data-root> <session-id> \
 ```
 
 `journal inspect` prints `JournalStore::inspect` as JSON: `file_bytes`,
-`valid_bytes`, the whole-file `fingerprint`, the first `diagnostic` (offset,
+`valid_bytes`, the whole-file `fingerprint`, the count of valid records per
+format version (`versions`, such as `{"1": 812, "2": 40}`), the first `diagnostic` (offset,
 kind such as `torn_tail` or `corrupt`, and code), whether it is `repairable`
 (a torn tail after a valid header), the `quarantine_bytes` repair would move,
 and the `valid_prefix`: sequence, head, state, active turn, whether it requires
@@ -162,7 +209,7 @@ same flow is `PersistError::TornTail` and `SessionHandle::repair_tail` (see
 
 ## Validation and limits
 
-The bundled v1 schema is used locally with network resolution disabled. Required
+The bundled schemas are used locally with network resolution disabled. Required
 nullable fields, unknown variants/fields, UUIDv7 format, UTC timestamps and safe
 integer bounds are checked. Every object rejects duplicate keys, including tool
 arguments. Checksums cover the original raw record bytes, never reserialized JSON.

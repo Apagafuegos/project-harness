@@ -18,8 +18,9 @@ implementation. Implemented storage behavior and remaining scope are distinguish
 in decision 0003 and the storage usage guide.
 
 The Rust shapes below specify ownership and behavior. Serialization is defined
-by the accompanying [JSON Schema](001/schema/session-v1.schema.json) and the
-semantic rules in this RFC. A schema-valid record is not necessarily a valid
+by the accompanying JSON Schemas, one per record version
+([v1](001/schema/session-v1.schema.json), [v2](001/schema/session-v2.schema.json)),
+and the semantic rules in this RFC. A schema-valid record is not necessarily a valid
 session: ancestry, state transitions, authorization, and call/result associations
 also require semantic validation.
 
@@ -238,7 +239,10 @@ never carries a stale provider continuation into the next request.
 `ToolDefinition` has name, description, JSON Schema, and a declared effect set:
 `read`, `filesystem_mutation`, `process`, `network`, or `external_side_effect`.
 The registry, not model arguments, selects the trusted implementation and
-backend. Reserved built-in names cannot be replaced within a running session.
+backend. From record version 2, each `execution_intent` records its plan's
+effect set in that canonical order, and each tool result carries a
+machine-readable `code`, `null` exactly when an executor or runtime result
+succeeded or a user supplied the result. Reserved built-in names cannot be replaced within a running session.
 
 The initial argument objects reject unknown keys:
 
@@ -427,7 +431,11 @@ duplicate keys at all depths and verify byte checksums before semantic replay.
 Every record carries the previous record's SHA-256 value (null only at seq 0).
 This detects accidental alteration, not a malicious writer able to recompute hashes.
 
-All records carry `version: 1`, monotonic contiguous `seq` starting at zero,
+Every record carries its own `version`. Readers support versions 1 and 2 and
+validate each record against that version's schema; writers write the latest
+version, 2, including when appending to a session created under version 1.
+Versions never decrease within a journal, and an unknown version fails closed.
+Records also carry monotonic contiguous `seq` starting at zero,
 unique record identity, immutable session identity, and a timestamp. The first
 record is `session_created`; every later record is a `commit`. Maximum physical
 line size is 8 MiB. Reject oversized input before unbounded allocation. Store

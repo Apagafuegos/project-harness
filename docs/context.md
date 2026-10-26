@@ -94,6 +94,11 @@ Notes:
   `result.metadata.provenance`; the top-level field makes it explicit, and a
   check rejects a mismatch. How each provider labels it is left to the
   Milestone 4 adapters.
+- **Result codes.** A `tool_result` item leaves out the stored v2
+  `metadata.code`, in the item and in the hashed bytes. The model reads the
+  code through the text, which leads with it. A result written as v1 or as v2
+  therefore projects identically, and the code did not need a projection
+  version.
 - **Siblings.** Entries off the selected branch never appear, in either list.
   RFC-001's `other_branch` reason is not used; inspect another branch by
   passing its head.
@@ -236,6 +241,9 @@ cancel or the inference limit is handled first.
    `StartInference { head, input, fingerprint, ... }`. C2 adds no entries, so
    the projection is still valid; the core checks it was built for the same
    head and is not a preview.
+4. Every response the inference persists, whatever its outcome, records
+   that fingerprint as `projection_fingerprint`, so an inspector can rebuild
+   exactly the context that produced it.
 
 `Runtime::new` takes the decoded `SessionConfiguration`. `Runtime::inspect_context`
 builds a report from the published snapshot.
@@ -264,7 +272,6 @@ with a warning on stderr. See [development](development.md#context-inspection).
   `ModelInput`. Each response's own continuation is attached to its item;
   choosing which one a request uses belongs to native adapters.
 - Native wire formats (Milestone 4) and real tokenizers.
-- Persisting the fingerprint with each response; it needs a schema version bump.
 - Pinning and alternative strategies (Milestone 6).
 
 ## Tests

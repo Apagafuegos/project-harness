@@ -530,6 +530,7 @@ impl Journal {
                     usage: response.usage,
                     continuation,
                     error,
+                    projection_fingerprint: None,
                 }),
             )],
             events,
@@ -558,6 +559,7 @@ impl Journal {
                                 output_truncated: false,
                                 provenance: Provenance::Runtime,
                                 artifacts: vec![],
+                                code: Some("tools_unavailable".into()),
                             },
                         },
                     }),
@@ -1368,6 +1370,101 @@ fn media_blocks_use_flat_estimates() {
     assert_eq!(totals.estimated_media, 1600 + 4000);
     assert_eq!(totals.estimated_user, 1);
     assert_eq!(totals.estimated_total, 1 + 1600 + 4000 + 1);
+}
+
+/// v2 added fields the model never sees: the same entries written as v1 or
+/// as v2 build byte-identical reports, fingerprints and items.
+#[test]
+fn entries_written_as_v1_or_v2_project_identically() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("use tools")]);
+    let first = CallId::new();
+    journal.respond(
+        Response::completed(vec![text("Let me look."), call(&first, "read")])
+            .finish(FinishReason::ToolCalls),
+    );
+    journal.answer();
+    journal.respond(Response::completed(vec![text("Done.")]));
+    let session = journal.snapshot().session_id().clone();
+    let path = journal
+        .root
+        .path()
+        .join("sessions")
+        .join(format!("{session}.jsonl"));
+    let v2: Vec<Value> = fs::read(path)
+        .unwrap()
+        .split(|b| *b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_slice::<Value>(l).unwrap()["record"].clone())
+        .collect();
+    assert!(v2.iter().all(|r| r["version"] == 2));
+    // Give the v2 responses a fingerprint too, so every new field is set.
+    let mut with_fingerprints = v2.clone();
+    let mut v1 = v2.clone();
+    for (v2, v1) in with_fingerprints.iter_mut().zip(&mut v1) {
+        v1["version"] = json!(1);
+        let (Some(Value::Array(new)), Some(Value::Array(old))) = (
+            v2.pointer_mut("/payload/entries"),
+            v1.pointer_mut("/payload/entries"),
+        ) else {
+            continue;
+        };
+        for (new, old) in new.iter_mut().zip(old) {
+            let (new, old) = (&mut new["payload"], &mut old["payload"]);
+            match new["kind"].as_str().unwrap() {
+                "assistant_response" => {
+                    new["projection_fingerprint"] = json!(Digest::of(b"some projection"));
+                    old.as_object_mut()
+                        .unwrap()
+                        .remove("projection_fingerprint");
+                }
+                "tool_result" => {
+                    assert_eq!(new["result"]["metadata"]["code"], "tools_unavailable");
+                    let metadata = old["result"]["metadata"].as_object_mut().unwrap();
+                    metadata.remove("code").unwrap();
+                }
+                _ => {}
+            }
+        }
+    }
+    let build = |records: &[Value]| {
+        let temp = tempfile::tempdir().unwrap();
+        let root = DataRoot::open(temp.path().join("state"), true).unwrap();
+        root.put_artifact(br#"{"policy":"context-test"}"#).unwrap();
+        let mut previous = Value::Null;
+        let mut bytes = Vec::new();
+        for record in records {
+            let mut record = record.clone();
+            record["previous_checksum"] = previous;
+            let raw = serde_json::to_string(&record).unwrap();
+            let digest = Digest::of(raw.as_bytes());
+            bytes.extend(format!("{{\"record\":{raw},\"sha256\":\"{digest}\"}}\n").bytes());
+            previous = json!(digest);
+        }
+        let mut file = root.journal(&session, true, true).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+        let inspection = JournalStore::inspect(&root, &session).unwrap();
+        assert_eq!(inspection.diagnostic, None);
+        let snapshot = inspection.snapshot.unwrap();
+        ContextBuilder::new(&ContextConfig::default(), &journal.configuration)
+            .build(&snapshot, snapshot.head(), None)
+            .unwrap()
+    };
+    let built = journal.build();
+    for records in [&v2, &with_fingerprints, &v1] {
+        let rebuilt = build(records);
+        assert_eq!(
+            serde_json::to_string_pretty(&rebuilt.report).unwrap(),
+            serde_json::to_string_pretty(&built.report).unwrap()
+        );
+        assert_eq!(rebuilt.projection, built.projection);
+    }
+    // The v2 code is stored, but not projected.
+    let ContextItem::ToolResult { result, .. } = &built.projection.input.items[2] else {
+        panic!("the third item is the result")
+    };
+    assert_eq!(result.metadata.code, None);
 }
 
 #[test]

@@ -152,8 +152,8 @@ Storage determines the tool-answer sequence:
 
 - Tools are unavailable in Milestone 2. Each pending call gets a `ToolResult`
   with status `denied`, no invocation, `runtime` provenance and the text
-  `tools_unavailable: …`. Storage has no result code field, so the code leads the
-  text. The proposal is durable in C3 before any result. C4 uses storage's
+  `tools_unavailable: …`, and the code `tools_unavailable`. Results keep their
+  code as the text's prefix too. The proposal is durable in C3 before any result. C4 uses storage's
   `processing>continuing` path for calls that were rejected without
   authorization, then `continuing>preparing`.
 

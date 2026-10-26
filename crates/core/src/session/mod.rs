@@ -1,4 +1,4 @@
-//! Validated v1 session trees, durable JSONL transactions, and artifact storage.
+//! Validated, versioned session trees, durable JSONL transactions, and artifact storage.
 //!
 //! This Linux-first component has no CLI, terminal, provider, executor, or Tokio
 //! dependency. See `docs/decisions/0003-jsonl-storage.md` for implemented decisions.
@@ -16,7 +16,7 @@ mod types;
 mod validation;
 
 pub use artifacts::DataRoot;
-pub use codec::{MAX_COUNTER, MAX_LINE_BYTES};
+pub use codec::{CURRENT_VERSION, MAX_COUNTER, MAX_LINE_BYTES, SUPPORTED_VERSIONS};
 pub use error::{Diagnostic, DiagnosticKind, StoreError};
 pub use identity::*;
 pub use state::{CommandReceipt, SessionSnapshot, StoredEntry, TurnInfo, UnresolvedInvocation};

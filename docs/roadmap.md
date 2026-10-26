@@ -81,6 +81,15 @@ network denial, environment filtering, deadlines, bounded output, and descendant
 cleanup. Missing enforcement must fail closed. Run T01–T02, S01–S02, and R01;
 actual Linux security tests are a gate, not an optional successful skip.
 
+Implemented so far: `harness doctor` probes the host's sandbox capabilities
+([decision 0008](decisions/0008-host-sandbox.md)), and journal schema v2 is in
+place ([session storage](session-storage.md#record-versions)). Records are
+versioned one by one; v1 journals stay readable and continue as v2. Results
+carry a machine-readable code, intents their declared effects, and responses
+the fingerprint of the projection their inference was sent. No tool executes
+yet. The tool pipeline, and closing read-only intents after a crash, remain
+planned.
+
 ## 4. Native providers and rolling compaction
 
 Integrate OpenAI Responses first against current official documentation, with

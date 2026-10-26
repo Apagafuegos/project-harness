@@ -4,6 +4,11 @@ These v1 JSONL journals use real exact-byte SHA-256 checksums. Storage tests now
 decode, round-trip and semantically replay all three with their artifacts. They
 remain specification fixtures, not proof of an agent runtime or sandbox.
 
+The examples stay v1 and remain valid: readers accept v1 and v2 records, and
+nothing rewrites a v1 record. Appending to one of these journals continues it
+with v2 records on the same checksum chain; the storage and runtime tests do
+that rather than keeping a mixed example here.
+
 - [Branching](branching.jsonl): a completed first exchange followed by two sibling
   user branches. The later turns deliberately end before inference. Navigation
   commits retain all entries; the last selected branch is approach B.
@@ -15,7 +20,9 @@ remain specification fixtures, not proof of an agent runtime or sandbox.
   covering the first turn while retaining the two recent turns. Its manifest
   binds exact source entries and checksums. The originals remain in the journal.
 
-The [schema](../schema/session-v1.schema.json) checks envelope and payload shapes.
+The [v1 schema](../schema/session-v1.schema.json) checks their envelope and
+payload shapes; the [v2 schema](../schema/session-v2.schema.json) checks records
+written since.
 The RFC adds checksum, role, ancestry, head, state, authorization, and recovery
 semantics. JSON Schema alone cannot validate those relationships.
 

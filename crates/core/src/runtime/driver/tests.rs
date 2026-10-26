@@ -1932,6 +1932,89 @@ async fn uncertain_invocation_waits_for_the_user_through_the_handle() {
     handle.shutdown().await;
 }
 
+/// A turn run through a handle over a v1 journal continues it as v2: a v1
+/// prefix, a v2 suffix and one unbroken checksum chain.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_turn_appended_to_a_v1_journal_is_written_as_v2() {
+    let _awake = Awake::new();
+    let examples =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rfcs/001/examples");
+    let v1 = std::fs::read(examples.join("compaction.jsonl")).unwrap();
+    let v1_records = v1.split(|b| *b == b'\n').filter(|l| !l.is_empty()).count() as u64;
+    let (_temp, root, session) = journal_on_thread(move |root| {
+        for entry in std::fs::read_dir(examples.join("artifacts")).unwrap() {
+            root.put_artifact(&std::fs::read(entry.unwrap().path()).unwrap())
+                .unwrap();
+        }
+        let session: SessionId = "019a0000-0000-7000-8000-000000000003".parse().unwrap();
+        let mut file = root.journal(&session, true, true).unwrap();
+        std::io::Write::write_all(&mut file, &v1).unwrap();
+        file.sync_all().unwrap();
+        session
+    });
+    let mut config = config();
+    config.runtime.context.catalog.insert(
+        ModelRef {
+            provider_instance: "mock-default".into(),
+            model: "scripted-text".into(),
+        },
+        crate::context::ModelLimits {
+            context_tokens: Some(128_000),
+            max_output_tokens: None,
+        },
+    );
+    let provider = Arc::new(ScriptedProvider::new([reply("answered as v2")]));
+    let handle = SessionHandle::launch(
+        root.clone(),
+        session.clone(),
+        Opening::Open,
+        config,
+        DeterministicEnv::new(2),
+        provider,
+        WorkerOptions::default(),
+    )
+    .await
+    .unwrap();
+    handle.command(Fixture::command(1)).await.unwrap();
+    let live = wait_for(&handle, |view| {
+        idle(view) && view.snapshot.sequence() >= v1_records
+    })
+    .await;
+    let [.., response] = &responses(&live)[..] else {
+        panic!("a response")
+    };
+    assert!(response.projection_fingerprint.is_some());
+    handle.shutdown().await;
+    let (_, _, (inspection, versions)) = journal_on_thread(move |_| {
+        let inspection = JournalStore::inspect(&root, &session).unwrap();
+        let path = root
+            .path()
+            .join("sessions")
+            .join(format!("{session}.jsonl"));
+        let versions: Vec<u64> = std::fs::read(path)
+            .unwrap()
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                serde_json::from_slice::<serde_json::Value>(l).unwrap()["record"]["version"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        (inspection, versions)
+    });
+    assert_eq!(inspection.diagnostic, None, "the chain verifies");
+    let v2_records = live.snapshot.sequence() + 1 - v1_records;
+    assert_eq!(v2_records, 3, "opening, inference and response commits");
+    let mut expected = vec![1; v1_records as usize];
+    expected.extend(std::iter::repeat_n(2, v2_records as usize));
+    assert_eq!(versions, expected);
+    assert_eq!(
+        inspection.versions,
+        [(1, v1_records), (2, v2_records)].into()
+    );
+}
+
 /// Fault a fixture's open turn with a torn C3: the stream finished, but
 /// only half of its response commit reached the journal.
 async fn tear_response(fixture: &mut Fixture) {

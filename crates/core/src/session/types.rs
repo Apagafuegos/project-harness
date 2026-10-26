@@ -1,4 +1,6 @@
-//! Persisted v1 wire types. Storage validates these against the bundled schema.
+//! Persisted wire types for every supported record version. Storage validates
+//! each record against its own version's bundled schema; fields a version lacks
+//! read as `None`.
 
 use super::identity::*;
 use serde::{Deserialize, Serialize};
@@ -89,6 +91,11 @@ pub struct ToolMetadata {
     pub provenance: Provenance,
     /// Artifacts.
     pub artifacts: Vec<ArtifactRef>,
+    /// Machine-readable reason, such as `tools_unavailable`; v2 only. `None`
+    /// on a succeeded or user-provided result, and on every v1 result. Readers
+    /// keep any code the schema accepts; writers take one from [`ResultCode`].
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 /// Persisted tool result value fields.
@@ -135,6 +142,11 @@ pub struct AssistantResponse {
     pub continuation: Option<ProviderContinuation>,
     /// Error.
     pub error: Option<ModelError>,
+    /// Fingerprint of the context projection the inference was sent; v2 only.
+    /// `None` on every v1 response, and on a response not produced from a
+    /// local projection.
+    #[serde(default)]
+    pub projection_fingerprint: Option<Digest>,
 }
 
 /// Persisted tool result fields.
@@ -291,6 +303,11 @@ pub struct ExecutionIntent {
     pub backend: ExecutionBackend,
     /// Timeout ms.
     pub timeout_ms: u64,
+    /// Effects the plan declares; v2 only. `None` means the intent was
+    /// recorded before v2 and its effects are unknown, so it must never be
+    /// treated as read-only. Writing an intent requires a set.
+    #[serde(default)]
+    pub effects: Option<EffectSet>,
 }
 
 /// Persisted execution uncertain fields.
@@ -636,6 +653,73 @@ pub enum Decision {
     Allow,
     /// Deny.
     Deny,
+}
+
+/// A declared effect class, ordered as the tools contract lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectClass {
+    /// Reads workspace files.
+    Read,
+    /// Creates, changes or removes workspace files.
+    FilesystemMutation,
+    /// Runs a process.
+    Process,
+    /// Uses the network.
+    Network,
+    /// Has an effect outside the workspace and the sandbox.
+    ExternalSideEffect,
+}
+
+/// A nonempty set of effect classes. [`EffectSet::new`] orders it canonically,
+/// so one set has one byte form. A decoded set keeps its stored order, and
+/// storage rejects one that is not canonical.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EffectSet(Vec<EffectClass>);
+impl EffectSet {
+    /// The canonical set of `effects`, or `None` if there are none.
+    pub fn new(effects: impl IntoIterator<Item = EffectClass>) -> Option<Self> {
+        let mut effects: Vec<_> = effects.into_iter().collect();
+        effects.sort_unstable();
+        effects.dedup();
+        (!effects.is_empty()).then_some(Self(effects))
+    }
+    /// The classes, in stored order.
+    pub fn as_slice(&self) -> &[EffectClass] {
+        &self.0
+    }
+    /// Whether the set declares `effect`.
+    pub fn contains(&self, effect: EffectClass) -> bool {
+        self.0.contains(&effect)
+    }
+    /// Strictly increasing in the contract's order: sorted, without duplicates.
+    pub(crate) fn is_canonical(&self) -> bool {
+        self.0.windows(2).all(|pair| pair[0] < pair[1])
+    }
+}
+
+/// The machine-readable result codes this build writes. The schema accepts
+/// any code matching `^[a-z][a-z0-9_]{0,63}$`, so a later code needs no new
+/// schema version; [`ResultCode::as_str`] is the only way a writer names one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultCode {
+    /// No tool runs in this build, so the runtime denied the call.
+    ToolsUnavailable,
+    /// The turn was cancelled before the call started.
+    Cancelled,
+    /// The process stopped before the call started.
+    ProcessRestart,
+}
+impl ResultCode {
+    /// The persisted spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolsUnavailable => "tools_unavailable",
+            Self::Cancelled => "cancelled",
+            Self::ProcessRestart => "process_restart",
+        }
+    }
 }
 
 /// Persisted ExecutionBackend values.

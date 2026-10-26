@@ -84,6 +84,8 @@ fn inspect_then_repair_only_the_inspected_torn_tail() {
     assert_eq!(inspection["diagnostic"]["code"], "unterminated_tail");
     assert_eq!(inspection["repairable"], true);
     assert_eq!(inspection["quarantine_bytes"], TAIL.len());
+    // The fixture's eleven v1 records; the torn tail is not counted.
+    assert_eq!(inspection["versions"], serde_json::json!({"1": 11}));
     let prefix = &inspection["valid_prefix"];
     assert_eq!(prefix["state"], "idle");
     assert_eq!(prefix["requires_recovery"], false);
@@ -127,6 +129,8 @@ fn inspect_then_repair_only_the_inspected_torn_tail() {
     let after = inspect(root);
     assert_eq!(after["diagnostic"], Value::Null);
     assert_eq!(after["repairable"], false);
+    // The repair commit continues the v1 journal as v2.
+    assert_eq!(after["versions"], serde_json::json!({"1": 11, "2": 1}));
     assert_eq!(after["valid_bytes"], after["file_bytes"]);
     // A repaired journal has nothing left to repair.
     let again = repair(

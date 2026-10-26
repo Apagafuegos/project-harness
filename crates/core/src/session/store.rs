@@ -2,6 +2,7 @@
 use super::{codec, error::Result, io::Point, state::State, validation, *};
 use rustix::fs::{FlockOperation, flock};
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     sync::Arc,
@@ -31,6 +32,8 @@ pub struct Inspection {
     pub fingerprint: Digest,
     /// First unaccepted record or tail; None for a complete valid journal.
     pub diagnostic: Option<Diagnostic>,
+    /// Number of validated records of each version in the valid prefix.
+    pub versions: BTreeMap<u32, u64>,
 }
 
 /// Durable, blocking session storage with one exclusive journal-descriptor lock.
@@ -67,7 +70,7 @@ fn next_record(
     at: Timestamp,
 ) -> Result<Record> {
     Ok(Record {
-        version: 1,
+        version: codec::CURRENT_VERSION,
         seq: snapshot
             .sequence()
             .checked_add(1)
@@ -91,7 +94,7 @@ impl JournalStore {
         at: Timestamp,
     ) -> Result<Self> {
         let record = Record {
-            version: 1,
+            version: codec::CURRENT_VERSION,
             seq: 0,
             record_id: RecordId::new(),
             session_id: id.clone(),
@@ -382,6 +385,7 @@ fn scan(root: &DataRoot, file: &mut File, id: &SessionId) -> Result<Inspection> 
     let mut state: Option<State> = None;
     let mut valid_bytes = 0;
     let mut diagnostic = None;
+    let mut versions = BTreeMap::new();
     loop {
         let (bytes, length, terminated) = physical_line(&mut reader)?;
         if length == 0 {
@@ -423,12 +427,13 @@ fn scan(root: &DataRoot, file: &mut File, id: &SessionId) -> Result<Inspection> 
                 }
             }
             validation::record_artifacts(root, &record, &staged)?;
-            Ok(staged)
+            Ok((staged, record.version))
         })();
         match result {
-            Ok(staged) => {
+            Ok((staged, version)) => {
                 state = Some(staged);
                 valid_bytes += length;
+                *versions.entry(version).or_insert(0) += 1;
             }
             Err(error) => {
                 let (kind, code) = match error {
@@ -466,5 +471,6 @@ fn scan(root: &DataRoot, file: &mut File, id: &SessionId) -> Result<Inspection> 
         file_bytes,
         fingerprint,
         diagnostic,
+        versions,
     })
 }

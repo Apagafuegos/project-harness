@@ -1,6 +1,6 @@
-//! Exact-byte journal framing and bundled-schema validation.
+//! Exact-byte journal framing and per-version bundled-schema validation.
 
-use std::{collections::BTreeSet, fmt, sync::OnceLock};
+use std::{collections::BTreeSet, fmt, ops::RangeInclusive, sync::OnceLock};
 
 use serde::{
     Deserialize, Serialize,
@@ -12,8 +12,13 @@ use super::{Digest, Record, StoreError, error::Result};
 
 /// Maximum physical record size, including its LF terminator.
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
-/// Largest counter representable in the persisted v1 format.
+/// Largest counter representable in the persisted format.
 pub const MAX_COUNTER: u64 = 9_007_199_254_740_991;
+/// Record versions readers accept. Each record is validated against its own
+/// version's schema; any other version fails closed as `unsupported_version`.
+pub const SUPPORTED_VERSIONS: RangeInclusive<u32> = 1..=2;
+/// The only version writers produce, including for sessions created under v1.
+pub const CURRENT_VERSION: u32 = 2;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,18 +90,32 @@ pub(crate) fn unique_json(bytes: &[u8]) -> Result<Value> {
     serde_json::from_slice(bytes).map_err(|_| StoreError::Invalid("malformed_json"))
 }
 
-fn schema() -> &'static jsonschema::Validator {
-    static SCHEMA: OnceLock<jsonschema::Validator> = OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        let schema: Value = serde_json::from_str(include_str!(
-            "../../../../docs/rfcs/001/schema/session-v1.schema.json"
-        ))
-        .expect("bundled schema JSON");
-        jsonschema::options()
-            .should_validate_formats(true)
-            .build(&schema)
-            .expect("bundled local schema")
-    })
+fn compile(schema: &str) -> jsonschema::Validator {
+    let schema: Value = serde_json::from_str(schema).expect("bundled schema JSON");
+    jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .expect("bundled local schema")
+}
+
+/// The bundled schema of a supported version. Each is compiled alone, on
+/// first use; the files share no `$ref`.
+fn schema(version: u32) -> &'static jsonschema::Validator {
+    static V1: OnceLock<jsonschema::Validator> = OnceLock::new();
+    static V2: OnceLock<jsonschema::Validator> = OnceLock::new();
+    match version {
+        1 => V1.get_or_init(|| {
+            compile(include_str!(
+                "../../../../docs/rfcs/001/schema/session-v1.schema.json"
+            ))
+        }),
+        2 => V2.get_or_init(|| {
+            compile(include_str!(
+                "../../../../docs/rfcs/001/schema/session-v2.schema.json"
+            ))
+        }),
+        _ => unreachable!("unsupported version {version}"),
+    }
 }
 
 pub(crate) fn decode(line: &[u8]) -> Result<(Record, Digest)> {
@@ -112,10 +131,13 @@ pub(crate) fn decode(line: &[u8]) -> Result<(Record, Digest)> {
         return Err(StoreError::Invalid("checksum_mismatch"));
     }
     let value = unique_json(line)?;
-    if value["record"]["version"] != 1 {
-        return Err(StoreError::Invalid("unsupported_version"));
-    }
-    if !schema().is_valid(&value) {
+    // Only an integer selects a schema: `2.0` and `"2"` are not versions.
+    let version = value["record"]["version"]
+        .as_u64()
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| SUPPORTED_VERSIONS.contains(v))
+        .ok_or(StoreError::Invalid("unsupported_version"))?;
+    if !schema(version).is_valid(&value) {
         return Err(StoreError::Invalid("schema_violation"));
     }
     let record = serde_json::from_str(envelope.record.get())
@@ -123,7 +145,12 @@ pub(crate) fn decode(line: &[u8]) -> Result<(Record, Digest)> {
     Ok((record, envelope.sha256))
 }
 
+/// Frame `record`, which must be [`CURRENT_VERSION`]: no path writes an older
+/// version. The bytes are decoded again, so they pass the reader's checks.
 pub(crate) fn encode(record: &Record) -> Result<(Vec<u8>, Digest)> {
+    if record.version != CURRENT_VERSION {
+        return Err(StoreError::Invalid("write_version"));
+    }
     #[derive(Serialize)]
     struct Output<'a> {
         record: &'a RawValue,

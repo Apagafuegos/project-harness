@@ -1,14 +1,14 @@
 //! The projection: what the model should see, and its fingerprint.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
 use super::PROJECTION_VERSION;
 use crate::{
     model::ModelInput,
     session::{
-        ContentBlock, Digest, EntryId, ModelRef, Provenance, ProviderContinuation, ResponseOutcome,
-        ToolResult,
+        ArtifactRef, CallRef, ContentBlock, Digest, EntryId, InvocationId, ModelRef, Provenance,
+        ProviderContinuation, ResponseOutcome, ToolMetadata, ToolResult, ToolStatus,
     },
 };
 
@@ -70,7 +70,10 @@ pub enum ContextItem {
         /// a user's statement from real tool output; how each provider labels
         /// it belongs to its adapter. Equal to `result.metadata.provenance`.
         provenance: Provenance,
-        /// The stored result.
+        /// The stored result without its v2 `metadata.code`, which the model
+        /// does not see: the text leads with the code. One result therefore
+        /// projects and hashes alike whether it was written as v1 or v2.
+        #[serde(serialize_with = "without_code")]
         result: ToolResult,
     },
     /// An active compaction summary, at the position of its first covered entry.
@@ -93,6 +96,57 @@ impl ContextItem {
             | Self::Summary { entry_id, .. } => Some(entry_id),
         }
     }
+}
+
+/// Serialize `result` in its pre-v2 shape, without `metadata.code`, so v2
+/// added nothing to the projection's bytes. Destructuring both types in full
+/// makes a new stored field a compile error here rather than a silent change.
+fn without_code<S: Serializer>(result: &ToolResult, serializer: S) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Metadata<'a> {
+        exit_code: &'a Option<i32>,
+        duration_ms: &'a Option<u64>,
+        output_truncated: bool,
+        provenance: Provenance,
+        artifacts: &'a [ArtifactRef],
+    }
+    #[derive(Serialize)]
+    struct Projected<'a> {
+        call: &'a CallRef,
+        invocation_id: &'a Option<InvocationId>,
+        status: ToolStatus,
+        content: &'a [ContentBlock],
+        metadata: Metadata<'a>,
+    }
+    let ToolResult {
+        call,
+        invocation_id,
+        status,
+        content,
+        metadata,
+    } = result;
+    let ToolMetadata {
+        exit_code,
+        duration_ms,
+        output_truncated,
+        provenance,
+        artifacts,
+        code: _,
+    } = metadata;
+    Projected {
+        call,
+        invocation_id,
+        status: *status,
+        content,
+        metadata: Metadata {
+            exit_code,
+            duration_ms,
+            output_truncated: *output_truncated,
+            provenance: *provenance,
+            artifacts,
+        },
+    }
+    .serialize(serializer)
 }
 
 /// The projection for one head and model, with its fingerprint. It is never

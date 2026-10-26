@@ -103,9 +103,10 @@ fn command() -> Command {
                         .about("Print the journal's inspection as JSON")
                         .long_about(
                             "Print the journal's inspection as JSON: valid and total \
-                             bytes, the whole file's SHA-256 fingerprint, the first \
-                             rejected record, whether that is a repairable torn tail, \
-                             and where the valid prefix ends. Read-only, under a \
+                             bytes, the whole file's SHA-256 fingerprint, the number of \
+                             valid records of each format version, the first rejected \
+                             record, whether that is a repairable torn tail, and where \
+                             the valid prefix ends. Read-only, under a \
                              shared lock; a session held by a running engine is \
                              refused at once.",
                         )
@@ -295,6 +296,7 @@ fn inspection_json(session: &SessionId, inspection: &Inspection) -> Value {
         "file_bytes": inspection.file_bytes,
         "valid_bytes": inspection.valid_bytes,
         "fingerprint": inspection.fingerprint,
+        "versions": inspection.versions,
         "diagnostic": diagnostic.map(|d| json!({
             "offset": d.offset,
             "kind": match d.kind {
