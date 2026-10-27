@@ -14,23 +14,25 @@ concurrency:
 jobs:
   check:
     name: Rust workspace
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install the repository toolchain
         run: rustup toolchain install
-      - name: Validate
+      - name: Install Bubblewrap and load the reviewed CI profile
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo apparmor_parser -r ci/apparmor/harness-ci-bwrap
+          bwrap --version
+      - name: Validate (including required S02 security suite)
         run: ./scripts/check.sh
 
   host-capabilities:
-    # Milestone 3 step 1 spike: report what the runner offers the file tools
-    # and the shell sandbox, before and after loading the committed AppArmor
-    # profile (ADR 0008). Informational until the shell security suite exists:
-    # it never fails the workflow. The profile changes the runner only.
-    name: Host capabilities (harness doctor)
+    # Required real-Linux S02 gate, with before/after doctor evidence.
+    # The reviewed profile changes the CI runner only (ADR 0008).
+    name: Host sandbox security (S02)
     # Pinned: the AppArmor userns restriction is image-specific (ADR 0008).
     runs-on: ubuntu-24.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install the repository toolchain
@@ -49,6 +51,10 @@ jobs:
           sudo apparmor_parser -r ci/apparmor/harness-ci-bwrap
           ./target/debug/harness doctor > doctor/2-with-profile.json
           jq .summary doctor/2-with-profile.json
+      - name: Required S02 security suite
+        run: |
+          bwrap --version
+          cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
       - name: Summary
         if: always()
         run: |

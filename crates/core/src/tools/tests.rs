@@ -1411,8 +1411,9 @@ fn result_code_parse_rejects_unknown_and_inexact_spellings() {
 
 #[test]
 fn tools_source_has_no_runtime_io() {
-    // Trusted descriptor I/O is isolated in this explicitly named exception.
-    let io_exceptions = ["fs"];
+    // Explicit I/O boundaries: trusted fs/ and sandbox/ (args, output,
+    // process, probe). Every other tools module, including exec, stays pure.
+    let io_exceptions = ["fs", "sandbox"];
     let pure_files = [
         ("mod", include_str!("mod.rs")),
         ("path", include_str!("path.rs")),

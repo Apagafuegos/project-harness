@@ -7,6 +7,11 @@ cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+if [ "${HARNESS_ALLOW_NO_SANDBOX:-}" = 1 ]; then
+    echo "SKIPPED: shell security suite"
+else
+    cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+fi
 cargo build --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo run --locked -p harness -- --help
@@ -24,15 +29,15 @@ for artifact in "$fixtures"/artifacts/*; do
 done
 install -m 600 "$fixtures/compaction.jsonl" "$smoke/state/sessions/$session.jsonl"
 cargo run --locked -q -p harness -- context "$smoke/state" "$session" \
-    --context-tokens 128000 > "$smoke/report.json"
+    --context-tokens 128000 >"$smoke/report.json"
 diff -u crates/core/src/context/golden/compaction.json "$smoke/report.json"
 echo "harness context smoke test: report matches the compaction golden file"
 
 # The Milestone 2 end-to-end example: two turns, a crash during a third,
 # automatic recovery and the final context report. It is offline and
 # deterministic, so two runs must print the same bytes.
-cargo run --locked -q -p harness-core --example scripted_session > "$smoke/example-1.txt"
-cargo run --locked -q -p harness-core --example scripted_session > "$smoke/example-2.txt"
+cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-1.txt"
+cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-2.txt"
 diff -u "$smoke/example-1.txt" "$smoke/example-2.txt"
 grep -q "streams opened by recovery: 0" "$smoke/example-1.txt"
 echo "scripted_session example: deterministic, recovered without a stream"

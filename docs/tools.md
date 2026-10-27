@@ -77,7 +77,73 @@ following a committed replacement; never assume rollback or retry it silently.
 
 ## Planned separately
 
-Runtime effect wiring, recovery integration, shell execution in Bubblewrap, and
-native provider adapters are not implemented by this backend. Trusted file
-operations still require workspace authorization; they are not OS-sandboxed.
-`elevated` is not a Milestone 3 capability.
+Runtime effect wiring, recovery integration, and native provider adapters are
+separate work. Trusted file operations still require workspace authorization;
+they are not OS-sandboxed. `elevated` is not a Milestone 3 capability.
+
+## Implemented: shell backend (step 7a)
+
+`harness_core::tools::sandbox` provides a blocking Bubblewrap backend. Bash is
+**not yet registered** with the driver. `Sandbox` implements the shared
+`Executor` trait: `execute` runs the authorized plan against
+`SandboxConfig::workspace_root`. Installation still belongs to step 7b; the
+driver must authorize the exact plan and publish the returned artifact bytes.
+The shared `tools::CancelToken` and `ExecutionOutcome` are used directly.
+
+```rust,no_run
+use harness_core::tools::{CancelToken, Sandbox, SandboxConfig};
+
+let config = SandboxConfig {
+    workspace_root: "/authorized/project".into(),
+    ..SandboxConfig::default()
+};
+let sandbox = Sandbox::probe(config)?;
+if let Some(reason) = sandbox.process_limit_gap() {
+    eprintln!("{reason}");
+}
+// After authorization:
+// let outcome = sandbox.run(&plan, workspace_root, &CancelToken::new());
+# let _ = CancelToken::new();
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The backend takes command/cwd/deadline and workspace mount modes from the plan,
+never raw model sandbox flags. It denies network access, clears inherited
+variables, recreates private home/tmp/proc/dev, binds configured runtime paths
+read-only, and applies `.git` read-only protection and protected-path masks.
+A failed probe or setup returns an infrastructure failure, never a host retry.
+`harness doctor` uses the same probe and explains host availability without
+changing host configuration.
+
+Defaults are a 64 MiB aggregate capture, 32 KiB model content, two-second kill
+grace and TasksMax=64. stdout and stderr are separately captured; artifacts
+contain the full bounded raw bytes (stdout first, stderr second), and
+`duration_ms` is `Some(elapsed_ms)`. Model text uses head/tail truncation with
+a marker; its compact JSON, including escaping, is bounded to 32 KiB. Timeout
+and cancellation kill the PID namespace init and wait for cleanup; successful
+foreground exit leaves no background descendants either. Executed statuses
+are chosen explicitly, not taken from planning refusals.
+
+When a systemd user manager is unavailable, the backend records the lack of a
+TasksMax process limit; deadlines and namespace cleanup still apply. Missing
+required isolation always fails closed. There is no seccomp filter, network
+exception or elevated mode in M3. An absent protected path cannot be mounted:
+post-run detection returns `failed` / `protected_path` if it was created, and
+leaves the object in place. See [ADR 0012](decisions/0012-sandbox-backend.md)
+for the full security boundary and remaining gaps.
+
+### Shell security tests
+
+`./scripts/check.sh` requires the real-Linux S02 suite by default. The only
+local opt-out is `HARNESS_ALLOW_NO_SANDBOX=1`, which prints
+`SKIPPED: shell security suite`. This does not enable bash in the product.
+To run the suite alone:
+
+```sh
+cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+```
+
+The suite uses Rust payloads plus ordinary sandboxed workloads. The TIOCSTI
+workload uses Ubuntu's `/usr/bin/python3` standard-library ioctl support;
+there is no added project toolchain or dependency. Pinned Ubuntu 24.04 CI loads
+the committed AppArmor profile and runs the suite without the opt-out.

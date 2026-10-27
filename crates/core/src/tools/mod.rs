@@ -9,6 +9,7 @@ pub mod fs;
 mod path;
 mod plan;
 mod policy;
+pub mod sandbox;
 
 pub use builtin::{Registry, Tool, ToolDefinition, ValidatedOperation};
 pub use exec::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet};
@@ -18,6 +19,7 @@ pub use plan::{
     FileFacts, FileKind, Plan, PlanFacts, Protection, WorkspaceIdentity, WorkspaceView,
 };
 pub use policy::{Allowance, ApprovalRequest, Authorization, PolicyError, PolicySnapshot, decide};
+pub use sandbox::{Sandbox, SandboxConfig, SandboxUnavailable};
 
 use crate::session::{ResultCode, ToolStatus};
 
