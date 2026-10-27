@@ -1418,17 +1418,34 @@ fn all_result_codes_match_real_v2_schema_pattern() {
 
 #[test]
 fn tools_source_has_no_runtime_io() {
-    for (name, source) in [
+    // Trusted descriptor I/O is isolated in this explicitly named exception.
+    let io_exceptions = ["fs"];
+    let pure_files = [
         ("mod", include_str!("mod.rs")),
         ("path", include_str!("path.rs")),
         ("builtin", include_str!("builtin.rs")),
         ("plan", include_str!("plan.rs")),
         ("policy", include_str!("policy.rs")),
         ("tests", include_str!("tests.rs")),
-    ] {
+    ];
+    for line in include_str!("mod.rs").lines() {
+        if let Some(module) = line
+            .strip_prefix("mod ")
+            .or_else(|| line.strip_prefix("pub mod "))
+            .and_then(|line| line.strip_suffix(';'))
+        {
+            assert!(
+                pure_files.iter().any(|(name, _)| *name == module)
+                    || io_exceptions.contains(&module),
+                "unclassified tools module: {module}"
+            );
+        }
+    }
+    for (name, source) in pure_files {
         for forbidden in [
             ["std", "fs"].join("::"),
             ["std", "process"].join("::"),
+            ["rustix", "fs"].join("::"),
             ["to", "kio"].concat(),
         ] {
             assert!(!source.contains(&forbidden), "{name}: {forbidden}");
