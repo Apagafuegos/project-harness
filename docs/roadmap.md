@@ -86,9 +86,11 @@ Implemented so far: `harness doctor` probes the host's sandbox capabilities
 place ([session storage](session-storage.md#record-versions)). Records are
 versioned one by one; v1 journals stay readable and continue as v2. Results
 carry a machine-readable code, intents their declared effects, and responses
-the fingerprint of the projection their inference was sent. No tool executes
-yet. The tool pipeline, and closing read-only intents after a crash, remain
-planned.
+the fingerprint of the projection their inference was sent. The pure tool
+layer now provides four fixed definitions, strict validation, canonical v2
+plans, configuration allowances and deterministic policy ([decision 0009](decisions/0009-tool-policy.md)).
+No tool executes yet; runtime integration and closing read-only intents after
+a crash remain planned.
 
 ## 4. Native providers and rolling compaction
 

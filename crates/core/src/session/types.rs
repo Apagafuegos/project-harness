@@ -710,6 +710,34 @@ pub enum ResultCode {
     Cancelled,
     /// The process stopped before the call started.
     ProcessRestart,
+    /// No compiled-in definition has this name.
+    UnknownTool,
+    /// Session configuration disables this tool.
+    ToolDisabled,
+    /// Schema or semantic validation failed.
+    InvalidArguments,
+    /// The configured policy prohibits the operation.
+    PolicyDenied,
+    /// A protected target or directory prohibits the operation.
+    ProtectedPath,
+    /// Subprocess networking is unsupported.
+    NetworkUnsupported,
+    /// A required workspace object is absent.
+    NotFound,
+    /// A file target is not regular.
+    NotRegularFile,
+    /// Multiply linked files are unsupported.
+    HardLinkRejected,
+    /// A no-overwrite target exists.
+    AlreadyExists,
+    /// Literal edit matched nothing.
+    NoMatch,
+    /// Literal edit matched more than once.
+    MultipleMatches,
+    /// File contents are not UTF-8.
+    NotUtf8,
+    /// Arguments or workspace contents exceed limits.
+    TooLarge,
 }
 impl ResultCode {
     /// The persisted spelling.
@@ -718,6 +746,20 @@ impl ResultCode {
             Self::ToolsUnavailable => "tools_unavailable",
             Self::Cancelled => "cancelled",
             Self::ProcessRestart => "process_restart",
+            Self::UnknownTool => "unknown_tool",
+            Self::ToolDisabled => "tool_disabled",
+            Self::InvalidArguments => "invalid_arguments",
+            Self::PolicyDenied => "policy_denied",
+            Self::ProtectedPath => "protected_path",
+            Self::NetworkUnsupported => "network_unsupported",
+            Self::NotFound => "not_found",
+            Self::NotRegularFile => "not_regular_file",
+            Self::HardLinkRejected => "hard_link_rejected",
+            Self::AlreadyExists => "already_exists",
+            Self::NoMatch => "no_match",
+            Self::MultipleMatches => "multiple_matches",
+            Self::NotUtf8 => "not_utf8",
+            Self::TooLarge => "too_large",
         }
     }
 }

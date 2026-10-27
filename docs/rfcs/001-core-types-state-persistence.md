@@ -253,7 +253,8 @@ The initial argument objects reject unknown keys:
   1 MiB inline. Existing parent directories required; no implicit recursive creation.
 - `edit`: `path`, nonempty `old_text`, and `new_text`. Exactly one literal match
   is required. Zero/multiple matches fail without mutation; no regex replacement.
-- `bash`: `command`, optional workspace-relative `cwd` (default `.`), optional
+- `bash`: nonempty `command` (at most 64 KiB UTF-8 bytes), optional
+  workspace-relative `cwd` (default `.`), optional
   `timeout_ms` (default 120,000; permitted range 1..=600,000). No argument can
   request elevation, host environment inheritance, or a sandbox bypass.
 
@@ -266,20 +267,21 @@ with the actual consumed offsets reported, never silently decoded lossily.
 ```rust,ignore
 pub trait Tool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
-    fn validate(&self, arguments: serde_json::Value)
-        -> Result<ValidatedOperation, ToolValidationError>;
+    fn validate(&self, arguments: &serde_json::Value)
+        -> Result<ValidatedOperation, Refusal>;
+    fn plan(&self, operation: &ValidatedOperation, call: &CallRef,
+            workspace: &dyn WorkspaceView, policy: &PolicySnapshot)
+        -> Result<Plan, Refusal>;
 }
 
 pub enum Authorization {
-    Allow(AuthorizedOperation),
+    Allow(Box<Plan>),
     Ask(ApprovalRequest),
-    Deny { reason: String },
+    Deny(Refusal),
 }
 
-pub trait Authorizer: Send + Sync {
-    fn authorize(&self, operation: ValidatedOperation, policy: &PolicySnapshot)
-        -> Authorization;
-}
+pub fn decide(plan: &Plan, facts: &PlanFacts, policy: &PolicySnapshot)
+    -> Authorization;
 
 pub enum ExecutionOutcome {
     Observed(ToolResult),
@@ -292,8 +294,20 @@ pub trait Executor: Send + Sync {
 }
 ```
 
+The validate/plan split, fixed registry and pure `decide` are implemented in
+Milestone 3 step 3; see [decision 0009](../decisions/0009-tool-policy.md) for
+the exact policy table and API boundaries. `WorkspaceView` supplies trusted
+facts and bounded UTF-8 reads, not direct filesystem access. `Plan` and
+`ValidatedOperation` have private fields and are constructed only by tools.
+`Refusal` carries `ResultCode`, `ToolStatus` and short content-free detail;
+`text()` renders `<code>: <detail>`. Unknown/disabled names are refused before
+validation. Schemas reject unknown keys; semantic argument failures use
+`invalid_arguments`. `.git` is read-only by default, but a configured protected
+path is fully denied and takes precedence over read-only or any allowance.
+
+The executor sketch and `AuthorizedOperation` below remain planned for step 4.
 `BoxFuture<'a, T>` means a pinned, boxed, `Send` future with that lifetime.
-`ValidatedOperation` and `AuthorizedOperation` have private constructors.
+`AuthorizedOperation` has a private constructor.
 The latter contains the exact validated operation, invocation/call identity,
 plan digest, decision ID, policy revision, workspace capability, approved
 mounts/network, and expiry. Executors recheck binding/expiry immediately before dispatch;
@@ -304,17 +318,37 @@ never implies rollback of already performed mutations. If a trusted replacement
 completed and its success is verified, retain that success even when the enclosing
 turn was cancelled.
 
-The plan digest is SHA-256 over the engine's persisted compact JSON plan bytes;
-the same stored bytes are used for approval and execution. The plan includes
-arguments, resolved workspace identity, cwd, effects, backend, mounts, network,
-timeout, and policy revision. Re-resolve filesystem access through capabilities
-at use time. A digest binds intent; it is not a filesystem-race defense.
+The plan digest is SHA-256 over exactly `Plan::bytes()` (`Digest::of`); the same
+canonical compact JSON bytes are used for approval and, in step 4, persistence
+and execution. Plan format **version 2** fixes this field order: `version`,
+`call`, `name`, `arguments`, `workspace`, `cwd`, `effects`, `backend`, `mounts`,
+`network`, `timeout_ms`, `policy_revision`, `target`. Arguments are validated,
+normalized and defaulted, never raw model JSON. A file target has ordered
+`path`, `pre_image` (current digest or `"absent"`), and, for write only,
+`content_sha256`. Bash has null target, a workspace `.` mount (`ro` when
+workspace_mutation is deny, otherwise `rw`), then a separate `.git` read-only
+mount when it exists. Network is always `deny`. File deadlines are fixed at
+30,000 ms. `Plan::effects()` alone supplies intent effects: read `[read]`,
+write/edit `[filesystem_mutation]`, bash `[process]`. The historical example
+artifact remains plan v1; v2 golden artifacts are in `crates/core/src/tools/golden/`.
+Re-resolve filesystem access through capabilities and recheck the pre-image at
+execution in step 5 (`stale_plan` without mutation on mismatch). A digest binds
+intent; it is not a filesystem-race defense.
 
 Initial workspace selection is explicit user authorization, outside model text.
 The default policy allows authorized workspace reads, asks once per write/edit
 or process invocation, and denies protected paths. Users may explicitly configure
-session-scoped routine-write or sandbox-process allowances; policy changes are
-audited. A configured allowance never bypasses the sandbox. Approval requests
+session-scoped routine-write or sandbox-process allowances. Allowances live in
+the configuration artifact, not new journal events. Write/edit allowances bind
+a tool and exact normalized relative path, a component-wise directory prefix
+ending in `/` (descendants only), or `.` for the workspace. Bash allowances bind
+exact command bytes plus normalized cwd, never a command prefix or glob.
+`Allowance::remember` grants the narrowest matching allowance. `grant`/`revoke`
+produce a compact configuration artifact changing only `policy_revision` and
+`allowances`, preserving unknown values and existing allowances. Step 4 will
+publish it through `configuration_changed`; a revision invalidates pending
+approvals but carries allowances forward. Deny policy and protection always win.
+A configured allowance never bypasses the sandbox. Approval requests
 expire after five minutes and are single-use for the bound call/plan. User denial,
 expiry, cancellation, or policy revision invalidates the ticket.
 
@@ -375,11 +409,13 @@ locale, and explicit nonsecret toolchain settings. Do not copy the engine's
 environment and remove only known API-key names. Provider secrets remain in
 the trusted process. Capture stdout/stderr through pipes, not the controlling TTY.
 
-`elevated` is a one-operation, explicitly approved expansion of this same sandbox,
-not unrestricted execution. Exact extra mounts/effects appear in the plan.
+`elevated` is planned beyond Milestone 3: no M3 argument, command or policy
+outcome can request it. It would be a one-operation, explicitly approved
+expansion of this same sandbox, not unrestricted execution. Exact extra mounts/effects appear in the plan.
 Networking remains denied unless an enforcement backend can provide the exact
 approved restriction. Initial v0.1 supports deny-network only; a requested
-network exception fails as unsupported until a constrained egress backend exists.
+network exception fails with `network_unsupported` until a constrained egress
+backend exists. Network exceptions are not in Milestone 3.
 Do not equate `--share-net` with a host/domain allowlist. Offline build/test
 caches may instead be explicitly mounted under the authorized plan.
 
@@ -821,6 +857,11 @@ mark unfinished turns interrupted, append `execution_uncertain` for unresolved
 intents, and enter `Recovering`. There is no automatic replay, including reads.
 Workspace side effects do not belong only to one conversational branch, so
 choosing a different head MUST NOT bypass unresolved execution recovery.
+
+The preceding recovery behavior is the current implementation. Settled M3 D9
+will, in step 6, automatically close unresolved intents whose effects are
+exactly `{read}` with `cancelled`/`process_restart`, without replaying them.
+Missing v1 effects never qualify. Step 3 changes no recovery behavior.
 
 Resolution is explicit and auditable: `ObservedResult` supplies a user-observed
 outcome, or `AcknowledgeUnknown { note }` records an uncertain result the user
