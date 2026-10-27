@@ -86,7 +86,9 @@ fn unsandboxed_bwrap_is_unavailable() {
 /// A sandbox that reports a correct map about itself but whose process maps
 /// to outside uid 0 from the host must be rejected. The fake answers every
 /// in-sandbox check correctly and then waits in `cat`, a host process whose
-/// maps are the host's identity maps of the whole range.
+/// maps are the host's identity maps of the whole range. The checks run in a
+/// subshell that becomes `cat`, so the one descendant exists before
+/// `ready=yes` is printed; forking `cat` afterwards raced the host's scan.
 #[test]
 fn mapping_to_outside_root_is_unavailable() {
     let temp = tempfile::tempdir().unwrap();
@@ -96,6 +98,7 @@ fn mapping_to_outside_root_is_unavailable() {
         "#!/bin/sh\n\
          [ \"$1\" = --version ] && { echo 'bubblewrap 0.9.0'; exit 0; }\n\
          while [ $# -gt 0 ]; do [ \"$1\" = --bind ] && ws=$2; shift; done\n\
+         (\n\
          echo inside > \"$ws/inside\"\n\
          echo 'uid_map=1001 0 1'\n\
          echo 'interfaces=lo,'\n\
@@ -105,7 +108,8 @@ fn mapping_to_outside_root_is_unavailable() {
          echo 'outside_write=refused'\n\
          echo 'usr_write=refused'\n\
          echo 'ready=yes'\n\
-         cat > /dev/null\n",
+         exec cat > /dev/null\n\
+         )\n",
     )
     .unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
