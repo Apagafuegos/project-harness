@@ -135,6 +135,9 @@ advancement while a worker is doing real filesystem I/O. Test-only I/O gates
 hold the worker at a durability boundary and notify the test by oneshot;
 releasing the gate uses a standard channel, never a blocking receive on Tokio.
 The injected I/O trace records worker thread names and sync ordering.
+Subscription convergence checks use quiescent views: an epoch reset fetches the
+current view and may skip an intermediate recovery view returned by `reopen()`.
+Waiting for exact equality with that historical view can hang after recovery.
 
 Coverage includes tool loops/limits, cancellation, upload limits and media
 preflight, joining mid-stream, broadcast lag, epoch changes, unacknowledged

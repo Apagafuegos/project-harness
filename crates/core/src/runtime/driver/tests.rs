@@ -456,13 +456,16 @@ async fn uncertain_writes_are_never_retried_and_torn_tails_require_explicit_repa
         } else {
             let reopened = result.unwrap();
             assert_ne!(reopened.epoch, old.epoch);
-            assert_eq!(catch_up(&mut subscription, &mut client, &reopened).await, 1);
             assert_eq!(reopened.snapshot.sequence(), 1);
             // The durable opening commit is never repeated: a retry learns it,
             // and recovery closes the turn without asking.
             let accepted = fixture.handle.command(Fixture::command(1)).await.unwrap();
             assert!(matches!(accepted, Accepted::TurnStarted { ack, .. } if ack.sequence == 1));
             let live = fixture.wait(idle).await;
+            // An epoch reset fetches the current view, which can already be
+            // past reopen's intermediate RecoveryRequired view. Catch up to
+            // the quiescent recovery result, never that historical checkpoint.
+            assert_eq!(catch_up(&mut subscription, &mut client, &live).await, 1);
             assert_eq!(
                 finishes(&live),
                 [(TurnOutcome::Interrupted, Some("process_restart".into()))]
