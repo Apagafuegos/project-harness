@@ -740,6 +740,24 @@ pub enum ResultCode {
     TooLarge,
     /// A trusted infrastructure component violated its contract.
     InfrastructureFailure,
+    /// The target changed after the plan was approved.
+    StalePlan,
+    /// A path component is a symbolic link.
+    SymlinkRejected,
+    /// The operation exceeded its deadline.
+    Timeout,
+    /// The process exited unsuccessfully or was killed by a signal.
+    NonzeroExit,
+    /// The process exceeded the output capture limit.
+    OutputLimit,
+    /// The required sandbox could not be established.
+    SandboxUnavailable,
+    /// The user denied the approval.
+    ApprovalDenied,
+    /// The approval request expired unanswered.
+    ApprovalExpired,
+    /// A policy revision invalidated the pending approval.
+    ApprovalInvalidated,
 }
 impl ResultCode {
     /// The persisted spelling.
@@ -763,6 +781,15 @@ impl ResultCode {
             Self::NotUtf8 => "not_utf8",
             Self::TooLarge => "too_large",
             Self::InfrastructureFailure => "infrastructure_failure",
+            Self::StalePlan => "stale_plan",
+            Self::SymlinkRejected => "symlink_rejected",
+            Self::Timeout => "timeout",
+            Self::NonzeroExit => "nonzero_exit",
+            Self::OutputLimit => "output_limit",
+            Self::SandboxUnavailable => "sandbox_unavailable",
+            Self::ApprovalDenied => "approval_denied",
+            Self::ApprovalExpired => "approval_expired",
+            Self::ApprovalInvalidated => "approval_invalidated",
         }
     }
 }

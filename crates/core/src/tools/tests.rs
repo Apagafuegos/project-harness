@@ -1398,6 +1398,15 @@ fn all_result_codes_match_real_v2_schema_pattern() {
         NotUtf8,
         TooLarge,
         InfrastructureFailure,
+        StalePlan,
+        SymlinkRejected,
+        Timeout,
+        NonzeroExit,
+        OutputLimit,
+        SandboxUnavailable,
+        ApprovalDenied,
+        ApprovalExpired,
+        ApprovalInvalidated,
     ] {
         assert!(
             validator.is_valid(&json!(code.as_str())),
