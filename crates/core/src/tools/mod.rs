@@ -12,7 +12,7 @@ mod policy;
 
 pub use builtin::{Registry, Tool, ToolDefinition, ValidatedOperation};
 pub use exec::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet};
-pub use fs::{FsOutcome, FsProtectedPaths, FsUnavailable, FsWorkspace};
+pub use fs::{FsProtectedPaths, FsUnavailable, FsWorkspace};
 pub use path::WorkspacePath;
 pub use plan::{
     FileFacts, FileKind, Plan, PlanFacts, Protection, WorkspaceIdentity, WorkspaceView,

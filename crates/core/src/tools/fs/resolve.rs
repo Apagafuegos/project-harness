@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
+use crate::tools::CancelToken;
 use rustix::{
     fd::{AsFd, BorrowedFd, OwnedFd},
     fs::{self, FileType, Mode, OFlags, Stat},
     io::{self, Errno},
 };
 use sha2::{Digest as _, Sha256};
-use tokio_util::sync::CancellationToken;
 
 use super::{FsWorkspace, RESOLVE};
 use crate::{
@@ -44,7 +44,7 @@ pub(super) enum Step {
 pub(super) struct Control<'a> {
     pub(super) started: Instant,
     pub(super) timeout: Option<Duration>,
-    pub(super) cancellation: Option<&'a CancellationToken>,
+    pub(super) cancellation: Option<&'a CancelToken>,
     pub(super) hook: &'a mut dyn FnMut(Step) -> Result<(), Refusal>,
 }
 impl<'a> Control<'a> {
@@ -58,10 +58,7 @@ impl<'a> Control<'a> {
     }
     pub(super) fn check(&mut self, step: Step) -> Result<(), Refusal> {
         (self.hook)(step)?;
-        if self
-            .cancellation
-            .is_some_and(CancellationToken::is_cancelled)
-        {
+        if self.cancellation.is_some_and(CancelToken::is_cancelled) {
             return Err(Refusal::new(
                 ResultCode::Cancelled,
                 "cancelled before commit",

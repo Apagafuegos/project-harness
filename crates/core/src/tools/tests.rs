@@ -1424,6 +1424,7 @@ fn tools_source_has_no_runtime_io() {
         ("mod", include_str!("mod.rs")),
         ("path", include_str!("path.rs")),
         ("builtin", include_str!("builtin.rs")),
+        ("exec", include_str!("exec.rs")),
         ("plan", include_str!("plan.rs")),
         ("policy", include_str!("policy.rs")),
         ("tests", include_str!("tests.rs")),

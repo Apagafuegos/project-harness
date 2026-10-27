@@ -1,7 +1,8 @@
 # 0011: Descriptor-relative trusted file tools
 
-Status: Accepted and implemented for Milestone 3 step 5. Runtime dispatch and
-outcome adaptation remain step 4b; shell execution remains separate.
+Status: Accepted and implemented for Milestone 3 step 5. The shared executor
+interface is implemented; runtime installation/dispatch remains step 4b and
+shell execution remains separate.
 
 Date: 2026-10-27
 
@@ -35,11 +36,15 @@ enforces its caller's byte limit and UTF-8 without lossy decoding. Edit planning
 already checks the 1 MiB size limit before calling `read_text`; digest inspection
 still necessarily reads the file to bind its pre-image.
 
-Execution consumes an opaque typed `Plan`, not model JSON. Minimal workspace,
+`FsWorkspace` implements the shared `tools::Executor` with backend `TrustedFs`.
+Its trait entry point consumes an `AuthorizedOperation` and `tools::CancelToken`,
+then executes the operation's opaque typed `Plan`, not model JSON. Minimal workspace,
 target pre-image, and deadline binding metadata are decoded from that plan's
 canonical bytes, without modifying the pure planner's API. File operations come
-from its typed internal accessor. A different workspace identity or a bash plan
-returns `infrastructure_failure`. This executor is a low-level effect backend;
+from its typed internal accessor. A different workspace identity, a bash plan,
+or a backend other than `TrustedFs` returns `infrastructure_failure`. The shared
+`tools::ExecutionOutcome` is returned directly, with `duration_ms: Some(..)`;
+no adapter is required. The low-level plan entry point remains available, but
 its caller must perform policy authorization and approval binding first.
 
 Execution explicitly sets `failed`, `timed_out`, `cancelled`, or
@@ -61,8 +66,11 @@ protection, link count, and digest. Edit counts overlapping byte-offset matches
 and replaces exactly one, with a 1 MiB output limit.
 
 Replacement creates a UUID-random `O_CREAT | O_EXCL` temporary file in the pinned
-parent, initially mode 0600, writes it, restores the original mode (0644 for a
-new file), and fsyncs data and mode before descriptor-relative `renameat_with`.
+parent, initially mode 0600, writes it, copies only ordinary permission bits
+(`original_mode & 0o777`, or 0644 for a new file), and fsyncs data and mode before
+descriptor-relative `renameat_with`. Setuid, setgid, and sticky bits are never
+carried onto replacement contents; both write and edit test `0o4755` becoming
+`0o755`, along with the other special-bit combinations.
 An absent pre-image uses `RENAME_NOREPLACE`; a concurrent creation is
 `stale_plan`. The parent is fsynced after rename. Errors or cancellation before
 rename remove the temporary. Cleanup does not obey cancellation, and cleanup

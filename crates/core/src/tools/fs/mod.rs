@@ -20,7 +20,6 @@ use rustix::{
 
 use super::{Protection, WorkspaceIdentity, WorkspacePath};
 
-pub use execute::FsOutcome;
 use resolve::{Control, ObjectId, Step, errno};
 
 const RESOLVE: ResolveFlags = ResolveFlags::BENEATH

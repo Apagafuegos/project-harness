@@ -37,13 +37,16 @@ in-workspace data root are denied by object/ancestor `(dev, ino)` identity;
 pinned for the lifetime of the workspace.
 
 Plan through the registry with this same workspace and trusted policy, obtain
-authorization with `decide`, then call
-`workspace.execute(&plan, &cancellation_token)`. The token is
-`tokio_util::sync::CancellationToken`. The caller owns authorization and must
-never dispatch a denied or unapproved plan. The returned `FsOutcome` has
-`status`, `code`, `content`, `exit_code`, `duration_ms`, `output_truncated`, and
-`artifacts`; it is not yet the runtime's outcome type. Execution statuses are
-explicitly independent of planning refusals.
+authorization with `decide`, then let the runtime construct an
+`AuthorizedOperation` after its write-ahead intent commits. `FsWorkspace`
+implements `tools::Executor` with backend `TrustedFs`; the trait executes that
+operation using the shared `tools::CancelToken` and returns
+`tools::ExecutionOutcome` directly. Its fields are `status`, `code`, `content`,
+`exit_code`, `duration_ms: Some(..)`, `output_truncated`, and `artifacts`.
+Execution statuses remain explicitly independent of planning refusals. The
+low-level `workspace.execute(&plan, &cancel_token)` entry point also remains;
+its caller owns authorization and must never dispatch a denied or unapproved
+plan. Bash and other non-`TrustedFs` plans fail with `infrastructure_failure`.
 
 - **Read:** Recheck regular-file/link-count/protection facts and SHA-256, then
   return the requested byte range adjusted inward to valid UTF-8 boundaries.
@@ -56,7 +59,8 @@ explicitly independent of planning refusals.
 - **Write:** The parent must already exist. Recheck the planned digest or
   absence, then replace through an exclusive random temporary file, mode
   restoration, fsync, rename, and parent fsync. New files are 0644; replacement
-  preserves the original mode. A concurrently created absent target cannot be
+  preserves only the original ordinary permission bits (`mode & 0o777`), stripping
+  setuid, setgid, and sticky bits. A concurrently created absent target cannot be
   overwritten (`RENAME_NOREPLACE`).
 - **Edit:** Recheck the pre-image and reapply exactly one literal occurrence,
   counting overlaps. Source and resulting text are bounded to 1 MiB and must be

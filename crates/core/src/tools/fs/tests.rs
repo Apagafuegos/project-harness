@@ -5,10 +5,10 @@ use std::{
     time::Duration,
 };
 
+use crate::tools::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor};
 use rustix::io::Errno;
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::{
@@ -49,16 +49,16 @@ fn plan(view: &FsWorkspace, name: &str, arguments: Value) -> Result<Plan, Refusa
     };
     tool.plan(&tool.validate(&arguments)?, &call, view, &policy)
 }
-fn execute(view: &FsWorkspace, plan: &Plan) -> FsOutcome {
-    view.execute(plan, &CancellationToken::new())
+fn execute(view: &FsWorkspace, plan: &Plan) -> ExecutionOutcome {
+    view.execute(plan, &CancelToken::new())
 }
-fn text(outcome: &FsOutcome) -> &str {
+fn text(outcome: &ExecutionOutcome) -> &str {
     match &outcome.content[0] {
         ContentBlock::Text { text } => text,
         _ => panic!("file result is not text"),
     }
 }
-fn assert_code(outcome: FsOutcome, code: ResultCode) {
+fn assert_code(outcome: ExecutionOutcome, code: ResultCode) {
     assert_eq!(outcome.code, Some(code), "{}", text(&outcome));
     let expected = match code {
         ResultCode::InfrastructureFailure => ToolStatus::InfrastructureFailure,
@@ -288,7 +288,7 @@ fn s01_created_target_between_plan_and_execution_is_stale() {
     let mut created_temp = false;
     let outcome = view.execute_hooked(
         &plan,
-        &CancellationToken::new(),
+        &CancelToken::new(),
         &mut |step| {
             created_temp |= step == Step::CreateTemp;
             Ok(())
@@ -314,7 +314,7 @@ fn s01_created_target_at_rename_requires_noreplace() {
     let plan = plan(&view, "write", json!({"path":"new","text":"replacement"})).unwrap();
     let outcome = view.execute_hooked(
         &plan,
-        &CancellationToken::new(),
+        &CancelToken::new(),
         &mut |step| {
             if step == Step::Rename {
                 fs::write(root.path().join("new"), "concurrent").unwrap();
@@ -344,7 +344,7 @@ fn s01_changed_content_while_preparing_replacement_is_stale() {
     .unwrap();
     let outcome = view.execute_hooked(
         &plan,
-        &CancellationToken::new(),
+        &CancelToken::new(),
         &mut |step| {
             if step == Step::Recheck {
                 fs::write(root.path().join("file"), "concurrent").unwrap();
@@ -531,7 +531,7 @@ fn s01_cancel_at_every_precommit_step_leaves_original_and_no_temp() {
         )
         .unwrap();
         let mut trace = Vec::new();
-        let token = CancellationToken::new();
+        let token = CancelToken::new();
         let outcome = view.execute_hooked(
             &plan,
             &token,
@@ -547,7 +547,7 @@ fn s01_cancel_at_every_precommit_step_leaves_original_and_no_temp() {
         assert_code(outcome, ResultCode::Cancelled);
         assert_eq!(trace.last(), Some(&Step::Rename));
         for cancel_at in 0..trace.len() {
-            let token = CancellationToken::new();
+            let token = CancelToken::new();
             let mut index = 0;
             let outcome = view.execute_hooked(
                 &plan,
@@ -586,7 +586,7 @@ fn s01_cancel_after_rename_reports_success() {
         json!({"path":"file","text":"replacement","overwrite":true}),
     )
     .unwrap();
-    let token = CancellationToken::new();
+    let token = CancelToken::new();
     let outcome = view.execute_hooked(
         &plan,
         &token,
@@ -621,7 +621,7 @@ fn s01_directory_relocated_outside_root_during_resolution_or_reopen() {
         let mut resolves = 0;
         let out = view.execute_hooked(
             &plan,
-            &CancellationToken::new(),
+            &CancelToken::new(),
             &mut |step| {
                 if step == Step::Resolve {
                     resolves += 1;
@@ -840,6 +840,82 @@ fn fs_read_output_bounded_with_continuable_actual_byte_range() {
 }
 
 #[test]
+fn fs_executor_trait_runs_authorized_plans_and_shared_cancellation() {
+    use crate::session::ExecutionBackend;
+    let root = TempDir::new().unwrap();
+    let view = workspace(&root);
+    let executor: &dyn Executor = &view;
+    assert_eq!(executor.backend(), ExecutionBackend::TrustedFs);
+    for (name, arguments) in [
+        ("write", json!({"path":"file","text":"hello"})),
+        ("read", json!({"path":"file"})),
+        (
+            "edit",
+            json!({"path":"file","old_text":"hello","new_text":"done"}),
+        ),
+    ] {
+        let operation = AuthorizedOperation::new(
+            plan(&view, name, arguments).unwrap(),
+            "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
+            "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+        );
+        let outcome = executor.execute(&operation, &CancelToken::new());
+        assert_eq!(outcome.status, ToolStatus::Succeeded, "{}", text(&outcome));
+        assert_eq!(outcome.code, None);
+        assert!(outcome.duration_ms.is_some());
+        assert_eq!(outcome.exit_code, None);
+        assert!(outcome.artifacts.is_empty());
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("file")).unwrap(),
+        "done"
+    );
+    let operation = AuthorizedOperation::new(
+        plan(&view, "read", json!({"path":"file"})).unwrap(),
+        "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
+        "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+    );
+    let cancel = CancelToken::new();
+    cancel.clone().cancel();
+    assert_code(executor.execute(&operation, &cancel), ResultCode::Cancelled);
+    let bash = AuthorizedOperation::new(
+        plan(&view, "bash", json!({"command":"true"})).unwrap(),
+        "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
+        "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+    );
+    assert_ne!(bash.plan().backend(), ExecutionBackend::TrustedFs);
+    assert_code(
+        executor.execute(&bash, &CancelToken::new()),
+        ResultCode::InfrastructureFailure,
+    );
+    assert_no_temp(&root);
+}
+
+#[test]
+fn fs_write_and_edit_strip_special_mode_bits() {
+    for tool in ["write", "edit"] {
+        for mode in [0o4755, 0o2755, 0o1755, 0o7755] {
+            let root = TempDir::new().unwrap();
+            let view = workspace(&root);
+            let file = root.path().join("file");
+            fs::write(&file, "original").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(fs::metadata(&file).unwrap().mode() & 0o7777, mode);
+            let arguments = if tool == "write" {
+                json!({"path":"file","text":"replacement","overwrite":true})
+            } else {
+                json!({"path":"file","old_text":"original","new_text":"replacement"})
+            };
+            let outcome = execute(&view, &plan(&view, tool, arguments).unwrap());
+            assert_eq!(outcome.status, ToolStatus::Succeeded, "{}", text(&outcome));
+            assert_eq!(fs::metadata(&file).unwrap().mode() & 0o7777, 0o755);
+            assert_eq!(fs::read_to_string(&file).unwrap(), "replacement");
+            assert_no_temp(&root);
+        }
+    }
+}
+
+#[test]
 fn fs_write_and_edit_are_atomic_preserve_mode_and_report_post_image() {
     let root = TempDir::new().unwrap();
     let view = workspace(&root);
@@ -980,7 +1056,7 @@ fn fs_unexpected_errno_and_deadline_use_executed_statuses() {
     ] {
         let out = view.execute_hooked(
             &plan,
-            &CancellationToken::new(),
+            &CancelToken::new(),
             &mut |s| {
                 if s == step {
                     Err(errno(Errno::IO))
@@ -1001,7 +1077,7 @@ fn fs_unexpected_errno_and_deadline_use_executed_statuses() {
     assert_code(
         view.execute_hooked(
             &plan,
-            &CancellationToken::new(),
+            &CancelToken::new(),
             &mut |_| Ok(()),
             Some(Duration::ZERO),
         ),

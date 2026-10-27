@@ -1,12 +1,12 @@
 use std::time::{Duration, Instant};
 
+use crate::tools::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor};
 use rustix::{
     fd::{AsFd, OwnedFd},
     fs::{self, AtFlags, Mode, OFlags, RenameFlags, Stat},
     io,
 };
 use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
 use super::{
     FsWorkspace,
@@ -16,7 +16,7 @@ use super::{
     },
 };
 use crate::{
-    session::{ContentBlock, Digest, ResultCode, ToolStatus},
+    session::{ContentBlock, Digest, ExecutionBackend, ResultCode, ToolStatus},
     tools::{
         Plan, Refusal, WorkspacePath,
         builtin::{MIB, Operation},
@@ -28,25 +28,6 @@ const OUTPUT_LIMIT: usize = 32 * 1024;
 // Enough for the byte-range header even for u64 offsets. The aggregate text,
 // including metadata, is bounded, not just the file payload.
 const READ_BUDGET: usize = OUTPUT_LIMIT - 256;
-
-/// File executor result; the driver adapts this to its own execution outcome.
-#[derive(Clone, Debug)]
-pub struct FsOutcome {
-    /// Executed-result status, explicitly independent of planning refusals.
-    pub status: ToolStatus,
-    /// Absent exactly on success.
-    pub code: Option<ResultCode>,
-    /// Model-facing text, at most 32 KiB including range/digest metadata.
-    pub content: Vec<ContentBlock>,
-    /// File tools do not have a process exit code.
-    pub exit_code: Option<i32>,
-    /// Elapsed monotonic time in milliseconds.
-    pub duration_ms: u64,
-    /// The requested read range exceeded the inline output budget.
-    pub output_truncated: bool,
-    /// File tools do not publish artifacts in this step.
-    pub artifacts: Vec<Vec<u8>>,
-}
 
 // Extract binding metadata only from the opaque Plan's canonical bytes. This
 // avoids changing the pure planning API or allowing model JSON to construct a
@@ -63,23 +44,39 @@ struct Target {
     pre_image: String,
 }
 
+impl Executor for FsWorkspace {
+    fn backend(&self) -> ExecutionBackend {
+        ExecutionBackend::TrustedFs
+    }
+
+    fn execute(&self, operation: &AuthorizedOperation, cancel: &CancelToken) -> ExecutionOutcome {
+        FsWorkspace::execute(self, operation.plan(), cancel)
+    }
+}
+
 impl FsWorkspace {
     /// Execute an already authorized read/write/edit plan. Recheck filesystem
     /// binding; honour cancellation/deadline until, but never after, the rename.
     /// This low-level API does not grant authorization or execute bash plans.
-    pub fn execute(&self, plan: &Plan, cancellation: &CancellationToken) -> FsOutcome {
+    pub fn execute(&self, plan: &Plan, cancellation: &CancelToken) -> ExecutionOutcome {
         self.execute_hooked(plan, cancellation, &mut |_| Ok(()), None)
     }
 
     pub(super) fn execute_hooked(
         &self,
         plan: &Plan,
-        cancellation: &CancellationToken,
+        cancellation: &CancelToken,
         hook: &mut dyn FnMut(Step) -> Result<(), Refusal>,
         timeout: Option<Duration>,
-    ) -> FsOutcome {
+    ) -> ExecutionOutcome {
         let started = Instant::now();
         let result = (|| {
+            if plan.backend() != ExecutionBackend::TrustedFs {
+                return Err(Refusal::new(
+                    ResultCode::InfrastructureFailure,
+                    "unsupported file executor backend",
+                ));
+            }
             let binding: Binding = serde_json::from_slice(plan.bytes()).map_err(|_| {
                 Refusal::new(
                     ResultCode::InfrastructureFailure,
@@ -146,12 +143,12 @@ impl FsWorkspace {
                 (status, Some(error.code), error.text(), false)
             }
         };
-        FsOutcome {
+        ExecutionOutcome {
             status,
             code,
             content: vec![ContentBlock::Text { text }],
             exit_code: None,
-            duration_ms,
+            duration_ms: Some(duration_ms),
             output_truncated,
             artifacts: Vec::new(),
         }
@@ -235,7 +232,7 @@ impl FsWorkspace {
                 current
                     .as_ref()
                     .map_or(Mode::from_raw_mode(0o644), |(_, stat)| {
-                        Mode::from_raw_mode(stat.st_mode & 0o7777)
+                        Mode::from_raw_mode(stat.st_mode & 0o777)
                     }),
             ),
             (Replacement::Edit(old, new), Some((file, stat))) => {
@@ -268,7 +265,7 @@ impl FsWorkspace {
                 updated.push_str(&text[offset + old.len()..]);
                 (
                     updated.into_bytes(),
-                    Mode::from_raw_mode(stat.st_mode & 0o7777),
+                    Mode::from_raw_mode(stat.st_mode & 0o777),
                 )
             }
             _ => return Err(stale()),
