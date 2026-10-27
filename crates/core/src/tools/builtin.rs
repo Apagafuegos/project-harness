@@ -9,7 +9,7 @@ use crate::session::{CallRef, EffectClass, EffectSet, ExecutionBackend, ResultCo
 pub(super) const MIB: u64 = 1024 * 1024;
 
 /// Provider-facing description of a compiled-in capability.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolDefinition {
     /// Reserved tool name.
     pub name: String,
@@ -90,12 +90,14 @@ impl Operation {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Builtin {
     index: usize,
     definition: ToolDefinition,
 }
 
 /// A fixed registry. It has no registration or replacement API.
+#[derive(Clone, Debug)]
 pub struct Registry {
     tools: [Builtin; 4],
 }

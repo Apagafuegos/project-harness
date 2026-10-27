@@ -43,7 +43,7 @@
 //! while let Some(input) = inputs.pop() {
 //!     for effect in runtime.step(input, &mut env) {
 //!         match effect {
-//!             Effect::Persist { token, mut commit, command, at } => {
+//!             Effect::Persist { token, mut commit, command, at, .. } => {
 //!                 if let Some((id, command)) = command {
 //!                     store.bind_command(&mut commit, id, &command)?;
 //!                 }

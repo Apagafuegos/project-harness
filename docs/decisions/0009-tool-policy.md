@@ -1,7 +1,9 @@
 # 0009: Pure tool contracts and configuration policy
 
 Status: Accepted and implemented for Milestone 3 step 3. Execution, approvals in
-runtime state, descriptor resolution, and recovery changes remain planned.
+runtime state, descriptor resolution, and recovery changes were planned here;
+[decision 0010](0010-tool-pipeline.md) now implements the core approval and
+execution-effect pipeline, with real executors still deferred.
 
 Date: 2026-10-27
 
@@ -14,7 +16,8 @@ JSON Schema once. Validation is pure in arguments and produces a private,
 defaulted `ValidatedOperation`; planning reads only a supplied `WorkspaceView`
 and produces a private immutable `Plan`. Neither type can be deserialized from
 model JSON. The definitions alone do not make an executor available. Runtime's
-existing `tools_unavailable` behavior is unchanged.
+existing `tools_unavailable` behavior is retained when no executors are installed;
+step 4a's core integration is recorded in decision 0010.
 
 `WorkspacePath` validates its only public constructor, limits input to 4096
 UTF-8 bytes, rejects absolute paths, traversal components and NUL, and normalizes
@@ -34,7 +37,12 @@ files. The step 5 executor will validate UTF-8 for the requested range and adjus
 split-character boundaries as RFC §4.1 specifies.
 
 Refusals contain codes, status, and short text without argument values or file
-contents. Schema diagnostics name the first failing field/key and rule; path
+contents. Under decision 22, policy/protection/network refusals are `denied`,
+infrastructure failures are `infrastructure_failure`, and every other
+pre-execution refusal is `invalid_arguments`, including environmental validation
+such as `not_found`, `no_match`, or `too_large`. `failed` is reserved for
+explicit executor outcomes, never derived from a refusal's status.
+Schema diagnostics name the first failing field/key and rule; path
 and byte-limit errors name the field, and all argument details are capped at
 200 UTF-8 bytes. A regular-file view missing its required digest returns
 `infrastructure_failure` with `InfrastructureFailure` status, not a model fault. File deadlines are 30 seconds;
@@ -118,8 +126,9 @@ carried forward in configuration.
 
 ## Explicitly deferred
 
-- Step 4: runtime integration, `SubmitApproval`, ticket IDs and five-minute
-  expiry, remember/configuration commits, executor threading and cancellation.
+- Step 4b: async tool integration and executor threading. Step 4a now implements
+  `SubmitApproval`, five-minute expiry, remember/configuration commits and
+  cancellation gates in the pure core and synchronous test driver (decision 0010).
 - Step 5 (D6): descriptor-relative `openat2` with `RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV`, no symlinks in
   any component and no fallback if unavailable. Descriptor/ancestor `(dev, ino)`

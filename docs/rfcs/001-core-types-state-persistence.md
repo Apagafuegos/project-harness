@@ -287,14 +287,20 @@ pub enum Authorization {
 pub fn decide(plan: &Plan, facts: &PlanFacts, policy: &PolicySnapshot)
     -> Authorization;
 
-pub enum ExecutionOutcome {
-    Observed(ToolResult),
-    Uncertain { invocation_id: InvocationId, diagnostic: String },
+pub struct ExecutionOutcome {
+    pub status: ToolStatus,
+    pub code: Option<ResultCode>,
+    pub content: Vec<ContentBlock>,
+    pub exit_code: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub output_truncated: bool,
+    pub artifacts: Vec<Vec<u8>>,
 }
 
 pub trait Executor: Send + Sync {
-    fn execute(&self, operation: AuthorizedOperation, control: OperationControl)
-        -> BoxFuture<'_, ExecutionOutcome>;
+    fn backend(&self) -> ExecutionBackend;
+    fn execute(&self, operation: &AuthorizedOperation, cancel: &CancelToken)
+        -> ExecutionOutcome;
 }
 ```
 
@@ -304,7 +310,13 @@ the exact policy table and API boundaries. `WorkspaceView` supplies trusted
 facts and bounded UTF-8 reads, not direct filesystem access. `Plan` and
 `ValidatedOperation` have private fields and are constructed only by tools.
 `Refusal` carries `ResultCode`, `ToolStatus` and short content-free detail;
-`text()` renders `<code>: <detail>`. Unknown/disabled names are refused before
+`text()` renders `<code>: <detail>`. Pre-execution refusals use `denied` for
+policy/protection/network, `infrastructure_failure` for infrastructure errors,
+and `invalid_arguments` for every other code, including environmental
+validation (`not_found`, `no_match`, `too_large`, etc.). Storage reserves
+`failed` for executed operations; executors set their statuses explicitly,
+never from `Refusal::status` (settled decision 22).
+Unknown/disabled names are refused before
 validation. Schemas reject unknown keys; semantic argument failures use
 `invalid_arguments`, with a field/key and rule diagnostic capped at 200 bytes
 and no echoed value. Configuration decoding instead returns session-level
@@ -312,15 +324,19 @@ and no echoed value. Configuration decoding instead returns session-level
 regular-file digest use `infrastructure_failure`. `.git` is read-only by default, but a configured protected
 path is fully denied and takes precedence over read-only or any allowance.
 
-The executor sketch and `AuthorizedOperation` below remain planned for step 4.
-`BoxFuture<'a, T>` means a pinned, boxed, `Send` future with that lifetime.
-`AuthorizedOperation` has a private constructor.
-The latter contains the exact validated operation, invocation/call identity,
-plan digest, decision ID, policy revision, workspace capability, approved
-mounts/network, and expiry. Executors recheck binding/expiry immediately before dispatch;
-model-supplied JSON cannot manufacture this type. An uncertain executor outcome
-records uncertainty and blocks recovery, not a terminal successful result;
-`ToolStatus::Uncertain` is only a user-acknowledged recovery result. Cancellation
+The execution seam and pure-core dispatch are implemented in Milestone 3 step
+4a; see [decision 0010](../decisions/0010-tool-pipeline.md). `AuthorizedOperation`
+has private fields and no public constructor. It holds the immutable exact
+plan, invocation/call identity, decision ID and authorizing policy revision.
+The plan binds workspace, mounts, network, effects and timeout. The core checks
+approval identity, digest, revision and expiry before committing authorization;
+only the intent's acknowledgement permits dispatch. Model-supplied JSON cannot
+manufacture this type. `Executor` is synchronous for the dedicated thread to
+be added in step 4b; `CancelToken` is a small `Arc<AtomicBool>` wrapper.
+Executor output is bounded to 32 KiB inline, with full bounded captures
+published as artifacts before the result. Its code is absent exactly on
+success. `ToolStatus::Uncertain` remains only a user-acknowledged recovery
+result; an intent without a durable result blocks recovery. Cancellation
 never implies rollback of already performed mutations. If a trusted replacement
 completed and its success is verified, retain that success even when the enclosing
 turn was cancelled.
@@ -355,8 +371,8 @@ ending in `/` (descendants only), or `.` for the workspace. Bash allowances bind
 exact command bytes plus normalized cwd, never a command prefix or glob.
 `Allowance::remember` grants the narrowest matching allowance. `grant`/`revoke`
 produce a compact configuration artifact changing only `policy_revision` and
-`allowances`, preserving unknown values and existing allowances. Step 4 will
-publish it through `configuration_changed`; a revision invalidates pending
+`allowances`, preserving unknown values and existing allowances. Step 4a
+publishes it through `configuration_changed`; a revision invalidates pending
 approvals but carries allowances forward. Deny policy and protection always win.
 A configured allowance never bypasses the sandbox. Approval requests
 expire after five minutes and are single-use for the bound call/plan. User denial,
@@ -545,8 +561,10 @@ turn outcomes, and explicit recovery; they are not tree parents/model dialogue.
 The header and every `turn_started` include a `configuration` artifact containing
 the actual policy, tool definitions, instructions, model metadata, and context
 settings, with their schema/implementation versions. Fingerprints without
-reconstructable inputs are insufficient. An idle-only `configuration_changed`
-audit event records later session-wide policy changes; navigation cannot undo
+reconstructable inputs are insufficient. A `configuration_changed`
+audit event records later session-wide policy changes. It is idle-only except
+for decision 16's remembered grant: in the same commit, after a validated allow
+consuming a pending approval, with a different policy revision. Navigation cannot undo
 security policy. Approval/authorization events reference the stored plan artifact
 whose digest binds the decision. Their exact fields are in the schema.
 
@@ -776,7 +794,7 @@ explicit recovery before a new inference, even after branch navigation.
 
 `EngineHandle::submit(command_id, command)` is async and returns a correlated
 acceptance/result. Commands are `StartTurn { prompt }`, `CancelTurn { turn_id }`,
-`SubmitApproval { approval_id, plan_digest, decision }`, `SelectHead { entry_id }`,
+`SubmitApproval { approval_id, plan_digest, decision, remember }`, `SelectHead { entry_id }`,
 `SwitchModel { model, portability }`, `PreviewCompaction`, `CommitCompaction`,
 `UpdateConfiguration { snapshot }`, and `ResolveExecution { invocation_id, resolution }`. Session identity is bound
 to the handle; no command changes the workspace of a running session.
@@ -786,6 +804,13 @@ cursor/subscription, avoiding a snapshot/subscription race. Read APIs expose
 session/tree inspection, context reports, and protected artifact access.
 The TUI only submits commands and displays events; it does not make policy
 decisions independently or run tools to service an approval.
+
+Milestone 3 step 4a implements `Command::SubmitApproval` in the pure core.
+Wrong digest is `approval_mismatch` with no commit; absent/used/stale tickets
+are `NotActive`. Decisions and pending approval views are exposed through the
+shared client reducer. `ApprovalSubmitted` acknowledges decision durability;
+`ApprovalResolved` follows it, and `ToolFinished` follows result durability.
+Async tool/approval convenience plumbing remains step 4b.
 
 Every `EngineEvent` has session ID, optional turn ID, a process-instance stream
 ID, increasing event sequence, optional durable journal sequence, and a payload.
@@ -824,10 +849,14 @@ The normal path is:
    output limit is `failed` with code `output_limit`. Provider failure is
    `failed`, and cancelled inference is `cancelled`; none execute proposals.
 4. `Processing -> Authorizing`: resolve, validate, and authorize the next call.
+   Resolution and validation are pure. Planning reads the workspace through
+   `PlanCall -> Planned`, then pure `decide` runs on the immutable plan.
    Invalid calls commit a result and move to the next call without an executor.
 5. `Authorizing -> Executing`: an allow decision (or a matching user approval)
-   plus execution intent is durably committed before dispatch. Denial commits
-   a denied result. Waiting for approval remains cancellable in `Authorizing`.
+   plus execution intent is durably committed before dispatch. Denial first
+   commits `authorization_decided(deny, reason=<code>)`; only after its ack does
+   a second commit record the nonexecuted result and onward transitions
+   (decision 24). Waiting for approval remains cancellable in `Authorizing`.
 6. `Executing -> Continuing`: wait for process cleanup, store/sync permitted
    artifacts, and commit the result. If more proposals remain, return to
    `Processing`; otherwise prepare the next inference using all committed results.
@@ -845,7 +874,15 @@ results for that interrupted turn without creating another active turn. The
 semantic validator checks these rules and legal transitions.
 Cancellation from any active state enters `Cancelling`; recovery after process
 restart enters `Recovering`. Head navigation, model switching, configuration
-changes, and manual compaction commits are idle-only. Inspection and cancellation remain available
+changes, and manual compaction commits are idle-only, except a remembered
+allowance under decision 16. On approved write/edit/bash with `remember`,
+publish `PolicySnapshot::grant(Allowance::remember(plan), new_revision)` first.
+One commit orders allow (with pending approval ID), intent, configuration change,
+and Executing; intent consumes the old revision's authorization before the
+revision changes. Reload policy on ack so later calls see the allowance. Reads
+ignore remember. Invalid policy fails the turn with `policy_invalid`, not a
+model-facing configuration refusal; unstarted calls are cancelled to close the
+exchange. Inspection and cancellation remain available
 while busy. `ResolveExecution` is recovery-only.
 
 ### 7.3 Tool write-ahead ordering and crash recovery
@@ -856,7 +893,9 @@ For a dispatched call, the required order is:
 2. Validate and obtain a bound authorization decision. Commit approval request
    before presenting it; commit user decision before relying on it.
 3. Commit `execution_intent` with invocation/call, decision, plan digest, backend,
-   and timeout. Only after sync may the executor run.
+   timeout and `Plan::effects()`. Allow and intent may share a commit; no result
+   may share that commit. Publish exact plan bytes before their reference.
+   Only after its acknowledgement may `Execute` and `ToolStarted` be emitted.
 4. Execute, fully clean up, finalize artifacts, and commit exactly one terminal
    `tool_result` referencing the proposal and invocation.
 5. Only then may a subsequent inference consume that result.
@@ -881,6 +920,16 @@ Only then may the engine become idle. A requested rerun is a new invocation,
 new call/turn, and fresh authorization; resolution itself never executes it.
 If a result already committed but the client missed it, replay that result and
 do not run the operation again.
+
+A crash between a denial decision and its result also leaves a known-not-started
+call: recovery answers it `cancelled` with `process_restart`, with no uncertainty
+or execution. Storage's entry-before-event validation is unchanged; only the
+remember exception changes a storage rule in step 4a.
+
+Tool definitions are supplied separately on `StartInference`, filtered by enabled
+configuration and executor availability in registry order. In M3 they do not
+change the context projection, its version or fingerprint. With no executors,
+tools are not offered and calls retain `tools_unavailable` behavior.
 
 Queued proposals without execution intent are known not started. When terminating
 an interrupted/cancelled turn, append their cancelled/not-started results before

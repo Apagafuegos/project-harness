@@ -4,9 +4,10 @@
 //! inspected fingerprint, recovers, and resolves uncertain invocations with
 //! a PRNG-chosen statement before continuing.
 
-use super::recovery::authorize;
+use super::pipeline::{configuration, outcome};
 use super::*;
 use crate::context::{ContextBuilder, ModelLimits};
+use std::sync::atomic::Ordering;
 
 /// Seeds run by default. Set `RUNTIME_SEED` to rerun one seed, or
 /// `RUNTIME_SEEDS` to run more.
@@ -145,14 +146,24 @@ fn script(rng: &mut Rng) -> std::collections::VecDeque<ProviderEvent> {
     };
     let mut fragments = Vec::new();
     for call in 0..calls {
+        let name = *rng.pick(&["read", "read", "write", "edit", "bash", "unknown"]);
+        let arguments = if rng.chance(12) { serde_json::json!({"invalid":true}) } else {
+            match name {
+                "write" => serde_json::json!({"path":"new", "text":"written"}),
+                "edit" => serde_json::json!({"path":format!("f{call}"), "old_text":"hello", "new_text":"hi"}),
+                "bash" => serde_json::json!({"command":"true"}),
+                _ => serde_json::json!({"path":format!("f{call}")}),
+            }
+        }.to_string();
+        let split = arguments.len() / 2;
         events.push_back(ProviderEvent::ToolCallStarted {
             block_index: 1 + call,
-            name: rng.pick(&["read", "write"]).to_string(),
+            name: name.into(),
             provider_call_id: rng.chance(50).then(|| format!("native-{call}")),
         });
         fragments.push((
             1 + call,
-            vec![format!("{{\"path\":\"f{call}\""), "}".to_string()],
+            vec![arguments[..split].into(), arguments[split..].into()],
         ));
     }
     // Interleave argument streams of different calls.
@@ -353,10 +364,6 @@ fn processing(d: &Driver) -> bool {
 /// pending, a tool runtime sometimes wrote its authorization, and sometimes
 /// its execution intent, just before the crash.
 fn crash(d: &mut Driver, rng: &mut Rng) {
-    if processing(d) && rng.chance(80) {
-        let intent = rng.chance(75);
-        d.inject(|snapshot, env, root| authorize(snapshot, env, root, intent));
-    }
     let kind = *rng.pick(&[Crash::Lost, Crash::Durable, Crash::Torn]);
     d.crash(kind);
 }
@@ -368,7 +375,18 @@ fn random_step(
     scripts: &mut Scripts,
 ) {
     // Calls wait for answers only briefly, so crash there more often.
-    if rng.chance(if processing(d) { 60 } else { 2 }) {
+    if rng.chance(
+        if matches!(
+            d.runtime.phase(),
+            Phase::Durable(
+                RuntimeState::Processing | RuntimeState::Authorizing | RuntimeState::Executing
+            )
+        ) {
+            12
+        } else {
+            2
+        },
+    ) {
         return crash(d, rng);
     }
     match d.runtime.phase() {
@@ -380,6 +398,54 @@ fn random_step(
             return;
         }
         _ => {}
+    }
+    if d.planning.is_some() && rng.chance(55) {
+        d.plan();
+        return;
+    }
+    if d.executing.is_some() && rng.chance(35) {
+        let (status, code) = *rng.pick(&[
+            (ToolStatus::Succeeded, None),
+            (ToolStatus::Failed, Some(ResultCode::StalePlan)),
+            (ToolStatus::Failed, Some(ResultCode::NonzeroExit)),
+            (ToolStatus::TimedOut, Some(ResultCode::Timeout)),
+            (
+                ToolStatus::InfrastructureFailure,
+                Some(ResultCode::SandboxUnavailable),
+            ),
+            (ToolStatus::Cancelled, Some(ResultCode::Cancelled)),
+        ]);
+        d.executor
+            .success_wins
+            .store(rng.chance(30), Ordering::Release);
+        d.executor
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(outcome(status, code));
+        d.execute();
+        return;
+    }
+    if let Some(ticket) = d.runtime.view().pending_approval
+        && d.pending.is_none()
+        && rng.chance(35)
+    {
+        let choice = rng.below(5);
+        d.command(Command::SubmitApproval {
+            approval_id: ticket.approval_id,
+            plan_digest: if choice == 0 {
+                Digest::of(b"mismatch")
+            } else {
+                ticket.plan_digest
+            },
+            decision: if choice == 1 {
+                Decision::Deny
+            } else {
+                Decision::Allow
+            },
+            remember: choice >= 3,
+        });
+        return;
     }
     if d.verification.is_some() && rng.chance(50) {
         let (token, refs) = d.verification.take().unwrap();
@@ -436,6 +502,22 @@ fn random_step(
         16 if d.inference.is_some() && rng.chance(25) => {
             d.ended();
         }
+        18 if rng.chance(50) => {
+            d.step(Input::Planned {
+                token: PlanToken(9000),
+                result: Err(crate::tools::Refusal {
+                    status: ToolStatus::InvalidArguments,
+                    code: ResultCode::InvalidArguments,
+                    detail: "stale".into(),
+                }),
+            });
+        }
+        19 if rng.chance(50) => {
+            d.step(Input::ToolFinished {
+                token: ExecutionToken(9000),
+                outcome: outcome(ToolStatus::Succeeded, None),
+            });
+        }
         17 => {
             let timer = match d.timers.iter().next() {
                 Some(timer) if rng.chance(80) => *timer,
@@ -452,11 +534,17 @@ fn random_step(
 /// Answer commits, play out or end streams and fire timers until the turn is over.
 fn quiesce(d: &mut Driver, rng: &mut Rng, scripts: &mut Scripts) {
     for _ in 0..10_000 {
-        if processing(d) && rng.chance(60) {
+        if processing(d) && rng.chance(12) {
             crash(d, rng);
             continue;
         }
-        if d.complete() {
+        if d.complete() || d.plan() || d.execute() {
+            continue;
+        }
+        if d.runtime.view().pending_approval.is_some()
+            && let Some(timer) = d.timers.iter().next().copied()
+        {
+            d.fire(timer);
             continue;
         }
         let phase = d.runtime.phase();
@@ -517,21 +605,46 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
                 f.code.as_deref().unwrap_or("-")
             )),
             JournalEvent::StateChanged(c) => count(format!("transition {:?}>{:?}", c.from, c.to)),
-            JournalEvent::ExecutionIntent(_) => {
-                count("execution intents written before a crash".into())
-            }
+            JournalEvent::ExecutionIntent(_) => count("execution intents".into()),
             JournalEvent::ExecutionUncertain(_) => count("execution uncertain".into()),
             JournalEvent::RecoveryResolved(r) => count(format!("resolved {:?}", r.resolution)),
+            JournalEvent::ApprovalRequested(_) => count("approval requests".into()),
+            JournalEvent::AuthorizationDecided(a) => {
+                count(format!("authorization {:?} {}", a.decision, a.reason))
+            }
+            JournalEvent::ConfigurationChanged(_) => count("remember grants".into()),
             _ => {}
         }
     }
     for (_, stored) in finished.reopened.entries() {
         if let EntryPayload::ToolResult(r) = &stored.entry.payload {
             count(format!("tool result {:?}", r.result.status));
+            count(format!(
+                "tool code {}",
+                r.result.metadata.code.as_deref().unwrap_or("succeeded")
+            ));
+        }
+    }
+    for segment in finished
+        .segments
+        .iter()
+        .take(finished.segments.len().saturating_sub(1))
+    {
+        let view = segment.views.last().unwrap();
+        count(format!("restart from {:?}", view.phase));
+        if view.pending_approval.is_some() {
+            count("approvals abandoned by restart".into());
+        }
+        if view.snapshot.active_turn().is_some()
+            && view.snapshot.events().last().is_some_and(|(_, _, e)| matches!(e, JournalEvent::AuthorizationDecided(a) if a.decision == Decision::Deny)) {
+            count("restarts between denial and result".into());
         }
     }
     for effect in finished.segments.iter().flat_map(|s| &s.effects) {
         match effect {
+            Effect::PlanCall { .. } => count("planning effects".into()),
+            Effect::Execute { .. } => count("executor dispatches".into()),
+            Effect::CancelExecution { .. } => count("executor cancellation requests".into()),
             Effect::Persist { .. } => count("commits".into()),
             Effect::Emit(RuntimeEvent {
                 kind: EventKind::Recovered { .. },
@@ -578,39 +691,82 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
 /// would also have faulted the core with an internal cause.
 fn check_contexts(finished: &Finished, rng: &mut Rng) {
     let first = &finished.segments[0];
-    let builder = ContextBuilder::new(&first.config.context, &first.configuration);
     let snapshot = &finished.reopened;
+    // A remembered allowance changes the configuration artifact mid-turn.
+    // Rebuild each immutable projection under its own published configuration,
+    // not the final session-wide policy (navigation never undoes that policy).
+    let mut configurations = BTreeMap::new();
+    for segment in &finished.segments {
+        configurations.insert(
+            segment.configuration.artifact().sha256.clone(),
+            segment.configuration.clone(),
+        );
+        for effect in &segment.effects {
+            if let Effect::Persist { artifacts, .. } = effect {
+                for bytes in artifacts {
+                    let reference = ArtifactRef {
+                        sha256: Digest::of(bytes),
+                        bytes: bytes.len() as u64,
+                    };
+                    if let Ok(configuration) = SessionConfiguration::parse(reference.clone(), bytes)
+                    {
+                        configurations.insert(reference.sha256, configuration);
+                    }
+                }
+            }
+        }
+    }
+    let mut built_contexts = BTreeMap::new();
+    for segment in &finished.segments {
+        for event in segment.events() {
+            match &event.kind {
+                EventKind::ContextBuilt {
+                    head,
+                    fingerprint,
+                    flags,
+                    ..
+                } => {
+                    let view = segment
+                        .views
+                        .iter()
+                        .find(|v| v.event_seq >= event.seq)
+                        .unwrap();
+                    let configuration = &configurations[&view.snapshot.configuration().sha256];
+                    let builder = ContextBuilder::new(&segment.config.context, configuration);
+                    let rebuilt = builder.build(&view.snapshot, Some(head), None).unwrap();
+                    assert_eq!(
+                        &rebuilt.projection.fingerprint, fingerprint,
+                        "rebuild after reopen differs"
+                    );
+                    assert_eq!(&rebuilt.report.flags, flags);
+                    for (id, entry) in view.snapshot.entries() {
+                        assert_eq!(
+                            snapshot.entry(id).unwrap().record_checksum,
+                            entry.record_checksum
+                        );
+                    }
+                    built_contexts.insert((head.clone(), fingerprint.clone()), *flags);
+                }
+                EventKind::Fault(FaultCause::Internal(code)) => panic!("internal fault: {code}"),
+                _ => {}
+            }
+        }
+    }
     for effect in finished.segments.iter().flat_map(|s| &s.effects) {
         if let Effect::StartInference {
             head, fingerprint, ..
         } = effect
         {
-            let rebuilt = builder.build(snapshot, Some(head), None).unwrap();
-            assert_eq!(&rebuilt.projection.fingerprint, fingerprint);
-            let flags = rebuilt.report.flags;
-            assert!(!flags.budget_unknown, "inference with an unknown budget");
-            assert!(!flags.overflow, "inference with an overflowing context");
+            let flags = built_contexts
+                .get(&(head.clone(), fingerprint.clone()))
+                .unwrap();
+            assert!(!flags.budget_unknown && !flags.overflow);
         }
     }
-    for event in finished.segments.iter().flat_map(Segment::events) {
-        match &event.kind {
-            EventKind::ContextBuilt {
-                head,
-                fingerprint,
-                flags,
-                ..
-            } => {
-                let rebuilt = builder.build(snapshot, Some(head), None).unwrap();
-                assert_eq!(
-                    &rebuilt.projection.fingerprint, fingerprint,
-                    "rebuild after reopen differs"
-                );
-                assert_eq!(&rebuilt.report.flags, flags);
-            }
-            EventKind::Fault(FaultCause::Internal(code)) => panic!("internal fault: {code}"),
-            _ => {}
-        }
-    }
+    let builder = ContextBuilder::new(
+        &first.config.context,
+        &configurations[&snapshot.configuration().sha256],
+    );
     let ids: Vec<EntryId> = snapshot.entries().map(|(id, _)| id.clone()).collect();
     let head = (!ids.is_empty() && rng.chance(90)).then(|| rng.pick(&ids).clone());
     let other = ModelRef {
@@ -622,6 +778,119 @@ fn check_contexts(finished: &Finished, rng: &mut Rng) {
     builder
         .build(snapshot, head.as_ref(), Some(&other))
         .unwrap();
+}
+
+/// Bias part of each known-budget run toward the new gates. Purely random
+/// provider fragments otherwise reach a valid tool finish too rarely to cover
+/// approval/cancellation races reliably. Outcomes, crash fates and ack races
+/// remain seeded, and every effect still passes the same storage oracle.
+fn tool_interleavings(d: &mut Driver, rng: &mut Rng, seed: u64) {
+    let action = seed % 8;
+    let name = if action == 6 {
+        "read"
+    } else {
+        *rng.pick(&["write", "edit", "bash"])
+    };
+    let arguments = match name {
+        "read" => serde_json::json!({"path":"a"}),
+        "edit" => serde_json::json!({"path":"a","old_text":"hello","new_text":"hi"}),
+        "bash" => serde_json::json!({"command":"true"}),
+        _ => serde_json::json!({"path":"new","text":"written"}),
+    };
+    super::pipeline::propose(d, &[(name, arguments.clone()), (name, arguments)]);
+    for _ in 0..200 {
+        if let Some(ticket) = d.runtime.view().pending_approval
+            && d.pending.is_none()
+        {
+            match action {
+                1 => {
+                    d.approval(Decision::Deny, false);
+                }
+                3 => {
+                    let request = d.command(Command::SubmitApproval {
+                        approval_id: ticket.approval_id,
+                        plan_digest: Digest::of(b"mismatch"),
+                        decision: Decision::Allow,
+                        remember: true,
+                    });
+                    assert_eq!(d.rejected(request), Rejection::Invalid("approval_mismatch"));
+                    d.approval(Decision::Allow, false);
+                }
+                4 => {
+                    // Never answer this ticket: expire it or kill the process.
+                    if rng.chance(50) {
+                        d.fire(*d.timers.iter().next().unwrap());
+                    } else {
+                        crash(d, rng);
+                    }
+                }
+                5 => {
+                    d.cancel();
+                }
+                7 => {
+                    d.approval(Decision::Deny, false);
+                    d.complete(); // denial durable, result is not yet acknowledged
+                    crash(d, rng);
+                }
+                _ => {
+                    d.approval(Decision::Allow, action == 2);
+                }
+            }
+            continue;
+        }
+        if d.executing.is_some() && d.pending.is_none() {
+            let (status, code) = *rng.pick(&[
+                (ToolStatus::Succeeded, None),
+                (ToolStatus::Failed, Some(ResultCode::StalePlan)),
+                (ToolStatus::Failed, Some(ResultCode::NonzeroExit)),
+                (ToolStatus::TimedOut, Some(ResultCode::Timeout)),
+                (
+                    ToolStatus::InfrastructureFailure,
+                    Some(ResultCode::SandboxUnavailable),
+                ),
+                (ToolStatus::Cancelled, Some(ResultCode::Cancelled)),
+            ]);
+            d.executor
+                .outcomes
+                .lock()
+                .unwrap()
+                .push_back(outcome(status, code));
+            if action == 6 || rng.chance(20) {
+                d.executor
+                    .success_wins
+                    .store(rng.chance(50), Ordering::Release);
+                d.cancel();
+                if rng.chance(50) {
+                    d.complete();
+                } // completion before or after cancel ack
+            }
+            d.execute();
+            if rng.chance(12) {
+                crash(d, rng);
+            } // result written, lost, or torn
+            continue;
+        }
+        if d.complete() || d.plan() {
+            continue;
+        }
+        match d.runtime.phase() {
+            Phase::AwaitingResolution => {
+                d.acknowledge_all();
+            }
+            Phase::Faulted => crash(d, rng),
+            Phase::Durable(RuntimeState::Idle) => return,
+            Phase::Durable(RuntimeState::Inferring) => {
+                d.provider(ProviderEvent::Started);
+                d.provider(ProviderEvent::Finished {
+                    outcome: ProviderOutcome::Completed,
+                    finish_reason: Some(FinishReason::Stop),
+                    error: None,
+                });
+            }
+            phase => panic!("tool-biased run stalled in {phase:?}"),
+        }
+    }
+    panic!("tool-biased run did not finish");
 }
 
 fn run_seed(seed: u64) -> Finished {
@@ -668,7 +937,29 @@ fn run_seed(seed: u64) -> Finished {
             );
         }
     }
-    let mut d = Driver::with_config(config);
+    let mut policy = configuration();
+    policy["workspace_read"] = serde_json::json!(if rng.chance(30) { "ask" } else { "allow" });
+    if rng.chance(10) {
+        policy["workspace_mutation"] = serde_json::json!("deny");
+    }
+    if rng.chance(10) {
+        policy["enabled_tools"] = serde_json::json!(["read", "write"]);
+    }
+    let backends = if rng.chance(10) {
+        Vec::new()
+    } else if rng.chance(15) {
+        vec![ExecutionBackend::TrustedFs]
+    } else {
+        vec![ExecutionBackend::TrustedFs, ExecutionBackend::Bubblewrap]
+    };
+    let mut d = Driver::with_tools(
+        config,
+        &serde_json::to_vec(&policy).unwrap(),
+        ToolSet::new(backends),
+    );
+    if limit == Some(1_000_000) {
+        tool_interleavings(&mut d, &mut rng, seed);
+    }
     let mut issued = Vec::new();
     let mut scripts = Scripts::new();
     for _ in 0..60 + rng.below(120) {
@@ -678,6 +969,7 @@ fn run_seed(seed: u64) -> Finished {
     let finished = d.finish();
     check_turns(&finished);
     check_resync(&finished);
+    check_replay(&finished);
     check_contexts(&finished, &mut context);
     finished
 }
@@ -715,6 +1007,33 @@ fn randomized_interleavings_keep_storage_and_events_consistent() {
     });
     let coverage = coverage.into_inner().unwrap();
     assert_eq!(coverage["runs"], seeds);
+    if seeds >= SEEDS {
+        for gate in [
+            "approval requests",
+            "approvals abandoned by restart",
+            "authorization Allow allowed",
+            "authorization Deny approval_denied",
+            "authorization Deny approval_expired",
+            "remember grants",
+            "rejected Invalid(\"approval_mismatch\")",
+            "executor dispatches",
+            "executor cancellation requests",
+            "planning effects",
+            "restarts between denial and result",
+            "restart from Durable(Authorizing)",
+            "restart from Durable(Executing)",
+            "tool result Failed",
+            "tool result TimedOut",
+            "tool result InfrastructureFailure",
+            "tool result Succeeded",
+            "tool result Cancelled",
+        ] {
+            assert!(
+                coverage.get(gate).copied().unwrap_or(0) > 0,
+                "randomized run missed {gate}"
+            );
+        }
+    }
     for (key, n) in &coverage {
         eprintln!("{n:>7}  {key}");
     }

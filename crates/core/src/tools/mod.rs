@@ -4,11 +4,13 @@
 //! [`WorkspaceView`]; descriptor resolution and enforcement belong to step 5.
 
 mod builtin;
+mod exec;
 mod path;
 mod plan;
 mod policy;
 
 pub use builtin::{Registry, Tool, ToolDefinition, ValidatedOperation};
+pub use exec::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet};
 pub use path::WorkspacePath;
 pub use plan::{
     FileFacts, FileKind, Plan, PlanFacts, Protection, WorkspaceIdentity, WorkspaceView,
@@ -32,10 +34,9 @@ impl Refusal {
     pub(super) fn new(code: ResultCode, detail: &str) -> Self {
         use ResultCode::*;
         let status = match code {
-            UnknownTool | ToolDisabled | InvalidArguments => ToolStatus::InvalidArguments,
             PolicyDenied | ProtectedPath | NetworkUnsupported => ToolStatus::Denied,
             InfrastructureFailure => ToolStatus::InfrastructureFailure,
-            _ => ToolStatus::Failed,
+            _ => ToolStatus::InvalidArguments,
         };
         Self {
             code,
@@ -51,4 +52,4 @@ impl Refusal {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

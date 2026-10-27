@@ -13,6 +13,10 @@ use crate::session::{
 pub use crate::model::{ProviderEvent, ProviderOutcome};
 
 use super::view::Phase;
+use crate::session::{ApprovalId, Decision, ResultCode};
+use crate::tools::{
+    AuthorizedOperation, ExecutionOutcome, Plan, Refusal, ToolDefinition, ValidatedOperation,
+};
 
 macro_rules! local_id {
     ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {$(
@@ -34,6 +38,10 @@ local_id!(
     InferenceId,
     /// Identifies one driver timer of this runtime. Never journaled.
     TimerId,
+    /// Identifies a planning effect; stale replies are ignored.
+    PlanToken,
+    /// Identifies an execution effect; stale replies are ignored.
+    ExecutionToken,
 );
 
 /// UUIDv7 identity of one runtime incarnation, never journaled.
@@ -155,6 +163,20 @@ pub enum Input {
         /// Why storage failed.
         error: PersistError,
     },
+    /// Planning completed against the driver's trusted workspace view.
+    Planned {
+        /// Fresh identity of the planning effect.
+        token: PlanToken,
+        /// Immutable plan, or a nonexecuted refusal.
+        result: Result<Plan, Refusal>,
+    },
+    /// The executor finished and cleaned up, including after cancellation.
+    ToolFinished {
+        /// Fresh identity of the execution effect.
+        token: ExecutionToken,
+        /// The executor's observation, not a promise of rollback.
+        outcome: ExecutionOutcome,
+    },
     /// One event of a provider stream.
     Provider {
         /// The stream it belongs to.
@@ -188,6 +210,17 @@ pub enum Command {
     Cancel {
         /// The turn the client believes is active.
         turn_id: TurnId,
+    },
+    /// Answer the one durable pending approval. Single-use and digest-bound.
+    SubmitApproval {
+        /// Pending ticket identity.
+        approval_id: ApprovalId,
+        /// Digest displayed in the approval request.
+        plan_digest: Digest,
+        /// Allow or deny this call.
+        decision: Decision,
+        /// Grant the narrowest session allowance for write, edit, or bash.
+        remember: bool,
     },
     /// Durably select another conversation head while idle.
     SelectHead {
@@ -384,6 +417,8 @@ pub enum Effect {
         commit: Commit,
         /// Command to bind with `JournalStore::bind_command` before appending.
         command: Option<(CommandId, serde_json::Value)>,
+        /// Publish and sync these bytes before appending, in the same worker job.
+        artifacts: Vec<Vec<u8>>,
         /// Record timestamp, from `Env::now`.
         at: Timestamp,
     },
@@ -397,10 +432,35 @@ pub enum Effect {
         head: EntryId,
         /// The projection built in `Preparing`, for the model at that head.
         input: ModelInput,
+        /// Enabled, available tools in registry order; outside the projection.
+        tools: Vec<ToolDefinition>,
         /// The projection's fingerprint.
         fingerprint: Digest,
         /// Identity the assistant entry will carry.
         response_id: ResponseId,
+    },
+    /// Read workspace facts and build a plan using the current policy.
+    PlanCall {
+        /// Token echoed in `Input::Planned`.
+        token: PlanToken,
+        /// Durable proposal identity.
+        call: CallRef,
+        /// Resolved built-in name.
+        tool: String,
+        /// Opaque validated and defaulted arguments.
+        operation: ValidatedOperation,
+    },
+    /// Run only after the execution intent has been acknowledged.
+    Execute {
+        /// Token echoed in `Input::ToolFinished`.
+        token: ExecutionToken,
+        /// Opaque authority constructed only by the core.
+        operation: AuthorizedOperation,
+    },
+    /// Request cancellation, then wait for `ToolFinished` before finishing.
+    CancelExecution {
+        /// The currently executing effect.
+        token: ExecutionToken,
     },
     /// Ask a stream to stop by cancelling its token. Keep delivering its events
     /// and its end: the core waits for a confirmation, ignoring other events,
@@ -460,6 +520,13 @@ pub enum Accepted {
         /// The resolved invocation.
         invocation_id: InvocationId,
         /// The commit holding them.
+        ack: CommitAck,
+    },
+    /// The approval decision and its consequences are durable.
+    ApprovalSubmitted {
+        /// The consumed ticket.
+        approval_id: ApprovalId,
+        /// Commit holding the decision.
         ack: CommitAck,
     },
     /// The navigation commit is durable.
@@ -636,10 +703,76 @@ pub enum EventKind {
         /// Each unresolved invocation.
         invocations: Vec<UncertainInvocation>,
     },
+    /// A durable ticket; exposed in resync views until resolved.
+    ApprovalRequested {
+        /// Single-use ticket identity.
+        approval_id: ApprovalId,
+        /// Proposal identity.
+        call: CallRef,
+        /// Digest of exactly `plan`.
+        plan_digest: Digest,
+        /// Canonical plan bytes displayed to the client.
+        plan: Vec<u8>,
+        /// Five-minute deadline.
+        expires_at: Timestamp,
+    },
+    /// The resolution is durable. This clears the pending ticket.
+    ApprovalResolved {
+        /// Consumed or revoked ticket.
+        approval_id: ApprovalId,
+        /// Allowed, denied, expired, invalidated, or cancelled.
+        outcome: ApprovalOutcome,
+    },
+    /// The intent is durable; dispatch follows this event.
+    ToolStarted {
+        /// Proposal identity.
+        call: CallRef,
+        /// Invocation from the durable intent.
+        invocation_id: InvocationId,
+    },
+    /// The result is durable, including a nonexecuted refusal.
+    ToolFinished {
+        /// Proposal identity.
+        call: CallRef,
+        /// Recorded result status.
+        status: ToolStatus,
+        /// Machine-readable result code, absent exactly for success.
+        code: Option<ResultCode>,
+    },
     /// Non-fatal observation.
     Diagnostic(RuntimeDiagnostic),
     /// The runtime stopped. Every later command is rejected with `Faulted`.
     Fault(FaultCause),
+}
+
+/// Durable approval displayed by a client, including after resync.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingApproval {
+    /// Single-use identity.
+    pub approval_id: ApprovalId,
+    /// Proposal identity.
+    pub call: CallRef,
+    /// Digest of exactly `plan`.
+    pub plan_digest: Digest,
+    /// Canonical approved plan bytes.
+    pub plan: Vec<u8>,
+    /// Five minutes after request creation.
+    pub expires_at: Timestamp,
+}
+
+/// Durable outcome of an approval lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    /// User approved; dispatch follows intent acknowledgement.
+    Allowed,
+    /// User refused.
+    Denied,
+    /// Five-minute deadline elapsed.
+    Expired,
+    /// Session policy changed.
+    Invalidated,
+    /// Enclosing turn was cancelled.
+    Cancelled,
 }
 
 /// Non-fatal runtime observations.

@@ -12,13 +12,13 @@ const CONFIG: &[u8] = include_bytes!(
 );
 
 // All workspace tests use only these in-memory facts and bytes.
-struct FakeWorkspace {
-    identity: WorkspaceIdentity,
+pub(crate) struct FakeWorkspace {
+    pub(crate) identity: WorkspaceIdentity,
     entries: BTreeMap<String, (FileFacts, Vec<u8>)>,
     read_text_calls: Cell<u64>,
 }
 impl FakeWorkspace {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut view = Self {
             identity: WorkspaceIdentity("/project".into()),
             entries: BTreeMap::new(),
@@ -28,7 +28,7 @@ impl FakeWorkspace {
         view.file("a", b"hello world");
         view
     }
-    fn directory(&mut self, path: &str) {
+    pub(crate) fn directory(&mut self, path: &str) {
         self.entries.insert(
             path.into(),
             (
@@ -43,7 +43,7 @@ impl FakeWorkspace {
             ),
         );
     }
-    fn file(&mut self, path: &str, bytes: &[u8]) {
+    pub(crate) fn file(&mut self, path: &str, bytes: &[u8]) {
         self.entries.insert(
             path.into(),
             (
@@ -58,7 +58,7 @@ impl FakeWorkspace {
             ),
         );
     }
-    fn facts_mut(&mut self, path: &str) -> &mut FileFacts {
+    pub(crate) fn facts_mut(&mut self, path: &str) -> &mut FileFacts {
         &mut self.entries.get_mut(path).unwrap().0
     }
 }
@@ -510,13 +510,13 @@ fn planning_not_found_not_regular_file_hard_link_rejected_already_exists() {
         refusal(
             plan(name, a, &view, &p),
             ResultCode::NotFound,
-            ToolStatus::Failed,
+            ToolStatus::InvalidArguments,
         );
     }
     refusal(
         plan("write", json!({"path":"missing/new","text":"x"}), &view, &p),
         ResultCode::NotFound,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     view.directory("dir");
     for kind in [FileKind::Directory, FileKind::Other] {
@@ -527,7 +527,7 @@ fn planning_not_found_not_regular_file_hard_link_rejected_already_exists() {
             refusal(
                 plan(name, a, &view, &p),
                 ResultCode::NotRegularFile,
-                ToolStatus::Failed,
+                ToolStatus::InvalidArguments,
             );
         }
     }
@@ -539,14 +539,14 @@ fn planning_not_found_not_regular_file_hard_link_rejected_already_exists() {
         refusal(
             plan(name, a, &view, &p),
             ResultCode::HardLinkRejected,
-            ToolStatus::Failed,
+            ToolStatus::InvalidArguments,
         );
     }
     view.facts_mut("a").nlink = 1;
     refusal(
         plan("write", json!({"path":"a","text":"x"}), &view, &p),
         ResultCode::AlreadyExists,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     assert!(
         plan(
@@ -560,7 +560,7 @@ fn planning_not_found_not_regular_file_hard_link_rejected_already_exists() {
     refusal(
         plan("bash", json!({"command":"x","cwd":"missing"}), &view, &p),
         ResultCode::NotFound,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
 }
 
@@ -576,7 +576,7 @@ fn planning_no_match_multiple_matches_not_utf8_too_large() {
             &p,
         ),
         ResultCode::NoMatch,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     refusal(
         plan(
@@ -586,19 +586,19 @@ fn planning_no_match_multiple_matches_not_utf8_too_large() {
             &p,
         ),
         ResultCode::MultipleMatches,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     view.file("a", &[0xff]);
     refusal(
         plan("edit", args("edit"), &view, &p),
         ResultCode::NotUtf8,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     view.file("a", &vec![b'x'; 1048577]);
     refusal(
         plan("edit", args("edit"), &view, &p),
         ResultCode::TooLarge,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
     view.file("a", &vec![b'x'; 1048576]);
     assert!(plan("read", args("read"), &view, &p).is_ok());
@@ -610,7 +610,7 @@ fn planning_no_match_multiple_matches_not_utf8_too_large() {
             &p,
         ),
         ResultCode::TooLarge,
-        ToolStatus::Failed,
+        ToolStatus::InvalidArguments,
     );
 }
 
@@ -648,7 +648,7 @@ fn edit_overlapping_occurrences_return_multiple_matches() {
                 &p,
             ),
             ResultCode::MultipleMatches,
-            ToolStatus::Failed,
+            ToolStatus::InvalidArguments,
         );
     }
     view.file("a", b"abc");

@@ -2,6 +2,11 @@
 
 use serde_json::json;
 
+#[path = "pipeline.rs"]
+mod pipeline;
+use crate::tools::{PolicyError, PolicySnapshot, ToolSet};
+use pipeline::Activity;
+
 use crate::context::{
     ContextBuilder, ContextError, ContextReport, Projection, SessionConfiguration,
 };
@@ -45,6 +50,9 @@ pub struct Runtime {
     config: RuntimeConfig,
     /// The decoded configuration artifact the context builder reads.
     configuration: SessionConfiguration,
+    policy: Result<PolicySnapshot, PolicyError>,
+    tools: ToolSet,
+    tool: Option<Activity>,
     mode: Mode,
     /// Published snapshot, phase and partial response, changed only by
     /// applying emitted events, so `view()` always matches the event stream.
@@ -86,6 +94,12 @@ struct InFlight {
     /// A turn recovery closes, with the not-started calls it answered.
     recovered: Option<(TurnId, Vec<CallRef>)>,
     ends_inference: bool,
+    /// Facts to publish only after the commit's acknowledgement.
+    tool_events: Vec<EventKind>,
+    /// Artifact bytes published before this commit.
+    artifacts: Vec<Vec<u8>>,
+    /// New decoded configuration installed only after acknowledgement.
+    configuration: Option<SessionConfiguration>,
 }
 
 #[derive(Debug)]
@@ -101,6 +115,7 @@ enum Waiter {
     Resolved(InvocationId),
     HeadSelected,
     ModelSwitched,
+    ApprovalSubmitted(crate::session::ApprovalId),
 }
 
 /// A media opening command reserves the same exclusive slot as a commit.
@@ -203,6 +218,19 @@ impl Runtime {
         config: RuntimeConfig,
         env: &mut impl Env,
     ) -> Self {
+        Self::with_tools(snapshot, configuration, config, ToolSet::default(), env)
+    }
+
+    /// Construct with the fixed registry and available executor backends.
+    /// No I/O is performed and no effect is emitted by construction.
+    pub fn with_tools(
+        snapshot: SessionSnapshot,
+        configuration: SessionConfiguration,
+        config: RuntimeConfig,
+        tools: ToolSet,
+        env: &mut impl Env,
+    ) -> Self {
+        let policy = Self::decode_policy(&snapshot, &configuration);
         let mode = if snapshot.requires_recovery() || snapshot.state() != RuntimeState::Idle {
             Mode::Recovering
         } else {
@@ -216,10 +244,14 @@ impl Runtime {
             snapshot,
             partial: None,
             awaiting: Vec::new(),
+            pending_approval: None,
         };
         Self {
             config,
             configuration,
+            policy,
+            tools,
+            tool: None,
             mode,
             view: view.into(),
             out: Vec::new(),
@@ -282,6 +314,31 @@ impl Runtime {
             .report)
     }
 
+    /// Policy decoded from the exact current session configuration bytes.
+    pub fn policy(&self) -> Result<&PolicySnapshot, &PolicyError> {
+        self.policy.as_ref()
+    }
+
+    /// Fixed registry and installed backend availability for this incarnation.
+    pub fn tools(&self) -> &ToolSet {
+        &self.tools
+    }
+
+    fn decode_policy(
+        snapshot: &SessionSnapshot,
+        configuration: &SessionConfiguration,
+    ) -> Result<PolicySnapshot, PolicyError> {
+        if configuration.artifact() != snapshot.configuration() {
+            return Err(PolicyError::Mismatch);
+        }
+        let policy =
+            PolicySnapshot::parse(configuration.artifact().clone(), configuration.bytes())?;
+        if policy.revision() != snapshot.policy_revision() {
+            return Err(PolicyError::InvalidField("policy_revision"));
+        }
+        Ok(policy)
+    }
+
     fn builder(&self) -> ContextBuilder<'_> {
         ContextBuilder::new(&self.config.context, &self.configuration)
     }
@@ -327,6 +384,8 @@ impl Runtime {
             Input::Provider { inference, event } => self.provider(inference, event, env),
             Input::ProviderEnded { inference } => self.provider_ended(inference, env),
             Input::TimerFired { timer } => self.timer(timer, env),
+            Input::Planned { token, result } => self.planned(token, result, env),
+            Input::ToolFinished { token, outcome } => self.tool_finished(token, outcome, env),
         }
         std::mem::take(&mut self.out)
     }
@@ -340,6 +399,12 @@ impl Runtime {
                 content,
             } => self.start_turn(request, command_id, content, env),
             Command::Cancel { turn_id } => self.cancel(request, turn_id, env),
+            Command::SubmitApproval {
+                approval_id,
+                plan_digest,
+                decision,
+                remember,
+            } => self.submit_approval(request, approval_id, plan_digest, decision, remember, env),
             Command::SelectHead { head } => self.select_head(request, head, env),
             Command::SwitchModel { model } => self.switch_model(request, model, env),
             Command::ResolveUncertain {
@@ -599,6 +664,7 @@ impl Runtime {
                 duration: self.config.cancel_grace,
             });
         }
+        self.cancel_execution();
         self.advance(env);
         None
     }
@@ -949,6 +1015,13 @@ impl Runtime {
             ack: ack.clone(),
             snapshot,
         });
+        if let Some(configuration) = in_flight.configuration {
+            self.policy = Self::decode_policy(self.snapshot(), &configuration);
+            self.configuration = configuration;
+        }
+        for event in in_flight.tool_events {
+            self.emit(event);
+        }
         if let Some(finished) = in_flight.finished {
             self.inferences = 0;
             self.emit(EventKind::TurnFinished {
@@ -993,6 +1066,10 @@ impl Runtime {
                 },
                 Waiter::HeadSelected => Accepted::HeadSelected { ack: ack.clone() },
                 Waiter::ModelSwitched => Accepted::ModelSwitched { ack: ack.clone() },
+                Waiter::ApprovalSubmitted(approval_id) => Accepted::ApprovalSubmitted {
+                    approval_id,
+                    ack: ack.clone(),
+                },
             };
             self.reply(request, Ok(accepted));
         }
@@ -1032,6 +1109,8 @@ impl Runtime {
     fn fault(&mut self, cause: FaultCause) {
         self.mode = Mode::Faulted;
         self.prepared = None;
+        self.cancel_execution();
+        self.clear_tool();
         if let Some(verification) = self.verifying.take() {
             for request in verification.waiters {
                 self.reply(request, Err(Rejection::Faulted));
@@ -1343,6 +1422,9 @@ impl Runtime {
         if self.mode == Mode::Faulted {
             return;
         }
+        if self.approval_timer(timer, env) {
+            return;
+        }
         if let Some(inference) = &mut self.inference
             && inference.timer == Some(timer)
         {
@@ -1432,19 +1514,21 @@ impl Runtime {
                 Some(Status::Open | Status::Cancelling) => {}
                 Some(Status::Ended) => self.record_response(&snapshot, turn, env),
             },
+            Cancelling if self.tool.is_some() => self.advance_tool(&snapshot, turn, env),
             Cancelling => match stream {
                 None => self.finish(&snapshot, &turn, None, cancelled(&turn), env),
                 Some(Status::Open | Status::Cancelling) => {}
                 Some(Status::Ended) => self.record_response(&snapshot, turn, env),
             },
-            Processing => self.answer_calls(&snapshot, turn, cancel, limit, env),
+            Processing if cancel || self.tools.is_empty() => {
+                self.answer_calls(&snapshot, turn, cancel, limit, env)
+            }
+            Processing | Authorizing | Executing => self.advance_tool(&snapshot, turn, env),
             Continuing => {
                 let commit = audit(&snapshot, vec![transition(&turn, Continuing, Preparing)]);
                 self.persist(commit, idle_flight(), None, env);
             }
-            Idle | Authorizing | Executing | Recovering => {
-                self.fault(FaultCause::Internal("unexpected_runtime_state"))
-            }
+            Idle | Recovering => self.fault(FaultCause::Internal("unexpected_runtime_state")),
         }
     }
 
@@ -1557,6 +1641,11 @@ impl Runtime {
             turn_id,
             head,
             input: projection.input,
+            tools: self
+                .policy
+                .as_ref()
+                .map(|p| self.tools.definitions(p))
+                .unwrap_or_default(),
             fingerprint: projection.fingerprint,
             response_id,
         });
@@ -1680,6 +1769,20 @@ impl Runtime {
             .map(|call| runtime_result(&turn, call, status, code, text))
             .collect();
         let entries = chain(snapshot, results, env);
+        let tool_events = entries
+            .iter()
+            .filter_map(|entry| {
+                if let EntryPayload::ToolResult(r) = &entry.payload {
+                    Some(EventKind::ToolFinished {
+                        call: r.result.call.clone(),
+                        status,
+                        code: Some(code),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
         use RuntimeState::*;
         let (events, finished) = if cancel {
             let finished = cancelled(&turn);
@@ -1708,6 +1811,7 @@ impl Runtime {
             advancing(snapshot, entries, events),
             InFlight {
                 finished,
+                tool_events,
                 ..idle_flight()
             },
             None,
@@ -1731,11 +1835,13 @@ impl Runtime {
         self.next_token += 1;
         let token = CommitToken(self.next_token);
         in_flight.token = token;
+        let artifacts = std::mem::take(&mut in_flight.artifacts);
         self.in_flight = Some(in_flight);
         self.out.push(Effect::Persist {
             token,
             commit,
             command,
+            artifacts,
             at: env.now(),
         });
     }
@@ -1884,6 +1990,9 @@ fn idle_flight() -> InFlight {
         finished: None,
         recovered: None,
         ends_inference: false,
+        tool_events: Vec::new(),
+        artifacts: Vec::new(),
+        configuration: None,
     }
 }
 

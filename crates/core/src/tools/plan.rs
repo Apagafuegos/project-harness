@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::Arc;
 
 use super::{
     PolicySnapshot, Refusal, ToolDefinition, WorkspacePath,
@@ -109,8 +110,8 @@ struct WirePlan {
 /// An exact immutable plan. No public construction or deserialization is possible.
 #[derive(Clone, Debug)]
 pub struct Plan {
-    wire: WirePlan,
-    bytes: Vec<u8>,
+    wire: Arc<WirePlan>,
+    bytes: Arc<[u8]>,
     digest: Digest,
     facts: PlanFacts,
     configuration: ArtifactRef,
@@ -284,8 +285,8 @@ impl Plan {
             serde_json::to_vec(&wire).expect("plan contains only infallibly serializable values");
         Ok(Self {
             digest: Digest::of(&bytes),
-            bytes,
-            wire,
+            bytes: bytes.into(),
+            wire: Arc::new(wire),
             facts,
             configuration: policy.artifact().clone(),
         })
@@ -311,6 +312,10 @@ impl Plan {
     /// The compiled-in backend.
     pub fn backend(&self) -> ExecutionBackend {
         self.wire.backend
+    }
+    /// Deadline recorded on the execution intent.
+    pub fn timeout_ms(&self) -> u64 {
+        self.wire.timeout_ms
     }
     /// The trusted facts to pass to [`super::decide`].
     pub fn facts(&self) -> &PlanFacts {

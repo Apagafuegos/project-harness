@@ -1232,12 +1232,12 @@ async fn failed_open_leaves_no_worker_and_poisoned_worker_still_answers() {
     assert!(matches!(
         worker
             .sender
-            .append(commit.clone(), command.clone(), at.clone())
+            .append(commit.clone(), command.clone(), Vec::new(), at.clone())
             .await,
         Err(PersistError::Io { .. })
     ));
     assert!(matches!(
-        worker.sender.append(commit, command, at).await,
+        worker.sender.append(commit, command, Vec::new(), at).await,
         Err(PersistError::Poisoned)
     ));
     worker.shutdown().await;
@@ -1355,6 +1355,7 @@ fn direct_tool_turns(turns: u64) -> Duration {
                             mut commit,
                             command,
                             at,
+                            ..
                         } => {
                             if let Some((id, command)) = command {
                                 store.bind_command(&mut commit, id, &command).unwrap();

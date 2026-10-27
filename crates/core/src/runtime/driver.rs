@@ -601,12 +601,14 @@ impl<E: Env + Send + 'static> Driver<E> {
         // asks for a second, keep the first (it may already be written), skip
         // the second, and let the core fault rather than drop an answer.
         let mut overlap = false;
+        let mut unsupported_tools = false;
         for effect in effects {
             match effect {
                 Effect::Persist {
                     token,
                     commit,
                     command,
+                    artifacts,
                     at,
                 } => {
                     if self.storage.is_some() {
@@ -616,7 +618,7 @@ impl<E: Env + Send + 'static> Driver<E> {
                     let sender = self.worker.as_ref().map(|worker| worker.sender.clone());
                     self.storage = Some(Box::pin(async move {
                         let result = match sender {
-                            Some(sender) => sender.append(commit, command, at).await,
+                            Some(sender) => sender.append(commit, command, artifacts, at).await,
                             None => Err(PersistError::WorkerLost),
                         };
                         match result {
@@ -697,6 +699,13 @@ impl<E: Env + Send + 'static> Driver<E> {
                         task.abort();
                     }
                 }
+                // Runtime::new installs no executors. Tool plumbing is step
+                // 4b; fail closed if that construction invariant ever changes.
+                Effect::PlanCall { .. }
+                | Effect::Execute { .. }
+                | Effect::CancelExecution { .. } => {
+                    unsupported_tools = true;
+                }
                 Effect::Emit(event) => {
                     let _ = self.events.send(event);
                 }
@@ -706,6 +715,11 @@ impl<E: Env + Send + 'static> Driver<E> {
                     }
                 }
             }
+        }
+        if unsupported_tools {
+            self.step(Input::DriverInvariant {
+                code: "tool_driver_unavailable",
+            });
         }
         if overlap {
             self.step(Input::DriverInvariant {

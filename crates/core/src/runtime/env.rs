@@ -2,7 +2,9 @@
 
 use super::RuntimeEpoch;
 
-use crate::session::{CallId, EntryId, ResponseId, Timestamp, TurnId};
+use crate::session::{
+    ApprovalId, CallId, DecisionId, EntryId, InvocationId, ResponseId, Timestamp, TurnId,
+};
 
 /// Time and identity generation. A step reads nothing else from the outside.
 ///
@@ -21,6 +23,14 @@ pub trait Env {
     fn response_id(&mut self) -> ResponseId;
     /// New tool call identity.
     fn call_id(&mut self) -> CallId;
+    /// New single-use approval ticket.
+    fn approval_id(&mut self) -> ApprovalId;
+    /// New authorization identity.
+    fn decision_id(&mut self) -> DecisionId;
+    /// New execution invocation identity.
+    fn invocation_id(&mut self) -> InvocationId;
+    /// New opaque policy revision for a remembered allowance.
+    fn policy_revision(&mut self) -> String;
 }
 
 /// Wall clock and random UUIDv7 identities, for production drivers.
@@ -45,6 +55,18 @@ impl Env for SystemEnv {
     }
     fn call_id(&mut self) -> CallId {
         CallId::new()
+    }
+    fn approval_id(&mut self) -> ApprovalId {
+        ApprovalId::new()
+    }
+    fn decision_id(&mut self) -> DecisionId {
+        DecisionId::new()
+    }
+    fn invocation_id(&mut self) -> InvocationId {
+        InvocationId::new()
+    }
+    fn policy_revision(&mut self) -> String {
+        EntryId::new().to_string()
     }
 }
 
@@ -78,6 +100,16 @@ impl DeterministicEnv {
         }
     }
 
+    /// Advance the fake wall clock without changing the identity stream.
+    pub fn advance(&mut self, duration: std::time::Duration) {
+        self.at = (self.at.instant()
+            + time::Duration::try_from(duration).expect("bounded duration"))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+        .parse()
+        .unwrap();
+    }
+
     fn next<T: TryFrom<String, Error = String>>(&mut self) -> T {
         self.counter += 1;
         let value = (u128::from(self.millis) << 80)
@@ -108,5 +140,17 @@ impl Env for DeterministicEnv {
     }
     fn call_id(&mut self) -> CallId {
         self.next()
+    }
+    fn approval_id(&mut self) -> ApprovalId {
+        self.next()
+    }
+    fn decision_id(&mut self) -> DecisionId {
+        self.next()
+    }
+    fn invocation_id(&mut self) -> InvocationId {
+        self.next()
+    }
+    fn policy_revision(&mut self) -> String {
+        self.next::<EntryId>().to_string()
     }
 }

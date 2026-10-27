@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::session::{CallId, ModelRef, ResponseId, RuntimeState, SessionSnapshot, TurnId, Usage};
 
-use super::types::{EventKind, InferenceId, RuntimeEpoch, RuntimeEvent, UncertainInvocation};
+use super::types::{
+    EventKind, InferenceId, PendingApproval, RuntimeEpoch, RuntimeEvent, UncertainInvocation,
+};
 
 /// Operational phase as a client sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +82,8 @@ pub struct RuntimeView {
     pub partial: Option<PartialResponse>,
     /// Invocations waiting for the user, while `AwaitingResolution`.
     pub awaiting: Vec<UncertainInvocation>,
+    /// Durable single-use approval waiting for the client.
+    pub pending_approval: Option<PendingApproval>,
 }
 
 /// Snapshots compare by identity: the exact-byte checksum of their last record
@@ -95,6 +99,7 @@ impl PartialEq for RuntimeView {
             && self.active_turn == other.active_turn
             && self.partial == other.partial
             && self.awaiting == other.awaiting
+            && self.pending_approval == other.pending_approval
     }
 }
 
@@ -247,11 +252,36 @@ impl ClientView {
                     view.partial = None;
                 }
             }
-            EventKind::TurnFinished { .. }
+            EventKind::ApprovalRequested {
+                approval_id,
+                call,
+                plan_digest,
+                plan,
+                expires_at,
+            } => {
+                view.pending_approval = Some(PendingApproval {
+                    approval_id: approval_id.clone(),
+                    call: call.clone(),
+                    plan_digest: plan_digest.clone(),
+                    plan: plan.clone(),
+                    expires_at: expires_at.clone(),
+                });
+            }
+            EventKind::ApprovalResolved { approval_id, .. } => {
+                if view
+                    .pending_approval
+                    .as_ref()
+                    .is_some_and(|p| p.approval_id == *approval_id)
+                {
+                    view.pending_approval = None;
+                }
+            }
+            EventKind::TurnFinished { .. } | EventKind::Fault(_) => view.pending_approval = None,
+            EventKind::ToolStarted { .. }
+            | EventKind::ToolFinished { .. }
             | EventKind::Recovered { .. }
             | EventKind::ContextBuilt { .. }
-            | EventKind::Diagnostic(_)
-            | EventKind::Fault(_) => {}
+            | EventKind::Diagnostic(_) => {}
         }
         ApplyOutcome::Applied
     }

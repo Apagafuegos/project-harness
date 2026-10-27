@@ -5,7 +5,10 @@ Status: Milestone 2 is implemented as `harness_core::runtime`,
 machine, a dedicated storage worker, a Tokio driver/handle with broadcast
 subscriptions, the provider stream seam with a scripted mock, the context
 builder that the core runs in `Preparing`, and startup recovery with explicit
-tail repair. Decisions [0004](decisions/0004-pure-runtime-core.md),
+tail repair. Milestone 3 step 4a adds the pure-core tool pipeline and synchronous
+stub-executor test driver; async tool dispatch remains step 4b, real tools steps
+5 and 7. [Decision 0010](decisions/0010-tool-pipeline.md) records that split.
+Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
 [0007](decisions/0007-startup-recovery.md) record the design; the builder itself
@@ -23,7 +26,7 @@ let effects: Vec<Effect> = runtime.step(input, &mut env);
 `step` does nothing except what it returns. It performs no file, network or
 channel access, never reads the clock, and creates identities only through
 `Env`: `now()` plus generators for runtime epochs, entry, turn, response and
-call IDs.
+call IDs, approval/decision/invocation IDs and new policy revisions.
 `SystemEnv` uses the wall clock and random UUIDv7s. `DeterministicEnv` has a
 fixed time and counter-derived UUIDv7s, with a 12-bit stream number per runtime
 so identities stay unique across a reopen. Taking `&mut self` is equivalent to
@@ -49,11 +52,14 @@ active turn, timers, and a requested cancel.
 | `Start` | — | Driver, right after constructing a runtime; plans any recovery |
 | `Provider` | `InferenceId`, `ProviderEvent` | Provider stream |
 | `ProviderEnded` | `InferenceId` | Stream closed, with or without `Finished` |
-| `TimerFired` | `TimerId` | Driver timer |
+| `TimerFired` | `TimerId` | Driver timer (inference or approval) |
+| `Planned` | `PlanToken`, `Result<Plan, Refusal>` | Driver workspace planning |
+| `ToolFinished` | `ExecutionToken`, `ExecutionOutcome` | Executor, after cleanup |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
 `SelectHead { head }`, `SwitchModel { model }` and
-`ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)). `RequestId`, `CommitToken`,
+`ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)), and
+`SubmitApproval { approval_id, plan_digest, decision, remember }`. `RequestId`, `CommitToken`,
 `InferenceId` and `TimerId` are `u64` values local to one runtime and never
 journaled.
 
@@ -70,8 +76,11 @@ fragments itself.
 | Effect | Carries | Meaning |
 | --- | --- | --- |
 | `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
-| `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, `at` | Bind the command if present, append, answer |
-| `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
+| `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, artifacts, `at` | Publish artifacts, bind command, append, answer |
+| `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, tools, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
+| `PlanCall` | `PlanToken`, call, tool, validated operation | Plan against the trusted workspace and current policy |
+| `Execute` | `ExecutionToken`, `AuthorizedOperation` | Run after intent acknowledgement |
+| `CancelExecution` | `ExecutionToken` | Request cancellation; still await the executor answer |
 | `CancelInference` | `InferenceId` | Cancel the stream's token; keep delivering it for a confirmation |
 | `ReleaseInference` | `InferenceId` | Stop listening and drop the stream; once per `StartInference` |
 | `SetTimer` / `CancelTimer` | `TimerId`, duration | Driver timer |
@@ -84,7 +93,8 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
 `Resolved { invocation_id, ack }`, `HeadSelected { ack }` or
-`ModelSwitched { ack }`. `Rejection` is `Busy`, `RecoveryRequired`,
+`ModelSwitched { ack }` or `ApprovalSubmitted { approval_id, ack }` (decision durable).
+`Rejection` is `Busy`, `RecoveryRequired`,
 `ResolutionRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
 The handle can also return `Overloaded` before submission, and the driver
 returns `ShuttingDown` for commands it receives while draining; neither reaches
@@ -119,8 +129,8 @@ These are the commits the tests assert. Entries come first, then events in order
 | Overflow, instead of C2 | — | `turn_finished(failed, context_overflow)`; no stream |
 | C3 stop | assistant `completed/stop` | `inferring>processing`, `turn_finished(completed)` |
 | C3 tool calls | assistant `completed/tool_calls` | `inferring>processing` |
-| C4 answers | one runtime result per pending call | `processing>continuing`, `continuing>preparing`, then C2 again |
-| C4 at limit | one runtime result per pending call | `processing>continuing`, `turn_finished(failed, inference_limit)` |
+| C4 answers (no executors) | one runtime result per pending call | `processing>continuing`, `continuing>preparing`, then C2 again |
+| C4 at limit (no executors) | one runtime result per pending call | `processing>continuing`, `turn_finished(failed, inference_limit)` |
 
 Entering `Preparing` (after C1, or after C4's `continuing>preparing`) builds
 the context, unless a cancel is pending or the inference limit is reached. The
@@ -150,12 +160,61 @@ Other stream endings record the response and finish the turn in one commit:
 
 Storage determines the tool-answer sequence:
 
-- Tools are unavailable in Milestone 2. Each pending call gets a `ToolResult`
+- With no executors (`Runtime::new`), each pending call gets a `ToolResult`
   with status `denied`, no invocation, `runtime` provenance and the text
   `tools_unavailable: …`, and the code `tools_unavailable`. Results keep their
   code as the text's prefix too. The proposal is durable in C3 before any result. C4 uses storage's
   `processing>continuing` path for calls that were rejected without
   authorization, then `continuing>preparing`.
+
+### Tool pipeline (pure core and synchronous test driver)
+
+Construct `Runtime::with_tools` with a fixed `ToolSet` (registry plus available
+backends). For each proposal, in block order: resolve, validate, commit
+`processing>authorizing`, emit `PlanCall`, then `decide` on `Planned`.
+A resolve/validation/planning refusal records one nonexecuted result. Unknown
+and disabled tools never plan; an unavailable backend returns `tools_unavailable`.
+
+| Policy outcome | Durable steps |
+| --- | --- |
+| Allow | authorization + intent + `authorizing>executing`; after ack, `ToolStarted` and `Execute` |
+| Ask | publish plan, commit request, emit `ApprovalRequested`, arm five-minute timer |
+| Deny | authorization with reason equal to code; after ack, result and onward transitions |
+| Executor answer | publish captures, commit result with executor provenance; after ack, `ToolFinished` |
+
+Denial and result are **separate commits** (decision 24). Storage applies
+entries before events and cannot validate authorization against a call already
+answered in that commit. A crash between these commits is known not started:
+existing recovery records `cancelled/process_restart`, never uncertainty.
+Allow and intent remain one commit. The intent's effects and artifact bytes are
+exactly the plan's. No `Execute` precedes its acknowledgement.
+
+Results move `authorizing>processing` or `executing>continuing>processing` when
+calls remain. With none remaining, go through Continuing to Preparing (or fail
+at the inference limit). No inference occurs inside an unfinished exchange.
+
+`SubmitApproval` checks the durable pending ID, digest, wall-clock deadline and
+policy revision. A wrong digest rejects `approval_mismatch` without a commit;
+a used or absent ticket rejects `NotActive`. Denial, expiry or invalidation
+uses `approval_denied`, `approval_expired` or `approval_invalidated`. The timer
+also enforces expiry. `ApprovalResolved` follows the decision's sync and clears
+`RuntimeView.pending_approval`; resync exposes the full pending plan and expiry.
+
+Remember on approved write/edit/bash publishes `PolicySnapshot::grant` using
+`Allowance::remember` and a fresh revision. One commit orders authorization,
+intent, configuration change and Executing. This consumes the old revision's
+authorization before installing the grant. The sole storage exception (decision
+16) permits a non-idle configuration change only after a same-commit allow
+using a pending ticket, with a different revision. The core reloads policy on
+acknowledgement; the next identical call uses the allowance without asking.
+Reads ignore remember. Broken policy fails the turn `policy_invalid`, cancels
+unstarted proposals without a model-facing policy error, and leaves the runtime
+usable. Policy and instructions decode the same configuration bytes.
+
+Every `StartInference.tools` carries enabled, available definitions in registry
+order. These definitions are **outside** `ModelInput` and its fingerprint;
+projection behavior, versions and goldens do not change. The async driver still
+constructs `Runtime::new`, installs no executor, and preserves its prior behavior.
 
 Every terminal path persists exactly one `turn_finished`, which storage applies
 once. After its ack the core emits `TurnFinished` and resets the turn's
@@ -230,6 +289,16 @@ under the new model's limits. The command itself does not run the preview.
   - The turn already finished another way: the reply is `NotActive`.
 - The reply is `Accepted::Cancelling` with the ack of the first commit after
   which the turn is durably `cancelling` or finished as cancelled.
+
+- **While authorizing:** a pending approval is durably denied with reason
+  `cancelled`, then that call and every later call receive `cancelled` results
+  and the turn finishes cancelled. Without a ticket, cancel directly answers
+  the unstarted calls; a late planning token cannot revive them.
+- **While executing:** emit `CancelExecution`, commit Cancelling and wait for
+  `ToolFinished`, including when its answer races the cancellation commit.
+  Preserve the executor's actual outcome (`cancelled` or a winning `succeeded`)
+  and cancel later calls. An intent already committed during cancellation is
+  dispatched with an immediate cancellation request, never silently orphaned.
 
 Cancellation never claims rollback.
 
@@ -397,10 +466,15 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
   (with the issued `CallId`), `ToolArgumentsDelta`, `ToolCallReady`,
   `UsageUpdated`, and `PartialCleared`. `PartialCleared` comes when the response
   is durable or abandoned by a fault.
+- `ApprovalRequested { approval_id, call, plan_digest, plan, expires_at }`,
+  `ApprovalResolved { approval_id, outcome }`, `ToolStarted { call, invocation_id }`
+  and `ToolFinished { call, status, code }`. Pending approval state uses the same
+  client reducer, so resync cannot lose a ticket. Started and finished tool
+  events follow intent/result durability, respectively.
 - `Diagnostic` and `Fault`.
 
 `Runtime::view()` returns `RuntimeView { epoch, event_seq, snapshot, phase,
-active_turn, partial, awaiting }`. It reflects exactly the events with
+active_turn, partial, awaiting, pending_approval }`. It reflects exactly the events with
 `seq <= event_seq`. The runtime maintains its own view by applying each event
 it emits to a `ClientView`, the same reducer clients use, so the invariant holds
 by construction and is also tested. `partial` is bounded like the response.
@@ -547,8 +621,10 @@ events that follow.
 
 ## Not implemented yet
 
-- Approvals, summary generation and compaction commands, configuration
-  changes, real tools and providers.
+- Async tool dispatch, the dedicated executor thread and approval handle
+  convenience methods (step 4b); real filesystem/sandbox executors and providers.
+- General configuration-update commands, summary generation and compaction.
+  Remember is the implemented configuration-change path.
 - Reconciling an uncertain invocation from evidence, such as a file tool
   checking the workspace to suggest a resolution (Milestone 3). Here a
   resolution is always the user's statement.

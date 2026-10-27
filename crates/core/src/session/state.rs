@@ -482,7 +482,7 @@ impl State {
         self.head = commit.head.to.clone();
         // Entries and events are atomic, but event order remains semantically significant.
         for (index, event) in commit.events.iter().enumerate() {
-            self.event(event, record)?;
+            self.event(event, record, &commit.events[..index])?;
             self.events
                 .push_back(Arc::new((record.seq, index, event.clone())));
         }
@@ -721,7 +721,12 @@ impl State {
         Ok(())
     }
 
-    fn event(&mut self, event: &JournalEvent, record: &Record) -> Result<()> {
+    fn event(
+        &mut self,
+        event: &JournalEvent,
+        record: &Record,
+        prior: &[JournalEvent],
+    ) -> Result<()> {
         match event {
             JournalEvent::TurnStarted(start) => {
                 require(
@@ -1024,7 +1029,24 @@ impl State {
                 }
             }
             JournalEvent::ConfigurationChanged(configuration) => {
-                self.idle()?;
+                if self.runtime_state != RuntimeState::Idle {
+                    // Decision 16: a remembered grant is atomic with, and
+                    // ordered after, the validated allow consuming a ticket.
+                    require(
+                        configuration.policy_revision != self.policy_revision
+                            && prior.iter().any(|event| {
+                                matches!(event,
+                                    JournalEvent::AuthorizationDecided(decision)
+                                    if decision.decision == Decision::Allow
+                                        && decision.approval_id.is_some()
+                                        && decision.policy_revision == self.policy_revision
+                                )
+                            }),
+                        "configuration_inside_turn",
+                    )?;
+                } else {
+                    self.idle()?;
+                }
                 self.configuration = configuration.configuration.clone();
                 self.policy_revision = configuration.policy_revision.clone();
             }

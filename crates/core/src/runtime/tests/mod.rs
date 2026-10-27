@@ -1,9 +1,11 @@
 //! Runtime tests against real storage. Every commit the core emits is appended
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
+mod pipeline;
 mod random;
 mod recovery;
 mod scenarios;
+mod tool_gates;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -13,6 +15,11 @@ use std::{
 use crate::context::{ModelLimits, SessionConfiguration};
 use crate::runtime::*;
 use crate::session::{io::Point, *};
+use crate::tools::tests::FakeWorkspace;
+use crate::tools::{
+    AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet, ValidatedOperation,
+};
+use pipeline::{StubExecutor, fake_workspace};
 
 /// The first `stream` used by `DeterministicEnv`; reopening uses the next one.
 const FIRST_STREAM: u16 = 1;
@@ -38,8 +45,10 @@ struct Segment {
     stream: u16,
     configuration: SessionConfiguration,
     config: RuntimeConfig,
+    tools: ToolSet,
     initial: SessionSnapshot,
     inputs: Vec<Input>,
+    times: Vec<Timestamp>,
     effects: Vec<Effect>,
     /// The view before the first input and after each one.
     views: Vec<RuntimeView>,
@@ -62,6 +71,7 @@ struct Pending {
     commit: Commit,
     command: Option<(CommandId, serde_json::Value)>,
     at: Timestamp,
+    artifacts: Vec<Vec<u8>>,
 }
 
 /// A synchronous stand-in for the step-3 driver: it owns the runtime, a real
@@ -99,6 +109,10 @@ struct Driver {
     crashes: u64,
     /// Identities for records tests write directly, as a tool runtime would.
     injector: DeterministicEnv,
+    workspace: FakeWorkspace,
+    planning: Option<(PlanToken, CallRef, String, ValidatedOperation)>,
+    executing: Option<(ExecutionToken, AuthorizedOperation, CancelToken)>,
+    executor: StubExecutor,
 }
 
 /// The default configuration with a generous limit for both test models, so
@@ -131,6 +145,10 @@ impl Driver {
 
     /// A new session whose configuration artifact holds `configuration`.
     fn with_configuration(config: RuntimeConfig, configuration: &[u8]) -> Self {
+        Self::with_tools(config, configuration, ToolSet::default())
+    }
+
+    fn with_tools(config: RuntimeConfig, configuration: &[u8], tools: ToolSet) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = Arc::new(DataRoot::open(temp.path().join("state"), true).unwrap());
         let configuration = root.put_artifact(configuration).unwrap();
@@ -150,9 +168,15 @@ impl Driver {
         let mut env = DeterministicEnv::new(FIRST_STREAM);
         Self {
             session: snapshot.session_id().clone(),
-            runtime: Runtime::new(snapshot.clone(), decoded.clone(), config.clone(), &mut env),
+            runtime: Runtime::with_tools(
+                snapshot.clone(),
+                decoded.clone(),
+                config.clone(),
+                tools.clone(),
+                &mut env,
+            ),
             env,
-            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot),
+            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot, tools),
             done: Vec::new(),
             _temp: temp,
             root,
@@ -173,6 +197,10 @@ impl Driver {
             repairs: 0,
             crashes: 0,
             injector: DeterministicEnv::new(INJECTOR_STREAM),
+            workspace: fake_workspace(),
+            planning: None,
+            executing: None,
+            executor: StubExecutor::default(),
         }
     }
 
@@ -184,15 +212,22 @@ impl Driver {
         session: SessionId,
         config: RuntimeConfig,
     ) -> Self {
+        let tools = ToolSet::default();
         let store = JournalStore::open(root.clone(), &session).unwrap();
         let snapshot = store.snapshot();
         let decoded = SessionConfiguration::load(&root, snapshot.configuration()).unwrap();
         let mut env = DeterministicEnv::new(FIRST_STREAM);
         let mut driver = Self {
             session,
-            runtime: Runtime::new(snapshot.clone(), decoded.clone(), config.clone(), &mut env),
+            runtime: Runtime::with_tools(
+                snapshot.clone(),
+                decoded.clone(),
+                config.clone(),
+                tools.clone(),
+                &mut env,
+            ),
             env,
-            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot),
+            segment: Segment::new(FIRST_STREAM, decoded, config, snapshot, tools),
             done: Vec::new(),
             _temp: temp,
             root,
@@ -213,6 +248,10 @@ impl Driver {
             repairs: 0,
             crashes: 0,
             injector: DeterministicEnv::new(INJECTOR_STREAM),
+            workspace: fake_workspace(),
+            planning: None,
+            executing: None,
+            executor: StubExecutor::default(),
         };
         driver.step(Input::Start);
         driver
@@ -221,6 +260,7 @@ impl Driver {
     /// Feed one input, record it, and check the per-step invariants.
     fn step(&mut self, input: Input) -> Vec<Effect> {
         let before = self.runtime.phase();
+        let at = self.env.now();
         let effects = self.runtime.step(input.clone(), &mut self.env);
         if matches!(before, Phase::RecoveryRequired | Phase::AwaitingResolution) {
             invents_nothing(&effects);
@@ -234,6 +274,7 @@ impl Driver {
             assert!(self.listening.is_empty(), "stream not released");
         }
         self.segment.inputs.push(input);
+        self.segment.times.push(at);
         self.segment.effects.extend(effects.iter().cloned());
         self.segment.views.push(view);
         effects
@@ -249,6 +290,7 @@ impl Driver {
                 token,
                 commit,
                 command,
+                artifacts,
                 at,
             } => {
                 assert!(
@@ -260,12 +302,62 @@ impl Driver {
                     commit: commit.clone(),
                     command: command.clone(),
                     at: at.clone(),
+                    artifacts: artifacts.clone(),
                 });
             }
             Effect::StartInference { inference, .. } => {
                 self.inference = Some(*inference);
                 self.started.push(*inference);
                 assert!(self.listening.insert(*inference), "inference reused");
+            }
+            Effect::PlanCall {
+                token,
+                call,
+                tool,
+                operation,
+            } => {
+                assert!(self.planning.is_none() && self.executing.is_none());
+                self.planning = Some((*token, call.clone(), tool.clone(), operation.clone()));
+            }
+            Effect::Execute { token, operation } => {
+                assert!(
+                    self.pending.is_none(),
+                    "Execute before intent acknowledgement"
+                );
+                assert!(self.executing.is_none() && self.planning.is_none());
+                let intent = self
+                    .runtime
+                    .snapshot()
+                    .events()
+                    .find_map(|(_, _, e)| match e {
+                        JournalEvent::ExecutionIntent(i)
+                            if &i.invocation_id == operation.invocation_id() =>
+                        {
+                            Some(i)
+                        }
+                        _ => None,
+                    })
+                    .expect("Execute without durable intent");
+                assert_eq!(intent.effects.as_ref(), Some(operation.plan().effects()));
+                assert_eq!(intent.plan_digest, *operation.plan().digest());
+                assert_eq!(
+                    self.root
+                        .read_artifact(
+                            &ArtifactRef {
+                                sha256: intent.plan_digest.clone(),
+                                bytes: operation.plan().bytes().len() as u64
+                            },
+                            8 * 1024 * 1024
+                        )
+                        .unwrap(),
+                    operation.plan().bytes()
+                );
+                self.executing = Some((*token, operation.clone(), CancelToken::new()));
+            }
+            Effect::CancelExecution { token } => {
+                let (active, _, cancel) = self.executing.as_ref().expect("cancel without Execute");
+                assert_eq!(active, token);
+                cancel.cancel();
             }
             Effect::CancelInference { inference } => {
                 assert!(self.listening.contains(inference), "cancel after release");
@@ -360,6 +452,9 @@ impl Driver {
         self.root.io.test.lock().unwrap().fail = self.fail.take();
         let mut commit = pending.commit.clone();
         let result = (|| {
+            for bytes in &pending.artifacts {
+                self.root.put_artifact(bytes)?;
+            }
             if let Some((id, command)) = &pending.command {
                 store.bind_command(&mut commit, id.clone(), command)?;
             }
@@ -447,6 +542,9 @@ impl Driver {
             }
             let mut commit = pending.commit;
             let result = (|| {
+                for bytes in &pending.artifacts {
+                    self.root.put_artifact(bytes)?;
+                }
                 if let Some((id, command)) = &pending.command {
                     store.bind_command(&mut commit, id.clone(), command)?;
                 }
@@ -521,15 +619,17 @@ impl Driver {
         let configuration =
             SessionConfiguration::load(&self.root, snapshot.configuration()).unwrap();
         self.env = DeterministicEnv::new(stream);
-        self.runtime = Runtime::new(
+        let tools = self.segment.tools.clone();
+        self.runtime = Runtime::with_tools(
             snapshot.clone(),
             configuration.clone(),
             config.clone(),
+            tools.clone(),
             &mut self.env,
         );
         let segment = std::mem::replace(
             &mut self.segment,
-            Segment::new(stream, configuration, config, snapshot),
+            Segment::new(stream, configuration, config, snapshot, tools),
         );
         self.done.push(segment);
         self.last_seq = 0;
@@ -537,6 +637,8 @@ impl Driver {
         // A restarted process holds none of the old runtime's streams.
         self.listening.clear();
         self.timers.clear();
+        self.planning = None;
+        self.executing = None;
     }
 
     /// Reopen the journal and compare it with the core's published snapshot.
@@ -624,12 +726,14 @@ impl Segment {
         configuration: SessionConfiguration,
         config: RuntimeConfig,
         initial: SessionSnapshot,
+        tools: ToolSet,
     ) -> Self {
         let views = vec![
-            Runtime::new(
+            Runtime::with_tools(
                 initial.clone(),
                 configuration.clone(),
                 config.clone(),
+                tools.clone(),
                 &mut DeterministicEnv::new(stream),
             )
             .view(),
@@ -638,8 +742,10 @@ impl Segment {
             stream,
             configuration,
             config,
+            tools,
             initial,
             inputs: Vec::new(),
+            times: Vec::new(),
             effects: Vec::new(),
             views,
         }
@@ -670,6 +776,9 @@ fn invents_nothing(effects: &[Effect]) {
     for effect in effects {
         match effect {
             Effect::StartInference { .. } => panic!("a stream opened during recovery"),
+            Effect::PlanCall { .. } | Effect::Execute { .. } | Effect::CancelExecution { .. } => {
+                panic!("a tool effect during recovery")
+            }
             Effect::Persist { commit, .. } => {
                 for entry in &commit.entries {
                     match &entry.payload {
@@ -712,6 +821,15 @@ fn same(a: &SessionSnapshot, b: &SessionSnapshot) -> bool {
 fn check_turns(finished: &Finished) {
     let snapshot = &finished.reopened;
     assert!(!snapshot.requires_recovery());
+    let mut dispatched = BTreeSet::new();
+    for effect in finished.segments.iter().flat_map(|s| &s.effects) {
+        if let Effect::Execute { operation, .. } = effect {
+            assert!(
+                dispatched.insert(operation.invocation_id().clone()),
+                "invocation dispatched twice across restart"
+            );
+        }
+    }
     let mut outcomes: BTreeMap<TurnId, usize> = BTreeMap::new();
     let mut uncertain = BTreeSet::new();
     for (_, _, event) in snapshot.events() {
@@ -760,7 +878,14 @@ fn check_turns(finished: &Finished) {
                 assert_eq!(r.projection_fingerprint.as_ref(), sent, "{:?}", r.outcome);
             }
             EntryPayload::ToolResult(r) => {
-                assert_ne!(r.result.metadata.provenance, Provenance::Executor);
+                if r.result.metadata.provenance == Provenance::Executor {
+                    let invocation = r
+                        .result
+                        .invocation_id
+                        .as_ref()
+                        .expect("executor result needs intent");
+                    assert!(finished.segments.iter().flat_map(|s| &s.effects).any(|e| matches!(e, Effect::Execute { operation, .. } if operation.invocation_id() == invocation)), "executor result without dispatch");
+                }
                 check_code(&r.result);
             }
             _ => {}
@@ -832,16 +957,24 @@ fn check_resync(finished: &Finished) {
 fn check_replay(finished: &Finished) {
     for segment in &finished.segments {
         let mut env = DeterministicEnv::new(segment.stream);
-        let mut runtime = Runtime::new(
+        let mut runtime = Runtime::with_tools(
             segment.initial.clone(),
             segment.configuration.clone(),
             segment.config.clone(),
+            segment.tools.clone(),
             &mut env,
         );
         let replayed: Vec<_> = segment
             .inputs
             .iter()
-            .flat_map(|input| runtime.step(input.clone(), &mut env))
+            .zip(&segment.times)
+            .flat_map(|(input, at)| {
+                let elapsed = (at.instant() - env.now().instant())
+                    .try_into()
+                    .expect("monotonic fake clock");
+                env.advance(elapsed);
+                runtime.step(input.clone(), &mut env)
+            })
             .collect();
         assert_eq!(format!("{replayed:?}"), format!("{:?}", segment.effects));
     }
@@ -878,6 +1011,10 @@ fn normalized(finished: &Finished) -> Vec<String> {
                     } => format!("Resolved({invocation_id}, {})", ack(a)),
                     Accepted::HeadSelected { ack: a } => format!("HeadSelected({})", ack(a)),
                     Accepted::ModelSwitched { ack: a } => format!("ModelSwitched({})", ack(a)),
+                    Accepted::ApprovalSubmitted {
+                        approval_id,
+                        ack: a,
+                    } => format!("ApprovalSubmitted({approval_id}, {})", ack(a)),
                 };
                 format!("Reply({request}, {accepted})")
             }
@@ -893,7 +1030,7 @@ fn scenario(config: RuntimeConfig, body: fn(&mut Driver)) {
 }
 
 /// `scenario` for a driver built by `new`, such as one over a fixture.
-fn scenario_from(new: impl Fn() -> Driver, body: fn(&mut Driver)) {
+fn scenario_from(new: impl Fn() -> Driver, body: impl Fn(&mut Driver)) {
     let run = || {
         let mut driver = new();
         body(&mut driver);

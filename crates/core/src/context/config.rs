@@ -117,6 +117,7 @@ impl ConfigurationError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionConfiguration {
     artifact: ArtifactRef,
+    bytes: Vec<u8>,
     instructions: Option<Vec<Instruction>>,
 }
 
@@ -144,6 +145,7 @@ impl SessionConfiguration {
         };
         Ok(Self {
             artifact,
+            bytes: bytes.to_vec(),
             instructions,
         })
     }
@@ -160,6 +162,11 @@ impl SessionConfiguration {
     /// The artifact these values were decoded from.
     pub fn artifact(&self) -> &ArtifactRef {
         &self.artifact
+    }
+
+    /// Exact verified source bytes, also decoded by the runtime's policy layer.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     /// The `instructions` field, or `None` when it is absent.

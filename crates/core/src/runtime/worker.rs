@@ -19,6 +19,7 @@ enum Request {
     Append {
         commit: Box<Commit>,
         command: Option<(CommandId, serde_json::Value)>,
+        artifacts: Vec<Vec<u8>>,
         at: Timestamp,
         reply: oneshot::Sender<AppendResult>,
     },
@@ -55,6 +56,7 @@ impl WorkerSender {
         &self,
         commit: Commit,
         command: Option<(CommandId, serde_json::Value)>,
+        artifacts: Vec<Vec<u8>>,
         at: Timestamp,
     ) -> AppendResult {
         let (reply, receive) = oneshot::channel();
@@ -62,6 +64,7 @@ impl WorkerSender {
             .send(Request::Append {
                 commit: Box::new(commit),
                 command,
+                artifacts,
                 at,
                 reply,
             })
@@ -255,12 +258,16 @@ fn run(
             Request::Append {
                 mut commit,
                 command,
+                artifacts,
                 at,
                 reply,
             } => {
                 let result = (|| {
                     if poisoned {
                         return Err(StoreError::Poisoned);
+                    }
+                    for bytes in artifacts {
+                        root.put_artifact(&bytes)?;
                     }
                     if let Some((id, command)) = command {
                         store.bind_command(&mut commit, id, &command)?;
