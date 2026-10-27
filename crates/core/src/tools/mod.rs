@@ -13,7 +13,7 @@ pub use path::WorkspacePath;
 pub use plan::{
     FileFacts, FileKind, Plan, PlanFacts, Protection, WorkspaceIdentity, WorkspaceView,
 };
-pub use policy::{Allowance, ApprovalRequest, Authorization, PolicySnapshot, decide};
+pub use policy::{Allowance, ApprovalRequest, Authorization, PolicyError, PolicySnapshot, decide};
 
 use crate::session::{ResultCode, ToolStatus};
 
@@ -34,6 +34,7 @@ impl Refusal {
         let status = match code {
             UnknownTool | ToolDisabled | InvalidArguments => ToolStatus::InvalidArguments,
             PolicyDenied | ProtectedPath | NetworkUnsupported => ToolStatus::Denied,
+            InfrastructureFailure => ToolStatus::InfrastructureFailure,
             _ => ToolStatus::Failed,
         };
         Self {

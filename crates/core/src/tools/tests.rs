@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
 use serde_json::{Value, json};
 
@@ -15,12 +15,14 @@ const CONFIG: &[u8] = include_bytes!(
 struct FakeWorkspace {
     identity: WorkspaceIdentity,
     entries: BTreeMap<String, (FileFacts, Vec<u8>)>,
+    read_text_calls: Cell<u64>,
 }
 impl FakeWorkspace {
     fn new() -> Self {
         let mut view = Self {
             identity: WorkspaceIdentity("/project".into()),
             entries: BTreeMap::new(),
+            read_text_calls: Cell::new(0),
         };
         view.directory(".");
         view.file("a", b"hello world");
@@ -78,6 +80,7 @@ impl WorkspaceView for FakeWorkspace {
             }))
     }
     fn read_text(&self, path: &WorkspacePath, max_bytes: u64) -> Result<String, Refusal> {
+        self.read_text_calls.set(self.read_text_calls.get() + 1);
         let (_, bytes) = self
             .entries
             .get(path.as_str())
@@ -134,14 +137,23 @@ fn plan(
 ) -> Result<Plan, Refusal> {
     let registry = Registry::builtin();
     let tool = registry.resolve(name, policy)?;
-    tool.plan(&tool.validate(&value)?, &call(), view, policy)
+    let before = view.read_text_calls.get();
+    let result = tool.plan(&tool.validate(&value)?, &call(), view, policy);
+    if name == "read" {
+        assert_eq!(
+            view.read_text_calls.get(),
+            before,
+            "read planning must inspect facts only"
+        );
+    }
+    result
 }
 fn refusal<T: std::fmt::Debug>(result: Result<T, Refusal>, code: ResultCode, status: ToolStatus) {
     let error = result.unwrap_err();
     assert_eq!(error.code, code);
     assert_eq!(error.status, status);
     assert!(error.text().starts_with(&format!("{}: ", code.as_str())));
-    assert!(error.detail.len() < 200);
+    assert!(error.detail.len() <= 200);
 }
 fn invalid<T: std::fmt::Debug>(result: Result<T, Refusal>) {
     refusal(
@@ -150,6 +162,15 @@ fn invalid<T: std::fmt::Debug>(result: Result<T, Refusal>) {
         ToolStatus::InvalidArguments,
     );
 }
+fn invalid_at(result: Result<ValidatedOperation, Refusal>, field: &str) -> Refusal {
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ResultCode::InvalidArguments);
+    assert_eq!(error.status, ToolStatus::InvalidArguments);
+    assert!(error.detail.len() <= 200);
+    assert!(error.detail.contains(field), "{field}: {}", error.detail);
+    error
+}
+
 fn outcome(auth: Authorization) -> u8 {
     match auth {
         Authorization::Deny(_) => 0,
@@ -218,18 +239,34 @@ fn schemas_invalid_arguments_required_unknown_wrong_types() {
                 .as_object_mut()
                 .unwrap()
                 .remove(field.as_str().unwrap());
-            invalid(validate(name, &value));
+            assert!(
+                invalid_at(validate(name, &value), field.as_str().unwrap())
+                    .detail
+                    .contains("required")
+            );
         }
         let mut extra = original.clone();
         extra["elevated"] = json!(true);
-        invalid(validate(name, &extra));
+        assert!(
+            invalid_at(validate(name, &extra), "elevated")
+                .detail
+                .contains("unknown key")
+        );
         for key in original.as_object().unwrap().keys() {
             let mut value = original.clone();
             value[key] = json!(42);
-            invalid(validate(name, &value));
+            assert!(
+                invalid_at(validate(name, &value), key)
+                    .detail
+                    .contains("type")
+            );
         }
         for bad in [Value::Null, json!([]), json!("text")] {
-            invalid(validate(name, &bad));
+            assert!(
+                invalid_at(validate(name, &bad), "\"\"")
+                    .detail
+                    .contains("type")
+            );
         }
     }
     for (name, key, bad) in [
@@ -242,41 +279,55 @@ fn schemas_invalid_arguments_required_unknown_wrong_types() {
     ] {
         let mut a = args(name);
         a[key] = bad;
-        invalid(validate(name, &a));
+        invalid_at(validate(name, &a), key);
     }
-    invalid(validate(
-        "edit",
-        &json!({"path":"a","old_text":"","new_text":"x"}),
-    ));
-    invalid(validate("bash", &json!({"command":""})));
+    invalid_at(
+        validate("edit", &json!({"path":"a","old_text":"","new_text":"x"})),
+        "old_text",
+    );
+    invalid_at(validate("bash", &json!({"command":""})), "command");
 }
 
 #[test]
 fn schemas_invalid_arguments_byte_boundaries_and_defaults() {
+    fn boundary(name: &str, value: Value, field: &str, valid: bool) {
+        if valid {
+            assert!(validate(name, &value).is_ok());
+        } else {
+            invalid_at(validate(name, &value), field);
+        }
+    }
     let mib = 1024 * 1024;
     for length in [mib, mib + 1] {
         let v = json!({"path":"new","text":"x".repeat(length)});
-        assert_eq!(validate("write", &v).is_ok(), length == mib);
+        boundary("write", v, "text", length == mib);
         let v = json!({"path":"a","max_bytes":length});
-        assert_eq!(validate("read", &v).is_ok(), length == mib);
+        boundary("read", v, "max_bytes", length == mib);
     }
     // JSON Schema length counts characters; semantic validation counts UTF-8 bytes.
     assert!(validate("write", &json!({"path":"a","text":"é".repeat(mib / 2)})).is_ok());
-    invalid(validate(
-        "write",
-        &json!({"path":"a","text":"é".repeat(mib / 2 + 1)}),
-    ));
+    invalid_at(
+        validate("write", &json!({"path":"a","text":"é".repeat(mib / 2 + 1)})),
+        "text",
+    );
     for length in [65536, 65537] {
-        assert_eq!(
-            validate("bash", &json!({"command":"x".repeat(length)})).is_ok(),
-            length == 65536
+        boundary(
+            "bash",
+            json!({"command":"x".repeat(length)}),
+            "command",
+            length == 65536,
         );
     }
-    invalid(validate("bash", &json!({"command":"é".repeat(32769)})));
+    invalid_at(
+        validate("bash", &json!({"command":"é".repeat(32769)})),
+        "command",
+    );
     for timeout in [0, 1, 600000, 600001] {
-        assert_eq!(
-            validate("bash", &json!({"command":"x","timeout_ms":timeout})).is_ok(),
-            (1..=600000).contains(&timeout)
+        boundary(
+            "bash",
+            json!({"command":"x","timeout_ms":timeout}),
+            "timeout_ms",
+            (1..=600000).contains(&timeout),
         );
     }
     let view = FakeWorkspace::new();
@@ -311,6 +362,81 @@ fn schemas_invalid_arguments_byte_boundaries_and_defaults() {
 }
 
 #[test]
+fn schema_refusals_name_fields_rules_and_never_echo_values() {
+    for (name, value, field, rule) in [
+        (
+            "read",
+            json!({"path":"a","offset_bytes":-1}),
+            "/offset_bytes",
+            "minimum",
+        ),
+        (
+            "bash",
+            json!({"command":"x","timeout_ms":600001}),
+            "/timeout_ms",
+            "maximum",
+        ),
+        (
+            "edit",
+            json!({"path":"a","old_text":"","new_text":"x"}),
+            "/old_text",
+            "length",
+        ),
+        (
+            "write",
+            json!({"path":"a","text":"x".repeat(1048577)}),
+            "/text",
+            "1048576 UTF-8 bytes",
+        ),
+        (
+            "write",
+            json!({"path":"a","text":"é".repeat(524289)}),
+            "/text",
+            "1048576 UTF-8 bytes",
+        ),
+        (
+            "bash",
+            json!({"command":"é".repeat(32769)}),
+            "/command",
+            "65536 UTF-8 bytes",
+        ),
+        (
+            "read",
+            json!({"path":"../TOP_SECRET_VALUE"}),
+            "/path",
+            "workspace-relative",
+        ),
+        (
+            "bash",
+            json!({"command":"x","cwd":"../TOP_SECRET_VALUE"}),
+            "/cwd",
+            "workspace-relative",
+        ),
+        (
+            "bash",
+            json!({"command":"x","timeout_ms":"TOP_SECRET_VALUE"}),
+            "/timeout_ms",
+            "type",
+        ),
+    ] {
+        let error = invalid_at(validate(name, &value), field);
+        assert!(error.detail.contains(rule), "{}", error.detail);
+        assert!(!error.detail.contains("TOP_SECRET_VALUE"));
+    }
+    let error = invalid_at(
+        validate("read", &json!({"path":"a","a/b~c":true})),
+        "/a~1b~0c",
+    );
+    assert!(error.detail.contains("unknown key"));
+    let mut value = args("read");
+    value["é".repeat(1000)] = json!("TOP_SECRET_VALUE");
+    let error = validate("read", &value).unwrap_err();
+    assert!(error.detail.len() <= 200);
+    assert!(error.detail.ends_with("unknown key"));
+    assert!(!error.detail.contains("TOP_SECRET_VALUE"));
+}
+
+#[test]
 fn workspace_path_invalid_arguments_and_normalization() {
     for input in [
         "/etc/passwd",
@@ -340,8 +466,9 @@ fn workspace_path_invalid_arguments_and_normalization() {
     assert!(WorkspacePath::new(&"x".repeat(4096)).is_ok());
     for name in ["read", "write", "edit", "bash"] {
         let mut a = args(name);
-        a[if name == "bash" { "cwd" } else { "path" }] = json!("a/../b");
-        invalid(validate(name, &a));
+        let field = if name == "bash" { "cwd" } else { "path" };
+        a[field] = json!("a/../b");
+        invalid_at(validate(name, &a), field);
     }
 }
 
@@ -461,33 +588,18 @@ fn planning_no_match_multiple_matches_not_utf8_too_large() {
         ResultCode::MultipleMatches,
         ToolStatus::Failed,
     );
-    view.file("a", b"aaa");
-    assert!(
-        plan(
-            "edit",
-            json!({"path":"a","old_text":"aa","new_text":"x"}),
-            &view,
-            &p
-        )
-        .is_ok(),
-        "matches must be non-overlapping"
-    );
     view.file("a", &[0xff]);
-    for name in ["read", "edit"] {
-        refusal(
-            plan(name, args(name), &view, &p),
-            ResultCode::NotUtf8,
-            ToolStatus::Failed,
-        );
-    }
+    refusal(
+        plan("edit", args("edit"), &view, &p),
+        ResultCode::NotUtf8,
+        ToolStatus::Failed,
+    );
     view.file("a", &vec![b'x'; 1048577]);
-    for name in ["read", "edit"] {
-        refusal(
-            plan(name, args(name), &view, &p),
-            ResultCode::TooLarge,
-            ToolStatus::Failed,
-        );
-    }
+    refusal(
+        plan("edit", args("edit"), &view, &p),
+        ResultCode::TooLarge,
+        ToolStatus::Failed,
+    );
     view.file("a", &vec![b'x'; 1048576]);
     assert!(plan("read", args("read"), &view, &p).is_ok());
     refusal(
@@ -503,6 +615,120 @@ fn planning_no_match_multiple_matches_not_utf8_too_large() {
 }
 
 #[test]
+fn read_large_ranges_plan_from_inspection_without_reading_text() {
+    let mut view = FakeWorkspace::new();
+    let p = default_policy();
+    view.file("large", &vec![b'x'; 5 * 1048576]);
+    assert!(
+        plan(
+            "read",
+            json!({"path":"large","offset_bytes":4 * 1048576,"max_bytes":1048576}),
+            &view,
+            &p
+        )
+        .is_ok()
+    );
+    assert!(plan("read", args("read"), &view, &p).is_ok());
+    view.file("binary", &[0xff]);
+    assert!(plan("read", json!({"path":"binary"}), &view, &p).is_ok());
+    assert_eq!(view.read_text_calls.get(), 0);
+}
+
+#[test]
+fn edit_overlapping_occurrences_return_multiple_matches() {
+    let mut view = FakeWorkspace::new();
+    let p = default_policy();
+    for (text, old) in [("aaa", "aa"), ("abab", "ab"), ("ééé", "éé")] {
+        view.file("a", text.as_bytes());
+        refusal(
+            plan(
+                "edit",
+                json!({"path":"a","old_text":old,"new_text":"x"}),
+                &view,
+                &p,
+            ),
+            ResultCode::MultipleMatches,
+            ToolStatus::Failed,
+        );
+    }
+    view.file("a", b"abc");
+    assert!(
+        plan(
+            "edit",
+            json!({"path":"a","old_text":"b","new_text":"x"}),
+            &view,
+            &p
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn missing_workspace_digest_is_infrastructure_failure_not_invalid_arguments() {
+    let mut view = FakeWorkspace::new();
+    view.facts_mut("a").digest = None;
+    for name in ["read", "write", "edit"] {
+        let mut a = args(name);
+        a["path"] = json!("a");
+        if name == "write" {
+            a["overwrite"] = json!(true);
+        }
+        refusal(
+            plan(name, a, &view, &default_policy()),
+            ResultCode::InfrastructureFailure,
+            ToolStatus::InfrastructureFailure,
+        );
+    }
+}
+
+#[test]
+fn bash_protected_mounts_sorted_deduplicated_and_bound_to_golden_bytes() {
+    let mut view = FakeWorkspace::new();
+    view.directory(".git");
+    let mut c = config();
+    c["protected_paths"] = json!(["z/absent", "./.git/", "private", "a/b", ".git", "a/b"]);
+    let built = plan("bash", args("bash"), &view, &policy(c.clone())).unwrap();
+    assert_eq!(
+        built.bytes(),
+        include_str!("golden/bash-protected.json")
+            .trim_end()
+            .as_bytes()
+    );
+    let wire: Value = serde_json::from_slice(built.bytes()).unwrap();
+    assert_eq!(
+        wire["mounts"],
+        json!([
+            {"path":".","mode":"rw"}, {"path":".git","mode":"masked"},
+            {"path":"a/b","mode":"masked"}, {"path":"private","mode":"masked"}, {"path":"z/absent","mode":"masked"}
+        ])
+    );
+    assert!(
+        !wire["mounts"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"path":".git","mode":"ro"}))
+    );
+    c["protected_paths"] = json!(["private", ".git", "a/b", "z/absent"]);
+    assert_eq!(
+        built.bytes(),
+        plan("bash", args("bash"), &view, &policy(c.clone()))
+            .unwrap()
+            .bytes()
+    );
+    c["protected_paths"] = json!([]);
+    let unmasked = plan("bash", args("bash"), &view, &policy(c.clone())).unwrap();
+    let wire: Value = serde_json::from_slice(unmasked.bytes()).unwrap();
+    assert_eq!(
+        wire["mounts"],
+        json!([{"path":".","mode":"rw"},{"path":".git","mode":"ro"}])
+    );
+    let absent = plan("bash", args("bash"), &FakeWorkspace::new(), &policy(c)).unwrap();
+    let wire: Value = serde_json::from_slice(absent.bytes()).unwrap();
+    assert_eq!(wire["mounts"], json!([{"path":".","mode":"rw"}]));
+    assert_eq!(*built.digest(), Digest::of(built.bytes()));
+}
+
+#[test]
 fn plans_bash_mounts_network_deny_and_file_preimages() {
     let mut view = FakeWorkspace::new();
     view.directory(".git");
@@ -514,7 +740,7 @@ fn plans_bash_mounts_network_deny_and_file_preimages() {
         let wire: Value = serde_json::from_slice(built.bytes()).unwrap();
         assert_eq!(
             wire["mounts"],
-            json!([{"path":".","mode":if setting=="ask" {"rw"} else {"ro"}},{"path":".git","mode":"ro"}])
+            json!([{"path":".","mode":if setting=="ask" {"rw"} else {"ro"}},{"path":".git","mode":"masked"}])
         );
         assert_eq!(wire["target"], Value::Null);
         assert_eq!(wire["network"], "deny");
@@ -791,6 +1017,21 @@ fn allowances_remember_grant_revoke_preserve_unknown_fields_and_existing_values(
 
 #[test]
 fn configuration_rfc_example_errors_and_network_unsupported() {
+    fn check(result: Result<PolicySnapshot, PolicyError>, expected: PolicyError, code: &str) {
+        let error = result.unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(error.code(), code);
+        assert!(error.to_string().starts_with(code));
+        match error {
+            PolicyError::MissingField(field) | PolicyError::InvalidField(field) => {
+                assert!(error.to_string().contains(field))
+            }
+            PolicyError::InvalidAllowance { index } => {
+                assert!(error.to_string().contains(&index.to_string()))
+            }
+            _ => {}
+        }
+    }
     assert!(PolicySnapshot::parse(artifact(CONFIG), CONFIG).is_ok());
     for field in [
         "policy_revision",
@@ -803,19 +1044,24 @@ fn configuration_rfc_example_errors_and_network_unsupported() {
         let mut c = config();
         c.as_object_mut().unwrap().remove(field);
         let bytes = serde_json::to_vec(&c).unwrap();
-        invalid(PolicySnapshot::parse(artifact(&bytes), &bytes));
+        check(
+            PolicySnapshot::parse(artifact(&bytes), &bytes),
+            PolicyError::MissingField(field),
+            "policy_missing_field",
+        );
         let mut c = config();
         c[field] = json!(27);
         let bytes = serde_json::to_vec(&c).unwrap();
-        if field == "network" {
-            refusal(
-                PolicySnapshot::parse(artifact(&bytes), &bytes),
-                ResultCode::NetworkUnsupported,
-                ToolStatus::Denied,
-            );
+        let (expected, code) = if field == "network" {
+            (PolicyError::NetworkUnsupported, "network_unsupported")
         } else {
-            invalid(PolicySnapshot::parse(artifact(&bytes), &bytes));
-        }
+            (PolicyError::InvalidField(field), "policy_invalid_field")
+        };
+        check(
+            PolicySnapshot::parse(artifact(&bytes), &bytes),
+            expected,
+            code,
+        );
     }
     for (field, bad) in [
         ("workspace_read", json!("always")),
@@ -824,22 +1070,40 @@ fn configuration_rfc_example_errors_and_network_unsupported() {
         ("enabled_tools", json!([1])),
         ("protected_paths", json!(["../secret"])),
         ("protected_paths", json!(null)),
+        ("protected_paths", json!([1])),
         ("allowances", json!({})),
-        ("allowances", json!([{"tool":"bad"}])),
     ] {
         let mut c = config();
         c[field] = bad;
         let bytes = serde_json::to_vec(&c).unwrap();
-        invalid(PolicySnapshot::parse(artifact(&bytes), &bytes));
+        check(
+            PolicySnapshot::parse(artifact(&bytes), &bytes),
+            PolicyError::InvalidField(field),
+            "policy_invalid_field",
+        );
+    }
+    for bad in [
+        json!({"tool":"bad"}),
+        json!({"tool":"write","path":"../"}),
+        json!({"tool":"bash","command":"","cwd":"."}),
+    ] {
+        let mut c = config();
+        c["allowances"] = json!([{"tool":"write","path":"a"}, bad]);
+        let bytes = serde_json::to_vec(&c).unwrap();
+        check(
+            PolicySnapshot::parse(artifact(&bytes), &bytes),
+            PolicyError::InvalidAllowance { index: 1 },
+            "policy_invalid_allowance",
+        );
     }
     for network in [json!("allow"), json!("ask"), json!(null), json!(false)] {
         let mut c = config();
         c["network"] = network;
         let bytes = serde_json::to_vec(&c).unwrap();
-        refusal(
+        check(
             PolicySnapshot::parse(artifact(&bytes), &bytes),
-            ResultCode::NetworkUnsupported,
-            ToolStatus::Denied,
+            PolicyError::NetworkUnsupported,
+            "network_unsupported",
         );
     }
     for bytes in [
@@ -847,9 +1111,26 @@ fn configuration_rfc_example_errors_and_network_unsupported() {
         b"{\"network\":\"deny\",\"network\":\"deny\"}",
         b"invalid",
     ] {
-        invalid(PolicySnapshot::parse(artifact(bytes), bytes));
+        check(
+            PolicySnapshot::parse(artifact(bytes), bytes),
+            PolicyError::NotAnObject,
+            "policy_not_an_object",
+        );
     }
-    invalid(PolicySnapshot::parse(artifact(b"other"), CONFIG));
+    let mut mismatched = artifact(CONFIG);
+    mismatched.sha256 = Digest::of(b"other");
+    check(
+        PolicySnapshot::parse(mismatched, CONFIG),
+        PolicyError::Mismatch,
+        "policy_mismatch",
+    );
+    let mut mismatched = artifact(CONFIG);
+    mismatched.bytes += 1;
+    check(
+        PolicySnapshot::parse(mismatched, CONFIG),
+        PolicyError::Mismatch,
+        "policy_mismatch",
+    );
     let mut c = config();
     c.as_object_mut().unwrap().remove("protected_paths");
     let p = policy(c);
@@ -1116,6 +1397,7 @@ fn all_result_codes_match_real_v2_schema_pattern() {
         MultipleMatches,
         NotUtf8,
         TooLarge,
+        InfrastructureFailure,
     ] {
         assert!(
             validator.is_valid(&json!(code.as_str())),

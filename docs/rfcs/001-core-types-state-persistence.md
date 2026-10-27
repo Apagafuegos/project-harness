@@ -252,7 +252,8 @@ The initial argument objects reject unknown keys:
 - `write`: `path`, `text`, `overwrite` (default false). UTF-8 contents, at most
   1 MiB inline. Existing parent directories required; no implicit recursive creation.
 - `edit`: `path`, nonempty `old_text`, and `new_text`. Exactly one literal match
-  is required. Zero/multiple matches fail without mutation; no regex replacement.
+  is required, counting overlapping occurrences too. Zero/multiple matches fail
+  without mutation; no regex replacement.
 - `bash`: nonempty `command` (at most 64 KiB UTF-8 bytes), optional
   workspace-relative `cwd` (default `.`), optional
   `timeout_ms` (default 120,000; permitted range 1..=600,000). No argument can
@@ -263,6 +264,9 @@ Structural, semantic, environmental, and authorization validation all precede
 execution. `read` output exposes byte offsets and truncation through text/result
 metadata; a range splitting a UTF-8 character is adjusted to a valid boundary
 with the actual consumed offsets reported, never silently decoded lossily.
+Read planning uses inspection facts only, with no content read or whole-file
+size cap; range UTF-8 handling belongs to the step 5 executor. Edit planning
+reads at most 1 MiB and checks UTF-8 and literal occurrence uniqueness.
 
 ```rust,ignore
 pub trait Tool: Send + Sync {
@@ -302,7 +306,10 @@ facts and bounded UTF-8 reads, not direct filesystem access. `Plan` and
 `Refusal` carries `ResultCode`, `ToolStatus` and short content-free detail;
 `text()` renders `<code>: <detail>`. Unknown/disabled names are refused before
 validation. Schemas reject unknown keys; semantic argument failures use
-`invalid_arguments`. `.git` is read-only by default, but a configured protected
+`invalid_arguments`, with a field/key and rule diagnostic capped at 200 bytes
+and no echoed value. Configuration decoding instead returns session-level
+`PolicyError`, not a tool refusal; view contract failures such as a missing
+regular-file digest use `infrastructure_failure`. `.git` is read-only by default, but a configured protected
 path is fully denied and takes precedence over read-only or any allowance.
 
 The executor sketch and `AuthorizedOperation` below remain planned for step 4.
@@ -326,8 +333,11 @@ and execution. Plan format **version 2** fixes this field order: `version`,
 normalized and defaulted, never raw model JSON. A file target has ordered
 `path`, `pre_image` (current digest or `"absent"`), and, for write only,
 `content_sha256`. Bash has null target, a workspace `.` mount (`ro` when
-workspace_mutation is deny, otherwise `rw`), then a separate `.git` read-only
-mount when it exists. Network is always `deny`. File deadlines are fixed at
+workspace_mutation is deny, otherwise `rw`), followed by sorted/deduplicated
+normalized configured protected paths as `masked` mounts, including absent
+paths. A separate `.git` read-only mount is added only when it exists and no
+masked path covers it; a covered `.git` is masked instead. Step 7 enforces these
+approved mounts. Network is always `deny`. File deadlines are fixed at
 30,000 ms. `Plan::effects()` alone supplies intent effects: read `[read]`,
 write/edit `[filesystem_mutation]`, bash `[process]`. The historical example
 artifact remains plan v1; v2 golden artifacts are in `crates/core/src/tools/golden/`.

@@ -18,6 +18,46 @@ enum RestrictedPolicy {
     Deny,
 }
 
+/// Session configuration failures, never model-facing tool refusals.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PolicyError {
+    /// The bytes do not match the configuration artifact reference.
+    #[error("policy_mismatch")]
+    Mismatch,
+    /// Invalid JSON, duplicate keys, or a non-object root.
+    #[error("policy_not_an_object")]
+    NotAnObject,
+    /// A required policy field is absent.
+    #[error("policy_missing_field: {0}")]
+    MissingField(&'static str),
+    /// A field has an invalid type or value.
+    #[error("policy_invalid_field: {0}")]
+    InvalidField(&'static str),
+    /// Only deny-network configuration is supported.
+    #[error("network_unsupported")]
+    NetworkUnsupported,
+    /// An allowance is malformed; index is zero-based in the configuration.
+    #[error("policy_invalid_allowance: index {index}")]
+    InvalidAllowance {
+        /// Index in the allowances array.
+        index: usize,
+    },
+}
+
+impl PolicyError {
+    /// Stable session-level diagnostic code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Mismatch => "policy_mismatch",
+            Self::NotAnObject => "policy_not_an_object",
+            Self::MissingField(_) => "policy_missing_field",
+            Self::InvalidField(_) => "policy_invalid_field",
+            Self::NetworkUnsupported => "network_unsupported",
+            Self::InvalidAllowance { .. } => "policy_invalid_allowance",
+        }
+    }
+}
+
 /// Validated session policy plus the untouched configuration values.
 #[derive(Clone, Debug)]
 pub struct PolicySnapshot {
@@ -148,37 +188,34 @@ impl Allowance {
 
 impl PolicySnapshot {
     /// Verify and decode the configuration artifact without dropping unknown fields.
-    /// Invalid fields return `invalid_arguments`; unsupported network is `network_unsupported`.
-    pub fn parse(artifact: ArtifactRef, bytes: &[u8]) -> Result<Self, Refusal> {
+    /// Configuration errors are session-level [`PolicyError`]s, not tool results.
+    pub fn parse(artifact: ArtifactRef, bytes: &[u8]) -> Result<Self, PolicyError> {
         if bytes.len() as u64 != artifact.bytes || Digest::of(bytes) != artifact.sha256 {
-            return Err(invalid("configuration artifact digest or size mismatch"));
+            return Err(PolicyError::Mismatch);
         }
-        let Value::Object(object) = codec::unique_json(bytes)
-            .map_err(|_| invalid("configuration must be a unique-key JSON object"))?
+        let Value::Object(object) =
+            codec::unique_json(bytes).map_err(|_| PolicyError::NotAnObject)?
         else {
-            return Err(invalid("configuration must be a JSON object"));
+            return Err(PolicyError::NotAnObject);
         };
-        let field = |key: &str| {
+        let field = |key: &'static str| {
             object
                 .get(key)
                 .cloned()
-                .ok_or_else(|| invalid("missing required policy field"))
+                .ok_or(PolicyError::MissingField(key))
         };
         let revision = serde_json::from_value(field("policy_revision")?)
-            .map_err(|_| invalid("policy_revision must be a string"))?;
+            .map_err(|_| PolicyError::InvalidField("policy_revision"))?;
         let enabled_tools = serde_json::from_value(field("enabled_tools")?)
-            .map_err(|_| invalid("enabled_tools must be an array of strings"))?;
+            .map_err(|_| PolicyError::InvalidField("enabled_tools"))?;
         let workspace_read = serde_json::from_value(field("workspace_read")?)
-            .map_err(|_| invalid("workspace_read must be allow, ask or deny"))?;
+            .map_err(|_| PolicyError::InvalidField("workspace_read"))?;
         let workspace_mutation = serde_json::from_value(field("workspace_mutation")?)
-            .map_err(|_| invalid("workspace_mutation must be ask or deny"))?;
+            .map_err(|_| PolicyError::InvalidField("workspace_mutation"))?;
         let process = serde_json::from_value(field("process")?)
-            .map_err(|_| invalid("process must be ask or deny"))?;
+            .map_err(|_| PolicyError::InvalidField("process"))?;
         if field("network")? != "deny" {
-            return Err(Refusal::new(
-                ResultCode::NetworkUnsupported,
-                "only deny-network policy is supported",
-            ));
+            return Err(PolicyError::NetworkUnsupported);
         }
         let protected_paths: Vec<String> = serde_json::from_value(
             object
@@ -186,18 +223,25 @@ impl PolicySnapshot {
                 .cloned()
                 .unwrap_or_else(|| json!([])),
         )
-        .map_err(|_| invalid("protected_paths must be an array of paths"))?;
-        let protected_paths = protected_paths
+        .map_err(|_| PolicyError::InvalidField("protected_paths"))?;
+        let mut protected_paths: Vec<_> = protected_paths
             .iter()
-            .map(|p| WorkspacePath::new(p))
+            .map(|p| {
+                WorkspacePath::new(p).map_err(|_| PolicyError::InvalidField("protected_paths"))
+            })
             .collect::<Result<_, _>>()?;
+        protected_paths.sort();
+        protected_paths.dedup();
         let allowances = match object.get("allowances") {
             None => Vec::new(),
             Some(Value::Array(values)) => values
                 .iter()
-                .map(Allowance::parse)
+                .enumerate()
+                .map(|(index, value)| {
+                    Allowance::parse(value).map_err(|_| PolicyError::InvalidAllowance { index })
+                })
                 .collect::<Result<_, _>>()?,
-            _ => return Err(invalid("allowances must be an array")),
+            _ => return Err(PolicyError::InvalidField("allowances")),
         };
         Ok(Self {
             artifact,
@@ -227,6 +271,9 @@ impl PolicySnapshot {
     /// Validated allowances, in configuration order.
     pub fn allowances(&self) -> &[Allowance] {
         &self.allowances
+    }
+    pub(super) fn protected_paths(&self) -> &[WorkspacePath] {
+        &self.protected_paths
     }
     pub(super) fn mutation_denied(&self) -> bool {
         matches!(self.workspace_mutation, RestrictedPolicy::Deny)

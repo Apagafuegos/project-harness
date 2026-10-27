@@ -738,6 +738,8 @@ pub enum ResultCode {
     NotUtf8,
     /// Arguments or workspace contents exceed limits.
     TooLarge,
+    /// A trusted infrastructure component violated its contract.
+    InfrastructureFailure,
 }
 impl ResultCode {
     /// The persisted spelling.
@@ -760,6 +762,7 @@ impl ResultCode {
             Self::MultipleMatches => "multiple_matches",
             Self::NotUtf8 => "not_utf8",
             Self::TooLarge => "too_large",
+            Self::InfrastructureFailure => "infrastructure_failure",
         }
     }
 }

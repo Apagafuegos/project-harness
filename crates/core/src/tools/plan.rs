@@ -180,7 +180,10 @@ impl Plan {
                     require_directory(&parent)?;
                     content_sha256 = Some(Digest::of(text.as_bytes()));
                 }
-                Operation::Read { .. } | Operation::Edit { .. } => {
+                Operation::Read { .. } => {}
+                Operation::Edit {
+                    old_text, new_text, ..
+                } => {
                     if current.size > MIB {
                         return Err(Refusal::new(ResultCode::TooLarge, "file exceeds 1 MiB"));
                     }
@@ -188,34 +191,35 @@ impl Plan {
                     if text.len() as u64 > MIB {
                         return Err(Refusal::new(ResultCode::TooLarge, "file exceeds 1 MiB"));
                     }
-                    if let Operation::Edit {
-                        old_text, new_text, ..
-                    } = operation
+                    match text
+                        .as_bytes()
+                        .windows(old_text.len())
+                        .filter(|window| *window == old_text.as_bytes())
+                        .take(2)
+                        .count()
                     {
-                        match text.matches(old_text.as_str()).count() {
-                            0 => {
-                                return Err(Refusal::new(
-                                    ResultCode::NoMatch,
-                                    "old_text has no literal match",
-                                ));
-                            }
-                            1 => {}
-                            _ => {
-                                return Err(Refusal::new(
-                                    ResultCode::MultipleMatches,
-                                    "old_text has multiple literal matches",
-                                ));
-                            }
-                        }
-                        if (text.len() - old_text.len())
-                            .checked_add(new_text.len())
-                            .is_none_or(|size| size as u64 > MIB)
-                        {
+                        0 => {
                             return Err(Refusal::new(
-                                ResultCode::TooLarge,
-                                "edited contents exceed 1 MiB",
+                                ResultCode::NoMatch,
+                                "old_text has no literal match",
                             ));
                         }
+                        1 => {}
+                        _ => {
+                            return Err(Refusal::new(
+                                ResultCode::MultipleMatches,
+                                "old_text has multiple literal matches",
+                            ));
+                        }
+                    }
+                    if (text.len() - old_text.len())
+                        .checked_add(new_text.len())
+                        .is_none_or(|size| size as u64 > MIB)
+                    {
+                        return Err(Refusal::new(
+                            ResultCode::TooLarge,
+                            "edited contents exceed 1 MiB",
+                        ));
                     }
                 }
                 Operation::Bash { .. } => unreachable!(),
@@ -225,7 +229,7 @@ impl Plan {
             } else {
                 PreImage::Digest(current.digest.ok_or_else(|| {
                     Refusal::new(
-                        ResultCode::InvalidArguments,
+                        ResultCode::InfrastructureFailure,
                         "workspace view omitted a regular file digest",
                     )
                 })?)
@@ -240,8 +244,17 @@ impl Plan {
                 path: root,
                 mode: if policy.mutation_denied() { "ro" } else { "rw" },
             });
+            mounts.extend(policy.protected_paths().iter().map(|path| Mount {
+                path: path.clone(),
+                mode: "masked",
+            }));
             let git = WorkspacePath::new(".git")?;
-            if workspace.inspect(&git)?.kind != FileKind::Absent {
+            if !policy
+                .protected_paths()
+                .iter()
+                .any(|path| git.beneath(path))
+                && workspace.inspect(&git)?.kind != FileKind::Absent
+            {
                 mounts.push(Mount {
                     path: git,
                     mode: "ro",

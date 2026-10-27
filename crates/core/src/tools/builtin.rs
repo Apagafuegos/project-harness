@@ -154,7 +154,7 @@ fn definition(index: usize) -> ToolDefinition {
         ),
         2 => (
             "edit",
-            "Replace exactly one literal, non-overlapping match of nonempty old_text with new_text in a regular UTF-8 workspace file. No regular expressions. Requires mutation authorization.",
+            "Replace exactly one literal occurrence of nonempty old_text with new_text (overlapping occurrences also count) in a regular UTF-8 workspace file. No regular expressions. Requires mutation authorization.",
             json!({"path":path,"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}}),
             json!(["path", "old_text", "new_text"]),
             EffectClass::FilesystemMutation,
@@ -187,23 +187,75 @@ fn schema(index: usize) -> &'static jsonschema::Validator {
     })
 }
 
+fn argument_refusal(location: &str, rule: &str) -> Refusal {
+    // Preserve the rule even if a model supplies an enormous property name.
+    let budget = 200usize.saturating_sub(rule.len() + 2);
+    let end = location
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(location.len()))
+        .take_while(|&i| i <= budget)
+        .last()
+        .unwrap_or(0);
+    Refusal::new(
+        ResultCode::InvalidArguments,
+        &format!("{}: {rule}", &location[..end]),
+    )
+}
+
+fn schema_refusal(error: &jsonschema::ValidationError<'_>) -> Refusal {
+    use jsonschema::error::ValidationErrorKind;
+    let mut location = error.instance_path().to_string();
+    let rule = match error.kind() {
+        ValidationErrorKind::Required { property } => {
+            location.push('/');
+            location.push_str(
+                &property
+                    .as_str()
+                    .expect("schema required name")
+                    .replace('~', "~0")
+                    .replace('/', "~1"),
+            );
+            "required".into()
+        }
+        ValidationErrorKind::AdditionalProperties { unexpected } => {
+            if let Some(key) = unexpected.first() {
+                location.push('/');
+                location.push_str(&key.replace('~', "~0").replace('/', "~1"));
+            }
+            "unknown key".into()
+        }
+        ValidationErrorKind::Type { .. } => "type mismatch".into(),
+        ValidationErrorKind::Minimum { limit } => format!("minimum is {limit}"),
+        ValidationErrorKind::Maximum { limit } => format!("maximum is {limit}"),
+        ValidationErrorKind::MinLength { limit } => format!("length must be at least {limit}"),
+        ValidationErrorKind::MaxLength { limit } => format!("length exceeds {limit} UTF-8 bytes"),
+        kind => format!("{} rule failed", kind.keyword()),
+    };
+    argument_refusal(
+        if location.is_empty() {
+            "\"\""
+        } else {
+            &location
+        },
+        &rule,
+    )
+}
+
 impl Tool for Builtin {
     fn definition(&self) -> &ToolDefinition {
         &self.definition
     }
 
     fn validate(&self, arguments: &Value) -> Result<ValidatedOperation, Refusal> {
-        let invalid = || {
-            Refusal::new(
-                ResultCode::InvalidArguments,
-                "arguments do not match the tool schema or byte limits",
-            )
-        };
-        if !schema(self.index).is_valid(arguments) {
-            return Err(invalid());
+        if let Err(error) = schema(self.index).validate(arguments) {
+            return Err(schema_refusal(&error));
         }
         let string = |key: &str| arguments[key].as_str().expect("schema string").to_owned();
-        let path = |key: &str| WorkspacePath::new(arguments[key].as_str().unwrap_or("."));
+        let path = |key: &str| {
+            WorkspacePath::new(arguments[key].as_str().unwrap_or("."))
+                .map_err(|error| argument_refusal(&format!("/{key}"), &error.detail))
+        };
         // JSON Schema integers include 1.0. Normalize them, but never treat a
         // present, unrepresentable number as a missing argument with a default.
         let integer = |key: &str, default: u64| -> Result<u64, Refusal> {
@@ -218,7 +270,7 @@ impl Tool for Builtin {
                         .filter(|n| *n >= 0.0 && n.fract() == 0.0 && *n < u64::MAX as f64)
                         .map(|n| n as u64)
                 })
-                .ok_or_else(invalid)
+                .ok_or_else(|| argument_refusal(&format!("/{key}"), "integer is out of range"))
         };
         let operation = match self.index {
             0 => Operation::Read {
@@ -229,7 +281,10 @@ impl Tool for Builtin {
             1 => {
                 let text = string("text");
                 if text.len() as u64 > MIB {
-                    return Err(invalid());
+                    return Err(argument_refusal(
+                        "/text",
+                        "length exceeds 1048576 UTF-8 bytes",
+                    ));
                 }
                 Operation::Write {
                     path: path("path")?,
@@ -245,7 +300,10 @@ impl Tool for Builtin {
             _ => {
                 let command = string("command");
                 if command.len() > 65536 {
-                    return Err(invalid());
+                    return Err(argument_refusal(
+                        "/command",
+                        "length exceeds 65536 UTF-8 bytes",
+                    ));
                 }
                 Operation::Bash {
                     command,
