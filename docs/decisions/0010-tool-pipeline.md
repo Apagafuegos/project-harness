@@ -1,8 +1,9 @@
 # 0010: Pure-core sequential tool pipeline
 
-Status: Implemented for Milestone 3 step 4a in the pure core and synchronous
-storage-backed test driver. Async tool plumbing and executor threading remain
-step 4b; real filesystem and sandbox executors remain steps 5 and 7.
+Status: Implemented through Milestone 3 step 4b in the pure core and async
+session driver. The trusted filesystem executor is implemented separately in
+step 5 ([0011](0011-trusted-file-tools.md)); sandbox execution and CLI host
+installation remain deferred.
 
 Date: 2026-10-27
 
@@ -140,3 +141,42 @@ workspace or subprocess executor is enabled here. Elevated authorization and
 subprocess networking are not in Milestone 3; protected paths stay denied.
 Read-only recovery and evidence-based hints remain step 6. Seccomp remains the
 recorded ADR 0008 gap.
+
+## Amendment (step 4b)
+
+`DriverConfig.tools: ToolHost` supplies a trusted workspace and one executor per
+backend. Duplicate backends are rejected before storage I/O. `ToolHost::none()`
+is the default: no executor thread and unchanged `tools_unavailable` behavior.
+Both initial launch and replacement construct `Runtime::with_tools` with the
+host's backends. The host's Debug output lists only backends.
+
+One `harness-tools` OS thread per tool-enabled session receives sequential Plan
+and Execute jobs on a standard channel. Planning resolves the built-in against a
+cloned current policy and reads the workspace on that thread; execution receives
+the already-authorized operation. Answers return over a Tokio channel selected
+by the driver. There is at most one outstanding job; overlap faults with
+`executor_overlap`. Jobs and answers carry the runtime epoch and local token.
+Answers from other epochs are silently dropped before touching outstanding work.
+
+Each execution has a fresh cooperative `CancelToken`, retained by the driver.
+`CancelExecution` cancels it directly, never through the busy thread's queue.
+The executor's actual terminal outcome wins, including success after a mutation;
+cancellation does not claim rollback. Planning and execution cannot block views,
+subscriptions or cancellation on the driver task.
+
+Each job is unwind-protected. Planning panic yields an honest nonexecuted
+`infrastructure_failure` refusal. Execution panic, missing backend or thread loss
+faults `executor_lost`, with **no** synthetic execution result. The durable intent
+remains uncertain on recovery and is never dispatched again.
+
+Fault cancellation can outlive the runtime. Reopen and in-place repair await the
+outstanding answer asynchronously **before** restarting storage or recording
+uncertainty. Shutdown cancels, awaits cleanup and durability, closes the job
+channel and joins the executor through `spawn_blocking`, before stopping storage.
+Thus no live effect can race user resolution, and shutdown releases the writer
+only after executor cleanup. Wait bounds rely on executor deadline compliance.
+
+An expiry comparison and the record authorizing against it now share one lazily
+sampled clock instant per core step (decision 28). `ResultCode::ALL` and `parse`
+centralize the closed code set with exhaustive compile-time coverage; an invalid
+stored denial code faults `invalid_stored_result_code` rather than panicking.

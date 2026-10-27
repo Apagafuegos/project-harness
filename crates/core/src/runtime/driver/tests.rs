@@ -1,5 +1,8 @@
 //! Real worker/channels on a current-thread runtime, with explicit virtual time.
 
+#[path = "tool_tests.rs"]
+mod tool_tests;
+
 use std::{
     collections::VecDeque,
     sync::atomic::Ordering,

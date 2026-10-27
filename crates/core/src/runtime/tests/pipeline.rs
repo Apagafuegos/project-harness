@@ -31,8 +31,8 @@ pub(super) fn configured(value: Value) -> Driver {
 }
 
 #[derive(Default)]
-pub(super) struct StubExecutor {
-    pub(super) invocations: Mutex<Vec<InvocationId>>,
+pub(crate) struct StubExecutor {
+    pub(crate) invocations: Mutex<Vec<InvocationId>>,
     pub(super) outcomes: Mutex<std::collections::VecDeque<ExecutionOutcome>>,
     pub(super) success_wins: AtomicBool,
 }
@@ -41,7 +41,7 @@ struct StubBackend<'a> {
     state: &'a StubExecutor,
 }
 impl StubExecutor {
-    pub(super) fn execute(
+    pub(crate) fn execute(
         &self,
         operation: &AuthorizedOperation,
         cancel: &CancelToken,
@@ -76,7 +76,7 @@ impl Executor for StubBackend<'_> {
             .unwrap_or_else(|| outcome(ToolStatus::Succeeded, None))
     }
 }
-pub(super) fn outcome(status: ToolStatus, code: Option<ResultCode>) -> ExecutionOutcome {
+pub(crate) fn outcome(status: ToolStatus, code: Option<ResultCode>) -> ExecutionOutcome {
     ExecutionOutcome {
         status,
         code,

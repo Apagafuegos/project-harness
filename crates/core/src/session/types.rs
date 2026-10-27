@@ -759,7 +759,38 @@ pub enum ResultCode {
     /// A policy revision invalidated the pending approval.
     ApprovalInvalidated,
 }
+// One list generates both the slice and its exhaustiveness check. Adding an
+// enum variant without adding it here is a compile error, not a lookup panic.
+const fn all_result_codes(code: ResultCode) -> &'static [ResultCode] {
+    macro_rules! codes {
+        ($($variant:ident),+ $(,)?) => {
+            match code {
+                $(ResultCode::$variant)|+ => &[$(ResultCode::$variant),+],
+            }
+        };
+    }
+    codes! {
+        ToolsUnavailable, Cancelled, ProcessRestart, UnknownTool, ToolDisabled,
+        InvalidArguments, PolicyDenied, ProtectedPath, NetworkUnsupported,
+        NotFound, NotRegularFile, HardLinkRejected, AlreadyExists, NoMatch,
+        MultipleMatches, NotUtf8, TooLarge, InfrastructureFailure, StalePlan,
+        SymlinkRejected, Timeout, NonzeroExit, OutputLimit, SandboxUnavailable,
+        ApprovalDenied, ApprovalExpired, ApprovalInvalidated,
+    }
+}
+
 impl ResultCode {
+    /// Every result code this build writes, complete by construction.
+    pub const ALL: &'static [Self] = all_result_codes(Self::ToolsUnavailable);
+
+    /// Parse an exact persisted spelling; unknown or future codes stay unknown.
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|value| value.as_str() == code)
+    }
+
     /// The persisted spelling.
     pub const fn as_str(self) -> &'static str {
         match self {

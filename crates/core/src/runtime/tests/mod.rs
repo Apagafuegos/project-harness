@@ -1,7 +1,7 @@
 //! Runtime tests against real storage. Every commit the core emits is appended
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
-mod pipeline;
+pub(crate) mod pipeline;
 mod random;
 mod recovery;
 mod scenarios;

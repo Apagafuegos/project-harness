@@ -345,7 +345,8 @@ impl Runtime {
 
     /// Process one input. Returns every effect it causes, in order.
     pub fn step(&mut self, input: Input, env: &mut impl Env) -> Vec<Effect> {
-        let env: &mut dyn Env = env;
+        let mut step_env = super::env::StepEnv::new(env);
+        let env: &mut dyn Env = &mut step_env;
         match input {
             Input::PublishView => self.emit(EventKind::PhaseChanged {
                 phase: self.phase(),

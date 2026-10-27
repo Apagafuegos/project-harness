@@ -809,7 +809,10 @@ impl Runtime {
         events.push(JournalEvent::TurnFinished(finished.clone()));
         flight.finished = Some(finished);
         let entries = chain(snapshot, results, env);
-        flight.tool_events.extend(result_events(&entries));
+        let Ok(events_for_results) = result_events(&entries) else {
+            return self.fault(FaultCause::Internal("invalid_stored_result_code"));
+        };
+        flight.tool_events.extend(events_for_results);
         self.persist(advancing(snapshot, entries, events), flight, None, env);
     }
 
@@ -874,7 +877,10 @@ impl Runtime {
         }
         events.extend(flight.finished.clone().map(JournalEvent::TurnFinished));
         let entries = chain(snapshot, results, env);
-        flight.tool_events.extend(result_events(&entries));
+        let Ok(events_for_results) = result_events(&entries) else {
+            return self.fault(FaultCause::Internal("invalid_stored_result_code"));
+        };
+        flight.tool_events.extend(events_for_results);
         self.persist(advancing(snapshot, entries, events), flight, None, env);
     }
 }
@@ -886,53 +892,27 @@ fn artifact(bytes: &[u8]) -> crate::session::ArtifactRef {
     }
 }
 
-fn result_events(entries: &[Entry]) -> impl Iterator<Item = EventKind> + '_ {
-    entries.iter().filter_map(|entry| {
-        if let EntryPayload::ToolResult(r) = &entry.payload {
-            Some(EventKind::ToolFinished {
-                call: r.result.call.clone(),
-                status: r.result.status,
-                code: r.result.metadata.code.as_deref().map(code_from_str),
+fn result_events(entries: &[Entry]) -> Result<Vec<EventKind>, ()> {
+    entries
+        .iter()
+        .filter_map(|entry| match &entry.payload {
+            EntryPayload::ToolResult(r) => Some(&r.result),
+            _ => None,
+        })
+        .map(|result| {
+            let code = result
+                .metadata
+                .code
+                .as_deref()
+                .map(|code| ResultCode::parse(code).ok_or(()))
+                .transpose()?;
+            Ok(EventKind::ToolFinished {
+                call: result.call.clone(),
+                status: result.status,
+                code,
             })
-        } else {
-            None
-        }
-    })
-}
-fn code_from_str(code: &str) -> ResultCode {
-    use ResultCode::*;
-    [
-        ToolsUnavailable,
-        Cancelled,
-        ProcessRestart,
-        UnknownTool,
-        ToolDisabled,
-        InvalidArguments,
-        PolicyDenied,
-        ProtectedPath,
-        NetworkUnsupported,
-        NotFound,
-        NotRegularFile,
-        HardLinkRejected,
-        AlreadyExists,
-        NoMatch,
-        MultipleMatches,
-        NotUtf8,
-        TooLarge,
-        InfrastructureFailure,
-        ApprovalDenied,
-        ApprovalExpired,
-        ApprovalInvalidated,
-        StalePlan,
-        SymlinkRejected,
-        Timeout,
-        NonzeroExit,
-        OutputLimit,
-        SandboxUnavailable,
-    ]
-    .into_iter()
-    .find(|c| c.as_str() == code)
-    .expect("core writes only closed codes")
+        })
+        .collect()
 }
 struct StoredProposal {
     name: String,

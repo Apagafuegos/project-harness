@@ -18,6 +18,11 @@ use crate::{
     session::{ArtifactRef, DataRoot, Digest, EntryId, ModelRef, SessionHeader, SessionId},
 };
 
+mod tools;
+use crate::tools::CancelToken;
+pub use tools::ToolHost;
+use tools::{Answer, Job, JobToken, PendingJob, ToolWorker};
+
 type CommandResult = Result<Accepted, Rejection>;
 type PendingStorage = Pin<Box<dyn Future<Output = Input> + Send>>;
 /// Timer fires carry their runtime's epoch: `TimerId`s restart in a new runtime.
@@ -28,6 +33,8 @@ type TimerFire = (RuntimeEpoch, TimerId);
 pub struct DriverConfig {
     /// Limits interpreted exclusively by the pure core.
     pub runtime: RuntimeConfig,
+    /// Trusted planning workspace and executor backends (none by default).
+    pub tools: ToolHost,
     /// Mailbox capacity. `command` rejects immediately when full.
     pub command_capacity: usize,
     /// Broadcast capacity; lagging subscribers automatically reset.
@@ -42,6 +49,7 @@ impl Default for DriverConfig {
     fn default() -> Self {
         Self {
             runtime: RuntimeConfig::default(),
+            tools: ToolHost::none(),
             command_capacity: 16,
             event_capacity: 64,
             worker_capacity: 8,
@@ -69,6 +77,10 @@ enum Message {
     /// Test-only access to the real timer channel, to inject stale fires.
     #[cfg(test)]
     TimerSender(oneshot::Sender<mpsc::UnboundedSender<TimerFire>>),
+    #[cfg(test)]
+    Inject(Input, oneshot::Sender<()>),
+    #[cfg(test)]
+    ToolAnswer(Answer, oneshot::Sender<()>),
 }
 
 /// Cheaply cloned access to the one task owning a session runtime.
@@ -193,6 +205,7 @@ impl SessionHandle {
         provider: Arc<dyn ModelProvider>,
         options: WorkerOptions,
     ) -> Result<Self, PersistError> {
+        config.tools.validate()?;
         let (worker, snapshot, configuration) = StorageWorker::start(
             root.clone(),
             session.clone(),
@@ -201,7 +214,21 @@ impl SessionHandle {
             options.clone(),
         )
         .await?;
-        let runtime = Runtime::new(snapshot, configuration, config.runtime.clone(), &mut env);
+        let runtime = Runtime::with_tools(
+            snapshot,
+            configuration,
+            config.runtime.clone(),
+            config.tools.tool_set(),
+            &mut env,
+        );
+        let (tool_send, tool_receive) = mpsc::unbounded_channel();
+        let tool_worker = match ToolWorker::start(config.tools.clone(), tool_send) {
+            Ok(worker) => worker,
+            Err(error) => {
+                worker.shutdown().await;
+                return Err(error);
+            }
+        };
         let (commands, receive) = mpsc::channel(config.command_capacity.max(1));
         let (events, _) = broadcast::channel(config.event_capacity.max(1));
         let handle = Self {
@@ -211,7 +238,18 @@ impl SessionHandle {
         };
         tokio::spawn(
             Driver::new(
-                root, session, worker, runtime, config, env, provider, options, events, receive,
+                root,
+                session,
+                worker,
+                runtime,
+                config,
+                env,
+                provider,
+                options,
+                events,
+                receive,
+                tool_worker,
+                tool_receive,
             )
             .run(),
         );
@@ -438,6 +476,10 @@ struct Driver<E> {
     /// Every sender is gone; `recv` would return `None` at once.
     mailbox_closed: bool,
     cancel_sent: bool,
+    tool_worker: Option<ToolWorker>,
+    tool_receive: mpsc::UnboundedReceiver<Answer>,
+    tool_pending: Option<PendingJob>,
+    tool_closed: bool,
 }
 
 impl<E: Env + Send + 'static> Driver<E> {
@@ -453,6 +495,8 @@ impl<E: Env + Send + 'static> Driver<E> {
         options: WorkerOptions,
         events: broadcast::Sender<RuntimeEvent>,
         commands: mpsc::Receiver<Message>,
+        tool_worker: Option<ToolWorker>,
+        tool_receive: mpsc::UnboundedReceiver<Answer>,
     ) -> Self {
         let (timer_send, timer_receive) = mpsc::unbounded_channel();
         Self {
@@ -478,6 +522,10 @@ impl<E: Env + Send + 'static> Driver<E> {
             closing: false,
             mailbox_closed: false,
             cancel_sent: false,
+            tool_worker,
+            tool_receive,
+            tool_pending: None,
+            tool_closed: false,
         }
     }
 
@@ -498,6 +546,7 @@ impl<E: Env + Send + 'static> Driver<E> {
                     });
                 }
                 if self.storage.is_none()
+                    && self.tool_pending.is_none()
                     && (self.runtime.view().active_turn.is_none()
                         || matches!(
                             self.runtime.phase(),
@@ -516,6 +565,9 @@ impl<E: Env + Send + 'static> Driver<E> {
                 _ = async { (&mut self.worker.as_mut().expect("guarded").exited).await }, if self.worker.is_some() => {
                     self.worker = None;
                     self.step(Input::StorageFailed { error: PersistError::WorkerLost });
+                }
+                answer = self.tool_receive.recv(), if self.tool_worker.is_some() && !self.tool_closed => {
+                    self.tool_answer(answer);
                 }
                 Some((epoch, timer)) = self.timer_receive.recv() => {
                     // A fire from a replaced runtime could alias a new `TimerId`.
@@ -566,6 +618,9 @@ impl<E: Env + Send + 'static> Driver<E> {
             timer.abort();
         }
         while self.artifacts.join_next().await.is_some() {}
+        if let Some(worker) = self.tool_worker.take() {
+            worker.shutdown().await;
+        }
         if let Some(worker) = self.worker.take() {
             worker.shutdown().await;
         }
@@ -601,7 +656,7 @@ impl<E: Env + Send + 'static> Driver<E> {
         // asks for a second, keep the first (it may already be written), skip
         // the second, and let the core fault rather than drop an answer.
         let mut overlap = false;
-        let mut unsupported_tools = false;
+        let mut executor_error = None;
         for effect in effects {
             match effect {
                 Effect::Persist {
@@ -699,12 +754,79 @@ impl<E: Env + Send + 'static> Driver<E> {
                         task.abort();
                     }
                 }
-                // Runtime::new installs no executors. Tool plumbing is step
-                // 4b; fail closed if that construction invariant ever changes.
-                Effect::PlanCall { .. }
-                | Effect::Execute { .. }
-                | Effect::CancelExecution { .. } => {
-                    unsupported_tools = true;
+                Effect::PlanCall {
+                    token,
+                    call,
+                    tool,
+                    operation,
+                } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let policy = self.runtime.policy().ok().cloned();
+                    if self.tool_pending.is_some() {
+                        executor_error = Some("executor_overlap");
+                    } else if let Some(policy) = policy {
+                        let pending = PendingJob {
+                            epoch: epoch.clone(),
+                            token: JobToken::Plan(token),
+                            cancel: None,
+                        };
+                        if self
+                            .send_tool(
+                                Job::Plan {
+                                    epoch,
+                                    token,
+                                    call,
+                                    tool,
+                                    operation,
+                                    policy,
+                                },
+                                pending,
+                            )
+                            .is_err()
+                        {
+                            executor_error = Some("executor_lost");
+                        }
+                    } else {
+                        executor_error = Some("executor_lost");
+                    }
+                }
+                Effect::Execute { token, operation } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let cancel = CancelToken::new();
+                    if self.tool_pending.is_some() {
+                        executor_error = Some("executor_overlap");
+                    } else {
+                        let pending = PendingJob {
+                            epoch: epoch.clone(),
+                            token: JobToken::Execute(token),
+                            cancel: Some(cancel.clone()),
+                        };
+                        if self
+                            .send_tool(
+                                Job::Execute {
+                                    epoch,
+                                    token,
+                                    operation,
+                                    cancel,
+                                },
+                                pending,
+                            )
+                            .is_err()
+                        {
+                            executor_error = Some("executor_lost");
+                        }
+                    }
+                }
+                Effect::CancelExecution { token } => {
+                    if self.tool_worker.is_none() {
+                        executor_error = Some("executor_lost");
+                    }
+                    if let Some(pending) = &self.tool_pending
+                        && pending.token == JobToken::Execute(token)
+                        && let Some(cancel) = &pending.cancel
+                    {
+                        cancel.cancel();
+                    }
                 }
                 Effect::Emit(event) => {
                     let _ = self.events.send(event);
@@ -716,10 +838,8 @@ impl<E: Env + Send + 'static> Driver<E> {
                 }
             }
         }
-        if unsupported_tools {
-            self.step(Input::DriverInvariant {
-                code: "tool_driver_unavailable",
-            });
+        if let Some(code) = executor_error {
+            self.step(Input::DriverInvariant { code });
         }
         if overlap {
             self.step(Input::DriverInvariant {
@@ -733,9 +853,52 @@ impl<E: Env + Send + 'static> Driver<E> {
         }
     }
 
+    fn send_tool(&mut self, job: Job, pending: PendingJob) -> Result<(), ()> {
+        let worker = self.tool_worker.as_ref().ok_or(())?;
+        if self.tool_closed {
+            return Err(());
+        }
+        worker.send.send(job).map_err(|_| ())?;
+        self.tool_pending = Some(pending);
+        Ok(())
+    }
+
+    fn tool_answer(&mut self, answer: Option<Answer>) {
+        let Some(answer) = answer else {
+            self.tool_closed = true;
+            self.tool_pending = None;
+            self.step(Input::DriverInvariant {
+                code: "executor_lost",
+            });
+            return;
+        };
+        if answer.epoch != *self.runtime.epoch() {
+            return;
+        }
+        if self
+            .tool_pending
+            .as_ref()
+            .is_some_and(|p| p.epoch == answer.epoch && p.token == answer.token)
+        {
+            self.tool_pending = None;
+        }
+        match answer.input {
+            Some(input) => self.step(input),
+            None => self.step(Input::DriverInvariant {
+                code: "executor_lost",
+            }),
+        }
+    }
+
     /// Stop the faulted runtime's worker and attach a new runtime over the
     /// journal `opening` yields, with a new epoch, then let it recover.
     async fn replace(&mut self, opening: Opening) -> Result<RuntimeView, PersistError> {
+        // A fault may have requested cancellation without receiving cleanup.
+        // Await the thread's answer before storage can label the intent uncertain.
+        while self.tool_pending.is_some() {
+            let answer = self.tool_receive.recv().await;
+            self.tool_answer(answer);
+        }
         // An uncertain commit is never cancelled or repeated.
         if let Some(storage) = self.storage.take() {
             let _ = storage.await;
@@ -757,10 +920,11 @@ impl<E: Env + Send + 'static> Driver<E> {
         )
         .await?;
         self.worker = Some(worker);
-        self.runtime = Runtime::new(
+        self.runtime = Runtime::with_tools(
             snapshot,
             configuration,
             self.config.runtime.clone(),
+            self.config.tools.tool_set(),
             &mut self.env,
         );
         self.step(Input::PublishView);
@@ -857,6 +1021,16 @@ impl<E: Env + Send + 'static> Driver<E> {
             Message::Shutdown(reply) => {
                 self.shutdown.push(reply);
                 self.closing = true;
+            }
+            #[cfg(test)]
+            Message::Inject(input, reply) => {
+                self.step(input);
+                let _ = reply.send(());
+            }
+            #[cfg(test)]
+            Message::ToolAnswer(answer, reply) => {
+                self.tool_answer(Some(answer));
+                let _ = reply.send(());
             }
             #[cfg(test)]
             Message::TimerSender(reply) => {

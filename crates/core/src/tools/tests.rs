@@ -1363,7 +1363,6 @@ fn effects_pass_real_v2_storage_state_validator_without_io() {
 
 #[test]
 fn all_result_codes_match_real_v2_schema_pattern() {
-    use ResultCode::*;
     let schema: Value = serde_json::from_str(include_str!(
         "../../../../docs/rfcs/001/schema/session-v2.schema.json"
     ))
@@ -1379,40 +1378,34 @@ fn all_result_codes_match_real_v2_schema_pattern() {
         }
     }
     let validator = jsonschema::validator_for(&find_pattern(&schema).unwrap()).unwrap();
-    for code in [
-        ToolsUnavailable,
-        Cancelled,
-        ProcessRestart,
-        UnknownTool,
-        ToolDisabled,
-        InvalidArguments,
-        PolicyDenied,
-        ProtectedPath,
-        NetworkUnsupported,
-        NotFound,
-        NotRegularFile,
-        HardLinkRejected,
-        AlreadyExists,
-        NoMatch,
-        MultipleMatches,
-        NotUtf8,
-        TooLarge,
-        InfrastructureFailure,
-        StalePlan,
-        SymlinkRejected,
-        Timeout,
-        NonzeroExit,
-        OutputLimit,
-        SandboxUnavailable,
-        ApprovalDenied,
-        ApprovalExpired,
-        ApprovalInvalidated,
-    ] {
+    for &code in ResultCode::ALL {
+        assert_eq!(ResultCode::parse(code.as_str()), Some(code));
+        assert_eq!(
+            ResultCode::ALL
+                .iter()
+                .filter(|&&other| other == code)
+                .count(),
+            1,
+            "duplicate result code"
+        );
         assert!(
             validator.is_valid(&json!(code.as_str())),
             "{}",
             code.as_str()
         );
+    }
+}
+
+#[test]
+fn result_code_parse_rejects_unknown_and_inexact_spellings() {
+    for code in [
+        "",
+        "future_result_code",
+        "Cancelled",
+        " cancelled",
+        "cancelled ",
+    ] {
+        assert_eq!(ResultCode::parse(code), None);
     }
 }
 

@@ -5,9 +5,12 @@ Status: Milestone 2 is implemented as `harness_core::runtime`,
 machine, a dedicated storage worker, a Tokio driver/handle with broadcast
 subscriptions, the provider stream seam with a scripted mock, the context
 builder that the core runs in `Preparing`, and startup recovery with explicit
-tail repair. Milestone 3 step 4a adds the pure-core tool pipeline and synchronous
-stub-executor test driver; async tool dispatch remains step 4b, real tools steps
-5 and 7. [Decision 0010](decisions/0010-tool-pipeline.md) records that split.
+tail repair. Milestone 3 steps 4a–4b add the pure-core tool pipeline and async
+tool-host dispatch on a dedicated executor thread.
+[Decision 0010](decisions/0010-tool-pipeline.md) records that boundary. The
+trusted filesystem executor is implemented separately in
+[step 5](decisions/0011-trusted-file-tools.md); sandbox execution and CLI
+installation of a tool host remain planned.
 Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
@@ -167,7 +170,7 @@ Storage determines the tool-answer sequence:
   `processing>continuing` path for calls that were rejected without
   authorization, then `continuing>preparing`.
 
-### Tool pipeline (pure core and synchronous test driver)
+### Tool pipeline
 
 Construct `Runtime::with_tools` with a fixed `ToolSet` (registry plus available
 backends). For each proposal, in block order: resolve, validate, commit
@@ -213,8 +216,9 @@ usable. Policy and instructions decode the same configuration bytes.
 
 Every `StartInference.tools` carries enabled, available definitions in registry
 order. These definitions are **outside** `ModelInput` and its fingerprint;
-projection behavior, versions and goldens do not change. The async driver still
-constructs `Runtime::new`, installs no executor, and preserves its prior behavior.
+projection behavior, versions and goldens do not change. The async driver uses
+`Runtime::with_tools` with the configured host's available backends, including
+after reopen or in-place repair. The default host preserves no-tools behavior.
 
 Every terminal path persists exactly one `turn_finished`, which storage applies
 once. After its ack the core emits `TurnFinished` and resets the turn's
@@ -514,9 +518,10 @@ subscriptions hold only weak command senders and do not keep the driver alive.
   payloads above `max_artifact_bytes` before any I/O. The worker publishes the
   bytes and replies after artifact file and directory sync. Artifact I/O failure
   faults the runtime even without a pending append.
-- `shutdown().await` asks the core to cancel any active inference, waits for its
-  timer/terminal commits and all in-flight storage work, drains artifacts, drops
-  worker senders, and awaits worker exit. The lock is released before it
+- `shutdown().await` asks the core to cancel any active turn, waits for its
+  timer/terminal commits and outstanding tool cleanup, drains artifacts, closes
+  the executor queue and joins its thread through `spawn_blocking`, then drops
+  storage worker senders and awaits worker exit. The lock is released before it
   returns, including for simultaneous shutdown callers. Immediate open succeeds.
   During the drain the mailbox is still read: commands get
   `Rejection::ShuttingDown`, uploads and reopen get
@@ -525,7 +530,8 @@ subscriptions hold only weak command senders and do not keep the driver alive.
   After the driver has exited, `command` reports `Faulted` because the mailbox
   is closed.
 - `reopen().await -> Result<RuntimeView, PersistError>` requires `Faulted`.
-  It drains and stops the old worker, opens the same journal on a new one,
+  It awaits outstanding planning/execution asynchronously, then drains and stops
+  the old storage worker, opens the same journal on a new one,
   constructs a new runtime/epoch, feeds `PublishView` and then `Start`, which
   recovers the session as on open. A torn tail is returned as
   `PersistError::TornTail` without repair. No command or uncertain write is
@@ -563,6 +569,30 @@ Nothing is ever skipped or rewritten. `harness journal inspect` and
 `harness journal repair` do the same without an engine; see
 [session storage](session-storage.md#durability-and-recovery).
 
+`DriverConfig.tools` is a `ToolHost { workspace: Arc<dyn WorkspaceView + Send +
+Sync>, executors: Vec<Arc<dyn Executor>> }`. Its default, `ToolHost::none()`,
+installs no tools and starts no executor thread. Applications explicitly supply
+a trusted workspace view and the executors they support. Duplicate backend
+executors make open/create fail with `duplicate_executor_backend` before any
+journal I/O. Debug output lists backends only, not workspace data.
+
+With at least one executor, a single named `harness-tools` OS thread runs both
+workspace planning and execution. Standard-channel jobs carry epoch, token and
+immutable inputs; planning takes a clone of `Runtime::policy()`. Tokio-channel
+answers are selected by the driver, so neither hashing nor execution blocks
+views, subscriptions or commands. Only one job may be outstanding; overlap
+faults `executor_overlap`. An answer from another epoch is dropped silently.
+Each execution gets a fresh `tools::CancelToken`, retained by execution token in
+the driver; cancellation sets it directly, not via the busy thread's queue.
+
+Each job runs under `catch_unwind`. A planning panic is a nonexecuted
+`infrastructure_failure` refusal. Execution panic, a missing matching executor
+or thread loss faults `executor_lost` without inventing a `ToolFinished` input:
+the intent has no result, so reopen reports it uncertain and never replays it.
+A fault may leave cancellation/cleanup outstanding. Reopen and repair wait for
+that answer before restarting storage; shutdown waits before joining the thread
+and stopping storage. Executors must honor their deadlines to bound these waits.
+
 `DriverConfig` defaults: 16 command slots, 64 broadcast slots, 8 worker slots
 (and at most 8 concurrent artifact tasks), 16 MiB artifact uploads, and the
 existing `RuntimeConfig` limits. Channel capacities of zero are clamped to one.
@@ -570,7 +600,7 @@ Artifact task saturation returns `PersistError::Rejected { code: "overloaded" }`
 Reopen outside `Faulted` returns `Rejected { code: "not_faulted" }`.
 
 The driver uses biased `select!`, in this order: persistence and preflight
-replies, worker exit, timers, artifact failures, commands, and provider events
+replies, worker exit, executor answers, timers, artifact failures, commands, and provider events
 last. Each provider event spends Tokio's cooperative budget, so even a stream
 that is always ready makes the task yield, and commands such as `Cancel` are
 served between events. For `StartInference` it calls
@@ -621,8 +651,8 @@ events that follow.
 
 ## Not implemented yet
 
-- Async tool dispatch, the dedicated executor thread and approval handle
-  convenience methods (step 4b); real filesystem/sandbox executors and providers.
+- Real sandbox executors, CLI tool-host wiring and native providers. The
+  library's trusted filesystem executor is available but not installed by CLI.
 - General configuration-update commands, summary generation and compaction.
   Remember is the implemented configuration-change path.
 - Reconciling an uncertain invocation from evidence, such as a file tool
@@ -644,6 +674,11 @@ explicit virtual-time advances fire timers; I/O gates hold durability boundaries
 without real sleeps. They cover lag, mid-stream joins, epoch replacement,
 shutdown and its drain rejections, uncertain writes, panic, overload, media,
 an injected overlapping storage effect, and a stale timer fire after reopen.
+Tool-host tests use the fake workspace, scripted provider and per-invocation
+counted trusted-fs/bubblewrap stubs. They cover approval/remember/denial/expiry,
+durable ordered events and late subscriptions, planning/execution nonblocking,
+cancellation races, planning panic, execution loss and uncertainty, stale epochs,
+tools after reopen, and executor cleanup before reopen/shutdown.
 `ScriptedProvider` scripts cover confirmed cancellation without virtual time,
 a stalled stream released at grace end, setup and mid-stream failure,
 interruption, a malformed stream released at once, a cancel that preempts

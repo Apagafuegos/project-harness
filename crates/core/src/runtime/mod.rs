@@ -72,7 +72,7 @@ mod view;
 mod worker;
 
 pub use self::core::Runtime;
-pub use driver::{DriverConfig, SessionHandle, Subscription, SubscriptionItem};
+pub use driver::{DriverConfig, SessionHandle, Subscription, SubscriptionItem, ToolHost};
 pub use env::{DeterministicEnv, Env, SystemEnv};
 pub use types::*;
 pub use view::{ApplyOutcome, ClientView, PartialBlock, PartialResponse, Phase, RuntimeView};

@@ -33,6 +33,43 @@ pub trait Env {
     fn policy_revision(&mut self) -> String;
 }
 
+/// Lazily sample one instant per step. Expiry checks, timer durations and any
+/// resulting commit must agree even when the underlying clock advances.
+pub(super) struct StepEnv<'a> {
+    inner: &'a mut dyn Env,
+    now: Option<Timestamp>,
+}
+
+impl<'a> StepEnv<'a> {
+    pub(super) fn new(inner: &'a mut dyn Env) -> Self {
+        Self { inner, now: None }
+    }
+}
+
+macro_rules! forward_identities {
+    ($($method:ident -> $result:ty),+ $(,)?) => {
+        $(fn $method(&mut self) -> $result { self.inner.$method() })+
+    };
+}
+
+impl Env for StepEnv<'_> {
+    fn now(&mut self) -> Timestamp {
+        self.now.get_or_insert_with(|| self.inner.now()).clone()
+    }
+
+    forward_identities! {
+        runtime_epoch -> RuntimeEpoch,
+        entry_id -> EntryId,
+        turn_id -> TurnId,
+        response_id -> ResponseId,
+        call_id -> CallId,
+        approval_id -> ApprovalId,
+        decision_id -> DecisionId,
+        invocation_id -> InvocationId,
+        policy_revision -> String,
+    }
+}
+
 /// Wall clock and random UUIDv7 identities, for production drivers.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemEnv;
