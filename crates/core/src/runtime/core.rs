@@ -52,6 +52,8 @@ pub struct Runtime {
     configuration: SessionConfiguration,
     policy: Result<PolicySnapshot, PolicyError>,
     tools: ToolSet,
+    /// Real-host sessions require valid policy even when no backend is usable.
+    pub(super) require_tool_policy: bool,
     tool: Option<Activity>,
     mode: Mode,
     /// Published snapshot, phase and partial response, changed only by
@@ -253,6 +255,7 @@ impl Runtime {
             configuration,
             policy,
             tools,
+            require_tool_policy: false,
             tool: None,
             mode,
             view: view.into(),
@@ -319,6 +322,15 @@ impl Runtime {
     /// Policy decoded from the exact current session configuration bytes.
     pub fn policy(&self) -> Result<&PolicySnapshot, &PolicyError> {
         self.policy.as_ref()
+    }
+
+    /// Test seam simulating a future configuration installer; no public update
+    /// command exists in M3. The driver must reject a changed protection set.
+    #[cfg(test)]
+    pub(super) fn install_configuration_for_test(&mut self, configuration: SessionConfiguration) {
+        self.policy =
+            PolicySnapshot::parse(configuration.artifact().clone(), configuration.bytes());
+        self.configuration = configuration;
     }
 
     /// Fixed registry and installed backend availability for this incarnation.
@@ -1622,6 +1634,13 @@ impl Runtime {
                 &turn,
                 None,
                 turn_finished(&turn, TurnOutcome::Failed, Some("inference_limit")),
+                env,
+            ),
+            Preparing if self.require_tool_policy && self.policy.is_err() => self.finish(
+                &snapshot,
+                &turn,
+                None,
+                turn_finished(&turn, TurnOutcome::Failed, Some("policy_invalid")),
                 env,
             ),
             Preparing => self.prepare(&snapshot, turn, env),

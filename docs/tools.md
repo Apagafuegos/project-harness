@@ -12,8 +12,8 @@ planning uses a trusted `WorkspaceView`.
 `harness_core::tools::fs` supplies a real Linux `WorkspaceView` and a low-level
 executor for authorized read/write/edit plans. See
 [ADR 0011](decisions/0011-trusted-file-tools.md) for security guarantees, costs,
-known limits, and S01 coverage. Runtime registration/dispatch is **not** wired by
-this step, and bash is not executed by this backend.
+known limits, and S01 coverage. Step 7b assembles and dispatches this backend
+through `SessionHandle`; bash is not executed by the file backend.
 
 ```rust,no_run
 use harness_core::tools::{FsProtectedPaths, FsWorkspace, WorkspacePath};
@@ -77,17 +77,17 @@ following a committed replacement; never assume rollback or retry it silently.
 
 ## Planned separately
 
-Runtime effect wiring, recovery integration, and native provider adapters are
-separate work. Trusted file operations still require workspace authorization;
+Native provider adapters and a CLI chat command remain separate work.
+Trusted file operations still require workspace authorization;
 they are not OS-sandboxed. `elevated` is not a Milestone 3 capability.
 
 ## Implemented: shell backend (step 7a)
 
-`harness_core::tools::sandbox` provides a blocking Bubblewrap backend. Bash is
-**not yet registered** with the driver. `Sandbox` implements the shared
-`Executor` trait: `execute` runs the authorized plan against
-`SandboxConfig::workspace_root`. Installation still belongs to step 7b; the
-driver must authorize the exact plan and publish the returned artifact bytes.
+`harness_core::tools::sandbox` provides a blocking Bubblewrap backend.
+`Sandbox` implements the shared `Executor` trait: `execute` runs the authorized
+plan against `SandboxConfig::workspace_root`. Step 7b registers bash only after
+both the file layer and sandbox probe succeed; the driver authorizes the exact
+plan and publishes the returned artifact bytes before committing its result.
 The shared `tools::CancelToken` and `ExecutionOutcome` are used directly.
 
 ```rust,no_run
@@ -140,10 +140,65 @@ local opt-out is `HARNESS_ALLOW_NO_SANDBOX=1`, which prints
 To run the suite alone:
 
 ```sh
-cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
+./scripts/with-clean-fds.sh cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
 ```
 
 The suite uses Rust payloads plus ordinary sandboxed workloads. The TIOCSTI
 workload uses Ubuntu's `/usr/bin/python3` standard-library ioctl support;
 there is no added project toolchain or dependency. Pinned Ubuntu 24.04 CI loads
 the committed AppArmor profile and runs the suite without the opt-out.
+
+## Implemented: real tool-host assembly (step 7b)
+
+`runtime::ToolHost::assemble(&ToolHostConfig, &PolicySnapshot)` returns a host
+and a `ToolAvailability` report. The config supplies absolute `workspace_root`
+and `data_root`, plus `sandbox: Option<SandboxConfig>`; `None` disables bash.
+The sandbox root is always overwritten with the configured workspace. The
+policy alone supplies the exclusions for both descriptor-pinned file protection
+and shell plan masks. File startup failure disables shell planning too
+(`planning_view_unavailable` plus the file reason), even if the sandbox probe
+passes; the probe still runs to retain its own diagnostics. There is no
+shell-only mode, weakened resolver, or unsandboxed fallback.
+
+An in-workspace data root must equal or lie beneath a configured protected path,
+or both backends report `data_root_unprotected`. Physical aliases and component
+boundaries are checked. This is defense in depth for direct assembly/doctor:
+session storage already refuses workspace/data-root overlap with
+`storage_overlaps_workspace`, before a host can be assembled.
+
+Use `SessionHandle::open_with_tools` / `create_with_tools` to assemble from the
+session's actual current configuration after storage opens. The handle exposes
+`tool_availability()` (legacy caller-supplied hosts return `None`). An invalid
+policy installs no tools and fails a turn with `policy_invalid` before inference.
+Supplying `DriverConfig.tools` as well is rejected (`tool_host_conflict`). A
+mismatched storage root or session workspace is rejected too. Remember carries
+the exclusions forward; any installed policy with changed exclusions faults
+`tool_host_stale` before planning/execution can use stale capabilities.
+
+For a read-only report without creating storage:
+
+```sh
+harness doctor --workspace /absolute/project --data-root /absolute/private-state
+```
+
+Both flags are required together and must be absolute. Doctor uses an empty
+protected list and the default sandbox settings (with its existing executable
+path overrides). It adds only `tools`; without these flags, the original report
+is unchanged. The stable JSON shape is:
+
+```json
+{"file_tools":{"status":"available"},"shell":{"status":"unavailable","reasons":["shell_disabled"]}}
+```
+
+`tool_host` S02 tests cover real approvals, file post-images, shell captures,
+network/protected/git denial, deadlines, Cancel, graceful handle-drop shutdown,
+and a SIGKILL of a re-executed host process. SIGKILL leaves the durable intent
+uncertain, never replayed; Bubblewrap's `--die-with-parent` ends the namespace.
+Handle drop instead cancels and drains a durable result, leaving no uncertainty.
+The capture test publishes 3 MiB through the append worker even with a 1 KiB
+upload limit. Executor capture publication is not `put_artifact` upload: the
+worker publishes the full configured capture (64 MiB by default) before the
+result, without the upload cap or silent truncation. Artifact storage's numeric
+bound is the journal's safe-integer bound, not a smaller capture-size limit.

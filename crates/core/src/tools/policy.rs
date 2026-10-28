@@ -272,7 +272,7 @@ impl PolicySnapshot {
     pub fn allowances(&self) -> &[Allowance] {
         &self.allowances
     }
-    pub(super) fn protected_paths(&self) -> &[WorkspacePath] {
+    pub(crate) fn protected_paths(&self) -> &[WorkspacePath] {
         &self.protected_paths
     }
     pub(super) fn mutation_denied(&self) -> bool {

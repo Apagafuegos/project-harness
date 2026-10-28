@@ -67,6 +67,7 @@
 mod core;
 mod driver;
 mod env;
+mod host;
 mod types;
 mod view;
 mod worker;
@@ -74,6 +75,7 @@ mod worker;
 pub use self::core::Runtime;
 pub use driver::{DriverConfig, SessionHandle, Subscription, SubscriptionItem, ToolHost};
 pub use env::{DeterministicEnv, Env, SystemEnv};
+pub use host::{BackendAvailability, ToolAvailability, ToolHostConfig};
 pub use types::*;
 pub use view::{ApplyOutcome, ClientView, PartialBlock, PartialResponse, Phase, RuntimeView};
 pub use worker::StorageWorker;

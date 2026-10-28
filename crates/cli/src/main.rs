@@ -7,10 +7,12 @@ use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
 use clap::{Arg, ArgMatches, Command, value_parser};
 use harness_core::{
     context::{ContextBuilder, ContextConfig, ModelLimits, SessionConfiguration},
+    runtime::{ToolHost, ToolHostConfig},
     session::{
         DataRoot, DiagnosticKind, Digest, EntryId, Inspection, JournalEvent, JournalStore,
         ModelRef, SessionId, StoreError, Timestamp,
     },
+    tools::{PolicySnapshot, SandboxConfig},
 };
 use serde_json::{Value, json};
 
@@ -76,6 +78,22 @@ fn command() -> Command {
                      printed. Host configuration is never changed: the doctor only \
                      uses a private temporary directory, probe sandboxes and one \
                      transient user scope.",
+                )
+                .arg(
+                    Arg::new("workspace")
+                        .long("workspace")
+                        .value_name("DIR")
+                        .value_parser(absolute)
+                        .requires("data-root")
+                        .help("Report real tool availability for this absolute workspace"),
+                )
+                .arg(
+                    Arg::new("data-root")
+                        .long("data-root")
+                        .value_name("DIR")
+                        .value_parser(absolute)
+                        .requires("workspace")
+                        .help("Absolute private data root for the workspace tools report"),
                 )
                 .arg(
                     Arg::new("bwrap")
@@ -357,7 +375,40 @@ fn run_doctor(arguments: &ArgMatches) -> Result<String, String> {
             .expect("default")
             .clone(),
     };
-    serde_json::to_string_pretty(&doctor::report(&programs)?).map_err(|error| error.to_string())
+    let mut report = doctor::report(&programs)?;
+    if let Some(workspace_root) = arguments.get_one::<PathBuf>("workspace") {
+        let bytes = serde_json::to_vec(&json!({
+            "policy_revision":"doctor", "enabled_tools":["read","write","edit","bash"],
+            "workspace_read":"allow", "workspace_mutation":"ask", "process":"ask",
+            "network":"deny", "protected_paths":[], "allowances":[]
+        }))
+        .map_err(|error| error.to_string())?;
+        let policy = PolicySnapshot::parse(
+            harness_core::session::ArtifactRef {
+                sha256: Digest::of(&bytes),
+                bytes: bytes.len() as u64,
+            },
+            &bytes,
+        )
+        .map_err(|error| error.to_string())?;
+        let (_, tools) = ToolHost::assemble(
+            &ToolHostConfig {
+                workspace_root: workspace_root.clone(),
+                data_root: arguments
+                    .get_one::<PathBuf>("data-root")
+                    .expect("required with workspace")
+                    .clone(),
+                sandbox: Some(SandboxConfig {
+                    bwrap: programs.bwrap,
+                    systemd_run: programs.systemd_run,
+                    ..SandboxConfig::default()
+                }),
+            },
+            &policy,
+        );
+        report["tools"] = serde_json::to_value(tools).map_err(|error| error.to_string())?;
+    }
+    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
 }
 
 /// Build the report for the requested head and print it as pretty JSON.

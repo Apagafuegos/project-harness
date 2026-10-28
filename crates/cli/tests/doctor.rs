@@ -164,3 +164,95 @@ fn relative_program_paths_are_refused() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("expected an absolute path"));
 }
+
+#[test]
+fn workspace_requires_absolute_data_root_and_vice_versa() {
+    for arguments in [
+        vec!["--workspace", "/workspace"],
+        vec!["--data-root", "/state"],
+        vec!["--workspace", "relative", "--data-root", "/state"],
+        vec!["--workspace", "/workspace", "--data-root", "relative"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_harness"))
+            .arg("doctor")
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+    }
+}
+
+#[test]
+fn workspace_report_with_broken_bwrap_keeps_file_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let data = temp.path().join("state");
+    let fake = temp.path().join("bwrap");
+    fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&[
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--data-root",
+        data.to_str().unwrap(),
+        "--bwrap",
+        fake.to_str().unwrap(),
+    ]);
+    assert_eq!(report["tools"]["file_tools"]["status"], "available");
+    assert_eq!(report["tools"]["shell"]["status"], "unavailable");
+    assert!(
+        !report["tools"]["shell"]["reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!data.exists(), "doctor must not create storage");
+}
+
+#[test]
+fn workspace_report_refuses_unprotected_data_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("state");
+    let report = doctor(&[
+        "--workspace",
+        temp.path().to_str().unwrap(),
+        "--data-root",
+        data.to_str().unwrap(),
+        "--bwrap",
+        "/missing/bwrap",
+    ]);
+    let unavailable =
+        serde_json::json!({"status":"unavailable", "reasons":["data_root_unprotected"]});
+    assert_eq!(report["tools"]["file_tools"], unavailable);
+    assert_eq!(report["tools"]["shell"], unavailable);
+    assert!(!data.exists());
+}
+
+#[test]
+#[ignore = "S02 real Linux sandbox: forwarding fake bwrap"]
+fn workspace_report_with_working_fake_bwrap() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let data = temp.path().join("state");
+    let fake = temp.path().join("bwrap");
+    // A fake that fabricates success cannot pass the host-side map check.
+    // Forwarding exercises the configurable path with real namespace evidence.
+    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/bwrap \"$@\"\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&[
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--data-root",
+        data.to_str().unwrap(),
+        "--bwrap",
+        fake.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        report["tools"],
+        serde_json::json!({"file_tools":{"status":"available"}, "shell":{"status":"available"}}),
+        "{report}"
+    );
+    assert!(!data.exists());
+}

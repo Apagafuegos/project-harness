@@ -1,7 +1,7 @@
 # 0012: Bubblewrap backend and mandatory S02 security gate
 
-Status: Implemented for Milestone 3 step 7a. Bash is **not registered** with the
-runtime; authorization/dispatch adaptation remains step 7b.
+Status: Implemented for Milestone 3 steps 7a–7b. The amendment below records
+real host assembly, runtime registration and end-to-end verification.
 
 Date: 2026-10-27
 
@@ -152,6 +152,67 @@ and a missing TasksMax manager have additional regressions.
   trusted file tools' descriptor-relative filesystem guarantees against hostile
   concurrent host mutations. Hostile same-user host processes and kernel
   compromise remain outside the v0.1 threat model.
-- This step implements Executor but does not install it in the driver, publish
-  artifacts or register/authorize shell calls. Step 7b must wire that installation
-  once step 4b exists; the driver must authorize the exact plan and publish bytes.
+- Step 7a alone implemented Executor; step 7b now installs it through the
+  runtime host assembly below. A native provider and CLI chat remain separate.
+
+## Amendment: session-owned host assembly (step 7b)
+
+`runtime::ToolHostConfig` contains absolute workspace and data-root paths and
+optional `SandboxConfig`. `ToolHost::assemble` pins `FsWorkspace` using exactly
+`PolicySnapshot.protected_paths`, overrides the sandbox workspace, and probes
+Bubblewrap. Bash requires **both** backends to be usable: its planner inspects
+cwd through `FsWorkspace` (decision 31). A failed file layer still runs the
+sandbox probe and adds `planning_view_unavailable` and the file reason. No
+shell-only mode, fabricated directory facts or planner changes were introduced.
+
+An in-workspace data root must equal or descend from a configured exclusion,
+otherwise both backends are `data_root_unprotected`. Root comparisons resolve
+existing ancestors, handle component boundaries and aliases, and refuse `..`
+or unresolvable symlink roots rather than lexically guessing. Session storage
+already rejects overlap before assembly; that earlier refusal is asserted at
+the handle while assembly and doctor exercise the defense-in-depth check
+(decision 34). Storage rules are unchanged.
+
+`SessionHandle::open_with_tools` and `create_with_tools` open storage before
+assembly. A preinstalled host, wrong storage root or different session workspace
+is rejected, never merged. Startup assembly runs on a blocking task. Invalid
+policy assembles nothing and fails a turn `policy_invalid` before inference;
+legacy no-tool runtime behavior is unchanged. The handle's optional
+`tool_availability()` describes startup, not a concurrent policy mutation.
+
+The driver remembers the assembled exclusions and faults `tool_host_stale`
+after a changed policy is installed, before dispatching its effects. Already
+applied client events keep their sequence. Remember carries exclusions forward.
+Replacement keeps this binding rather than silently rebuilding capabilities.
+No general configuration-update command is added.
+
+`ToolAvailability` serializes `file_tools` and `shell`, each with `status`
+(`available` or `unavailable`) and unavailable `reasons`. Probe errors may
+contain arbitrary executable output, so assembly emits content-free reason
+categories instead of raw captures/environment values. Descriptor-audit
+failure is reported at startup as `descriptor_audit_failed`. The existing
+host-capability report is unchanged.
+
+`harness doctor --workspace DIR --data-root DIR` adds this `tools` report,
+with an empty protected list and default sandbox config plus the existing
+executable overrides. Both absolute paths are required together; doctor creates
+no storage. Without these flags it takes the original report path (decision 33).
+
+The required S02 gate and both pinned CI jobs run `tests/tool_host.rs` and the
+forwarding-fake doctor test, through the existing clean-fd launcher in CI. They
+exercise actual file edits, remembered grants, shell output/capture digests,
+.git/protected/network denial, timeout/Cancel cleanup and subsequent turns.
+A protected path with a symlink ancestor triggers the real file opener failure.
+An isolated inheritable-fd child proves shell refusal during assembly.
+
+A SIGKILL test re-executes the test binary and kills the host only after the
+shell appends a counter line following its durable intent. No Rust destructor
+runs; Bubblewrap's `--die-with-parent` tears down the namespace. Reopen records
+uncertainty, accepts user resolution, and never replays the counter command,
+including after a later turn. Separate handle-drop coverage proves graceful
+cancel/drain, no live namespace and no uncertainty (decision 32).
+
+The append worker publishes executor artifacts directly via the artifact store,
+not the handle's 16 MiB upload path. The store's safe-integer size bound exceeds
+64 MiB; no upload limit is raised. An end-to-end 3 MiB capture test uses a 1 KiB
+upload cap and verifies every captured byte and its digest.

@@ -1,5 +1,7 @@
 //! Real worker/channels on a current-thread runtime, with explicit virtual time.
 
+#[path = "host_tests.rs"]
+mod host_tests;
 #[path = "tool_tests.rs"]
 mod tool_tests;
 

@@ -56,6 +56,8 @@ jobs:
         run: |
           bwrap --version
           ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+          ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
+          ./scripts/with-clean-fds.sh cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
       - name: Summary
         if: always()
         run: |

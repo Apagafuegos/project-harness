@@ -9,8 +9,8 @@ tail repair. Milestone 3 steps 4a–4b add the pure-core tool pipeline and async
 tool-host dispatch on a dedicated executor thread.
 [Decision 0010](decisions/0010-tool-pipeline.md) records that boundary. The
 trusted filesystem executor is implemented separately in
-[step 5](decisions/0011-trusted-file-tools.md); sandbox execution and CLI
-installation of a tool host remain planned.
+[step 5](decisions/0011-trusted-file-tools.md). Step 7b assembles real file and
+sandbox backends from session policy through the handle; CLI chat remains planned.
 Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
@@ -536,6 +536,25 @@ async execution. Header configuration artifacts must already be published.
 Cloning a handle is cheap. Dropping every handle also initiates shutdown;
 subscriptions hold only weak command senders and do not keep the driver alive.
 
+`open_with_tools(root, session, provider, config, &ToolHostConfig)` and
+`create_with_tools(root, session, header, provider, config, &ToolHostConfig)`
+open storage first, decode its current policy and assemble real backends on a
+blocking task before constructing the runtime. File tools require strict
+`openat2`; bash additionally requires the Bubblewrap probe. Both plan through
+the same `FsWorkspace`. The host config's data root must match `root.path()`;
+its workspace must match the session's workspace. A preinstalled
+`config.tools` is rejected rather than merged. `tool_availability()` returns
+the startup report (`None` for legacy caller-supplied hosts). Invalid policy
+assembles no backends and fails the first turn `policy_invalid`, even when no
+tool executor is available; legacy no-tool configurations remain supported.
+
+The driver retains the policy's assembled protected set. After every applied
+configuration (and on runtime replacement), it compares the current set before
+dispatching effects. A changed set faults `tool_host_stale`; already-applied
+client events remain ordered, but no new planning/execution is sent. Remember
+preserves the set. A new handle can assemble a fresh host after an intentional
+policy change; in-place reopen never silently changes protection capabilities.
+
 - `command(Command).await -> Result<Accepted, Rejection>` uses `try_send` on
   the bounded command mailbox. Full returns `Overloaded` at once. A second turn
   still gets the core's `Busy`; turns are never queued for later execution.
@@ -631,7 +650,9 @@ and stopping storage. Executors must honor their deadlines to bound these waits.
 
 `DriverConfig` defaults: 16 command slots, 64 broadcast slots, 8 worker slots
 (and at most 8 concurrent artifact tasks), 16 MiB artifact uploads, and the
-existing `RuntimeConfig` limits. Channel capacities of zero are clamped to one.
+existing `RuntimeConfig` limits. The upload cap does not apply to executor
+captures in `Persist.artifacts`: the storage append worker publishes their full
+bytes before the result, supporting the sandbox's default 64 MiB capture limit. Channel capacities of zero are clamped to one.
 Artifact task saturation returns `PersistError::Rejected { code: "overloaded" }`.
 Reopen outside `Faulted` returns `Rejected { code: "not_faulted" }`.
 
@@ -687,8 +708,9 @@ events that follow.
 
 ## Not implemented yet
 
-- Real sandbox executors, CLI tool-host wiring and native providers. The
-  library's trusted filesystem executor is available but not installed by CLI.
+- CLI chat/tool execution and native providers. The library assembles and runs
+  real file/sandbox backends; `harness doctor --workspace ... --data-root ...`
+  reports their availability without starting a session.
 - General configuration-update commands, summary generation and compaction.
   Remember is the implemented configuration-change path.
 - Automatic reconciliation of uncertain side effects. Advisory file-image

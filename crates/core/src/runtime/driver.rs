@@ -19,7 +19,7 @@ use crate::{
 };
 
 mod tools;
-use crate::tools::CancelToken;
+use crate::tools::{CancelToken, PolicySnapshot, WorkspacePath};
 pub use tools::ToolHost;
 use tools::{Answer, Job, JobToken, PendingJob, ToolWorker};
 
@@ -81,6 +81,10 @@ enum Message {
     Inject(Input, oneshot::Sender<()>),
     #[cfg(test)]
     ToolAnswer(Answer, oneshot::Sender<()>),
+    #[cfg(test)]
+    InstallConfiguration(crate::context::SessionConfiguration, oneshot::Sender<()>),
+    #[cfg(test)]
+    Offered(oneshot::Sender<Vec<Vec<String>>>),
 }
 
 /// Cheaply cloned access to the one task owning a session runtime.
@@ -89,6 +93,7 @@ pub struct SessionHandle {
     commands: mpsc::Sender<Message>,
     events: broadcast::WeakSender<RuntimeEvent>,
     max_artifact_bytes: usize,
+    availability: Option<ToolAvailability>,
 }
 
 impl SessionHandle {
@@ -104,6 +109,57 @@ impl SessionHandle {
         config: DriverConfig,
     ) -> Result<Self, PersistError> {
         Self::open_with_env(root, session, provider, config, SystemEnv).await
+    }
+
+    /// Open storage first, then assemble real tools from its current policy.
+    /// A preinstalled `config.tools` is rejected, never merged. Invalid policy
+    /// installs nothing and fails the first turn with `policy_invalid`.
+    pub async fn open_with_tools(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        provider: Arc<dyn ModelProvider>,
+        config: DriverConfig,
+        host: &ToolHostConfig,
+    ) -> Result<Self, PersistError> {
+        Self::launch_with_host(
+            root,
+            session,
+            Opening::Open,
+            config,
+            SystemEnv,
+            provider,
+            WorkerOptions::default(),
+            Some(host.clone()),
+        )
+        .await
+    }
+
+    /// Create storage, then assemble real tools from the header's policy.
+    pub async fn create_with_tools(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        header: SessionHeader,
+        provider: Arc<dyn ModelProvider>,
+        config: DriverConfig,
+        host: &ToolHostConfig,
+    ) -> Result<Self, PersistError> {
+        Self::launch_with_host(
+            root,
+            session,
+            Opening::Create(header, SystemEnv.now()),
+            config,
+            SystemEnv,
+            provider,
+            WorkerOptions::default(),
+            Some(host.clone()),
+        )
+        .await
+    }
+
+    /// Startup report for handles opened/created with real tools. Legacy
+    /// caller-supplied hosts have no probed availability report.
+    pub fn tool_availability(&self) -> Option<&ToolAvailability> {
+        self.availability.as_ref()
     }
 
     /// Repair the torn tail the user inspected, then open the session as
@@ -201,11 +257,45 @@ impl SessionHandle {
         session: SessionId,
         opening: Opening,
         config: DriverConfig,
-        mut env: E,
+        env: E,
         provider: Arc<dyn ModelProvider>,
         options: WorkerOptions,
     ) -> Result<Self, PersistError> {
+        Self::launch_with_host(root, session, opening, config, env, provider, options, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_with_host<E: Env + Send + 'static>(
+        root: Arc<DataRoot>,
+        session: SessionId,
+        opening: Opening,
+        mut config: DriverConfig,
+        mut env: E,
+        provider: Arc<dyn ModelProvider>,
+        options: WorkerOptions,
+        host: Option<ToolHostConfig>,
+    ) -> Result<Self, PersistError> {
         config.tools.validate()?;
+        if let Some(host) = &host {
+            let code = if !config.tools.executors.is_empty()
+                || !config.tools.workspace.identity().0.is_empty()
+            {
+                Some("tool_host_conflict")
+            } else if !host.data_root.is_absolute() || !host.workspace_root.is_absolute() {
+                Some("absolute_path_required")
+            } else if super::host::location(&host.data_root).is_none()
+                || super::host::location(root.path()).is_none()
+            {
+                Some("root_resolution_failed")
+            } else if super::host::location(&host.data_root) != super::host::location(root.path()) {
+                Some("tool_host_data_root_mismatch")
+            } else {
+                None
+            };
+            if let Some(code) = code {
+                return Err(PersistError::Rejected { code: code.into() });
+            }
+        }
         let (worker, snapshot, configuration) = StorageWorker::start(
             root.clone(),
             session.clone(),
@@ -214,13 +304,49 @@ impl SessionHandle {
             options.clone(),
         )
         .await?;
-        let runtime = Runtime::with_tools(
+        let mut protected = None;
+        let require_tool_policy = host.is_some();
+        let availability = if let Some(host) = host {
+            if super::host::location(&host.workspace_root)
+                != super::host::location(std::path::Path::new(&snapshot.header().workspace))
+            {
+                worker.shutdown().await;
+                return Err(PersistError::Rejected {
+                    code: "tool_host_workspace_mismatch".into(),
+                });
+            }
+            let policy =
+                PolicySnapshot::parse(configuration.artifact().clone(), configuration.bytes())
+                    .ok()
+                    .filter(|policy| policy.revision() == snapshot.policy_revision());
+            if let Some(policy) = policy {
+                protected = Some(policy.protected_paths().to_vec());
+                let assembled =
+                    tokio::task::spawn_blocking(move || ToolHost::assemble(&host, &policy)).await;
+                match assembled {
+                    Ok((tools, availability)) => {
+                        config.tools = tools;
+                        Some(availability)
+                    }
+                    Err(_) => {
+                        worker.shutdown().await;
+                        return Err(PersistError::WorkerLost);
+                    }
+                }
+            } else {
+                Some(ToolAvailability::unavailable("policy_invalid"))
+            }
+        } else {
+            None
+        };
+        let mut runtime = Runtime::with_tools(
             snapshot,
             configuration,
             config.runtime.clone(),
             config.tools.tool_set(),
             &mut env,
         );
+        runtime.require_tool_policy = require_tool_policy;
         let (tool_send, tool_receive) = mpsc::unbounded_channel();
         let tool_worker = match ToolWorker::start(config.tools.clone(), tool_send) {
             Ok(worker) => worker,
@@ -235,24 +361,25 @@ impl SessionHandle {
             commands,
             events: events.downgrade(),
             max_artifact_bytes: config.max_artifact_bytes,
+            availability,
         };
-        tokio::spawn(
-            Driver::new(
-                root,
-                session,
-                worker,
-                runtime,
-                config,
-                env,
-                provider,
-                options,
-                events,
-                receive,
-                tool_worker,
-                tool_receive,
-            )
-            .run(),
+        let mut driver = Driver::new(
+            root,
+            session,
+            worker,
+            runtime,
+            config,
+            env,
+            provider,
+            options,
+            events,
+            receive,
+            tool_worker,
+            tool_receive,
         );
+        driver.host_protected = protected;
+        driver.require_tool_policy = require_tool_policy;
+        tokio::spawn(driver.run());
         Ok(handle)
     }
 
@@ -483,6 +610,10 @@ struct Driver<E> {
     hint_load: Option<Pin<Box<dyn Future<Output = Job> + Send>>>,
     hint_ready: Option<Job>,
     deferred_tool: Option<(Job, PendingJob)>,
+    host_protected: Option<Vec<WorkspacePath>>,
+    require_tool_policy: bool,
+    #[cfg(test)]
+    offered: Vec<Vec<String>>,
 }
 
 impl<E: Env + Send + 'static> Driver<E> {
@@ -532,6 +663,10 @@ impl<E: Env + Send + 'static> Driver<E> {
             hint_load: None,
             hint_ready: None,
             deferred_tool: None,
+            host_protected: None,
+            require_tool_policy: false,
+            #[cfg(test)]
+            offered: Vec::new(),
         }
     }
 
@@ -652,6 +787,29 @@ impl<E: Env + Send + 'static> Driver<E> {
     fn step(&mut self, input: Input) {
         #[allow(unused_mut)]
         let mut effects = self.runtime.step(input, &mut self.env);
+        // Check immediately after an applied configuration, before dispatching
+        // any of its effects (especially Execute following a remembered grant).
+        if self.host_is_stale() && self.runtime.phase() != Phase::Faulted {
+            // These events already updated the core's client view. Publish
+            // them in sequence, but suppress every side effect before faulting.
+            effects = effects
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    Effect::Emit(_) => Some(effect),
+                    Effect::Reply { request, .. } => Some(Effect::Reply {
+                        request,
+                        result: Err(Rejection::Faulted),
+                    }),
+                    _ => None,
+                })
+                .collect();
+            effects.extend(self.runtime.step(
+                Input::DriverInvariant {
+                    code: "tool_host_stale",
+                },
+                &mut self.env,
+            ));
+        }
         #[cfg(test)]
         if let Some(at) = effects.iter().position(|effect| {
             matches!(
@@ -723,8 +881,12 @@ impl<E: Env + Send + 'static> Driver<E> {
                     inference,
                     input,
                     response_id,
+                    tools: _definitions,
                     ..
                 } => {
+                    #[cfg(test)]
+                    self.offered
+                        .push(_definitions.into_iter().map(|d| d.name).collect());
                     let cancel = CancellationToken::new();
                     let request = ModelRequest { response_id, input };
                     let control = OperationControl {
@@ -907,6 +1069,14 @@ impl<E: Env + Send + 'static> Driver<E> {
         }
     }
 
+    fn host_is_stale(&self) -> bool {
+        self.host_protected.as_ref().is_some_and(|protected| {
+            self.runtime
+                .policy()
+                .is_ok_and(|policy| policy.protected_paths() != protected)
+        })
+    }
+
     fn dispatch_hints(&mut self) {
         if self.tool_pending.is_some() {
             return;
@@ -1057,6 +1227,7 @@ impl<E: Env + Send + 'static> Driver<E> {
             self.config.tools.tool_set(),
             &mut self.env,
         );
+        self.runtime.require_tool_policy = self.require_tool_policy;
         self.step(Input::PublishView);
         self.step(Input::Start);
         Ok(self.runtime.view())
@@ -1151,6 +1322,16 @@ impl<E: Env + Send + 'static> Driver<E> {
             Message::Shutdown(reply) => {
                 self.shutdown.push(reply);
                 self.closing = true;
+            }
+            #[cfg(test)]
+            Message::InstallConfiguration(configuration, reply) => {
+                self.runtime.install_configuration_for_test(configuration);
+                self.step(Input::PublishView);
+                let _ = reply.send(());
+            }
+            #[cfg(test)]
+            Message::Offered(reply) => {
+                let _ = reply.send(self.offered.clone());
             }
             #[cfg(test)]
             Message::Inject(input, reply) => {

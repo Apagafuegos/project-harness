@@ -11,6 +11,8 @@ if [ "${HARNESS_ALLOW_NO_SANDBOX:-}" = 1 ]; then
     echo "SKIPPED: shell security suite"
 else
     cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+    cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
+    cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
 fi
 cargo build --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
