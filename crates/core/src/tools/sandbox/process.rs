@@ -247,7 +247,12 @@ fn acquire_init(info: &Channel) -> io::Result<Option<OwnedFd>> {
                 Ok(metadata) if Some(metadata.ino()) == facts["pid-namespace"].as_u64() => {
                     Ok(Some(fd))
                 }
-                Ok(_) => Err(io::Error::other("namespace init pid identity mismatch")),
+                Ok(metadata) => Err(io::Error::other(format!(
+                    "namespace init identity mismatch: child-pid={}, reported pid-namespace={:?}, observed pid-namespace={}",
+                    raw.as_raw_nonzero(),
+                    facts["pid-namespace"].as_u64(),
+                    metadata.ino()
+                ))),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(e),
             }
@@ -273,20 +278,28 @@ pub(super) fn run(
     let mut stopped_at = None;
     let mut term_sent = false;
     let mut init_seen = false;
-    let mut infrastructure = false;
+    let mut infrastructure: Option<String> = None;
     loop {
-        if info.drain().is_err() || status.drain().is_err() || supervisor.poll().is_err() {
-            infrastructure = true;
+        for (stage, result) in [
+            ("info-fd", info.drain()),
+            ("json-status-fd", status.drain()),
+            ("waitpid", supervisor.poll()),
+        ] {
+            if let Err(error) = result {
+                infrastructure.get_or_insert_with(|| format!("{stage}: {error}"));
+            }
         }
         if !init_seen && info.info().is_some() {
             init_seen = true;
             match acquire_init(&info) {
                 Ok(fd) => supervisor.init = fd,
-                Err(_) => infrastructure = true,
+                Err(error) => {
+                    infrastructure.get_or_insert_with(|| format!("acquire_init: {error}"));
+                }
             }
         }
         if stop.is_none() {
-            stop = if infrastructure || capture.io_error.load(Ordering::Acquire) {
+            stop = if infrastructure.is_some() || capture.io_error.load(Ordering::Acquire) {
                 Some((
                     ToolStatus::InfrastructureFailure,
                     ResultCode::SandboxUnavailable,
@@ -335,7 +348,9 @@ pub(super) fn run(
                 init_seen = true;
                 match acquire_init(&info) {
                     Ok(fd) => supervisor.init = fd,
-                    Err(_) => infrastructure = true,
+                    Err(error) => {
+                        infrastructure.get_or_insert_with(|| format!("acquire_init: {error}"));
+                    }
                 }
             }
             if supervisor.init_gone() {
@@ -352,7 +367,7 @@ pub(super) fn run(
     }
     let (bytes, artifacts, overflow, io_error) = capture.finish();
     let exit_code = status.exit_code();
-    let (outcome_status, code, detail) = if infrastructure
+    let (outcome_status, code, detail) = if infrastructure.is_some()
         || io_error
         || !init_seen
         || (exit_code.is_none() && stop.is_none())
@@ -360,7 +375,16 @@ pub(super) fn run(
         (
             ToolStatus::InfrastructureFailure,
             Some(ResultCode::SandboxUnavailable),
-            "sandbox_unavailable: setup or supervision failed".to_owned(),
+            format!(
+                "sandbox_unavailable: {}",
+                infrastructure.as_deref().unwrap_or(if io_error {
+                    "capture reader failed"
+                } else if !init_seen {
+                    "info-fd: namespace init was not reported"
+                } else {
+                    "json-status-fd: command exit status was not reported (setup/exec failure)"
+                })
+            ),
         )
     } else if spec.absent.iter().any(
         |path| !matches!(fs::symlink_metadata(path), Err(e) if e.kind() == io::ErrorKind::NotFound),

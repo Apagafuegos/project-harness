@@ -164,9 +164,18 @@ impl Sandbox {
         let spec = args::probe_spec(&sandbox.config, scratch.path())?;
         let outcome = process::run(&sandbox, spec, &CancelToken::new(), Instant::now());
         if outcome.status != ToolStatus::Succeeded {
-            return Err(SandboxUnavailable::one(
-                "configured sandbox setup or supervision probe failed",
-            ));
+            let detail: String = outcome
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            return Err(SandboxUnavailable::one(format!(
+                "configured sandbox probe failed: status={:?}, code={:?}: {detail}",
+                outcome.status, outcome.code
+            )));
         }
         Ok(sandbox)
     }
