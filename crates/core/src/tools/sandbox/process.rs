@@ -146,9 +146,10 @@ fn check_descriptors() -> io::Result<()> {
             .find_map(|line| line.strip_prefix("flags:\t"))
             .and_then(|s| u32::from_str_radix(s.trim(), 8).ok());
         if flags.is_none_or(|flags| flags & 0o2000000 == 0) {
-            return Err(io::Error::other(
-                "inherited harness descriptor lacks close-on-exec",
-            ));
+            let target = fs::read_link(format!("/proc/self/fd/{fd}"));
+            return Err(io::Error::other(format!(
+                "descriptor audit: inherited harness descriptor lacks close-on-exec: fd={fd}, flags={flags:?}, target={target:?}"
+            )));
         }
     }
     Ok(())
