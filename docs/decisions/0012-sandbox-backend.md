@@ -205,6 +205,18 @@ exercise actual file edits, remembered grants, shell output/capture digests,
 A protected path with a symlink ancestor triggers the real file opener failure.
 An isolated inheritable-fd child proves shell refusal during assembly.
 
+**Known in-process lock/spawn gap:** a sandbox/probe spawn briefly inherits
+other threads' journal lock descriptors between fork and exec, despite those
+descriptors being close-on-exec. If another thread releases and immediately
+reopens such a journal during that window, the open can report `session_locked`
+until the child execs. This is a transient refusal, not permission to bypass the
+lock or silently retry an uncertain effect. Step 7b does not change the lock or
+spawn implementation. Probe regressions run in the separate S02/CLI integration
+binaries; core unit tests use a disabled shell so subprocesses cannot interfere
+with unrelated immediate-release/reopen assertions. Failed file startup with a
+failed probe is retained in the CLI tools-report tests; failed file startup
+with a working probe and broken-bwrap refusal remain in `tests/tool_host.rs`.
+
 A SIGKILL test re-executes the test binary and kills the host only after the
 shell appends a counter line following its durable intent. No Rust destructor
 runs; Bubblewrap's `--die-with-parent` tears down the namespace. Reopen records

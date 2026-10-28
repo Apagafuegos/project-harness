@@ -1,6 +1,5 @@
 //! Driver-only seams prove stale protection faults and actual StartInference offers.
 use super::*;
-use crate::tools::SandboxConfig;
 use serde_json::json;
 
 fn policy(paths: &[&str], revision: &str) -> Vec<u8> {
@@ -51,10 +50,10 @@ impl Real {
         let host = ToolHostConfig {
             workspace_root: workspace.clone(),
             data_root: root.path().into(),
-            sandbox: Some(SandboxConfig {
-                bwrap: "/missing/bwrap".into(),
-                ..SandboxConfig::default()
-            }),
+            // Never spawn from the core unit-test process: another test may
+            // be releasing/reopening a journal whose lock a fork inherits.
+            // Probe failures are covered by tool_host and doctor integration.
+            sandbox: None,
         };
         let handle = SessionHandle::create_with_tools(
             root.clone(),

@@ -3,7 +3,7 @@ use crate::{
     session::{ArtifactRef, Digest, ResultCode},
     tools::{Registry, ToolSet},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 fn policy(paths: &[&str]) -> PolicySnapshot {
     let bytes = serde_json::to_vec(
@@ -142,26 +142,6 @@ fn configured_protection_follows_renamed_object_not_just_spelling() {
         .plan(&operation, &call, host.workspace.as_ref(), &p)
         .unwrap_err();
     assert_eq!(refusal.code, ResultCode::ProtectedPath);
-}
-#[test]
-fn failed_file_layer_has_planning_reason_and_probe_failure() {
-    let temp = tempfile::tempdir().unwrap();
-    let mut config = config(temp.path());
-    std::fs::create_dir(&config.workspace_root).unwrap();
-    std::os::unix::fs::symlink(".", config.workspace_root.join("alias")).unwrap();
-    config.sandbox = Some(SandboxConfig {
-        bwrap: "/missing/bwrap".into(),
-        ..SandboxConfig::default()
-    });
-    let (host, report) = ToolHost::assemble(&config, &policy(&["alias/secret"]));
-    assert!(host.executors.is_empty());
-    let value = serde_json::to_value(report).unwrap();
-    let reasons = value["shell"]["reasons"].as_array().unwrap();
-    assert!(reasons.contains(&Value::from("planning_view_unavailable")));
-    assert!(
-        reasons.len() >= 3,
-        "file and sandbox probe errors both retained: {value}"
-    );
 }
 #[test]
 fn relative_config_paths_fail_closed() {

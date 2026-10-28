@@ -210,6 +210,42 @@ fn workspace_report_with_broken_bwrap_keeps_file_tools() {
     assert!(!data.exists(), "doctor must not create storage");
 }
 
+/// Probe subprocesses stay in integration binaries, not alongside core's
+/// journal-lock/reopen unit tests. A failed file layer must still probe bwrap.
+#[test]
+fn workspace_report_retains_file_and_probe_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let alias = temp.path().join("workspace-alias");
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    let data = temp.path().join("state");
+    let fake = temp.path().join("bwrap");
+    fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = doctor(&[
+        "--workspace",
+        alias.to_str().unwrap(),
+        "--data-root",
+        data.to_str().unwrap(),
+        "--bwrap",
+        fake.to_str().unwrap(),
+    ]);
+    assert_eq!(report["tools"]["file_tools"]["status"], "unavailable");
+    assert_eq!(report["tools"]["shell"]["status"], "unavailable");
+    let file_reasons = report["tools"]["file_tools"]["reasons"].as_array().unwrap();
+    let shell_reasons = report["tools"]["shell"]["reasons"].as_array().unwrap();
+    assert!(!file_reasons.is_empty());
+    assert!(shell_reasons.contains(&Value::from("planning_view_unavailable")));
+    assert!(shell_reasons.contains(&Value::from("bwrap_version_unrecognized")));
+    assert!(
+        file_reasons
+            .iter()
+            .all(|reason| shell_reasons.contains(reason))
+    );
+    assert!(!data.exists());
+}
+
 #[test]
 fn workspace_report_refuses_unprotected_data_root() {
     let temp = tempfile::tempdir().unwrap();
