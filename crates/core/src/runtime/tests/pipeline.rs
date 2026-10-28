@@ -543,12 +543,9 @@ fn r01_crashes_in_every_new_phase_never_replay_and_revoke_approvals() {
                 d.restart();
                 d.settle();
                 let uncertain = d.runtime.snapshot().unresolved_invocations().len();
-                let expected = match gate {
-                    4 => usize::from(fate == Crash::Durable),
-                    5 => 1,
-                    6 => usize::from(fate != Crash::Durable),
-                    _ => 0,
-                };
+                // Every durable read intent closes under D9, regardless of
+                // whether dispatch or its result acknowledgement was reached.
+                let expected = 0;
                 assert_eq!(uncertain, expected, "uncertainty at gate {gate}, {fate:?}");
                 d.acknowledge_all();
                 assert_eq!(

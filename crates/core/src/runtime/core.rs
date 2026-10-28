@@ -59,6 +59,7 @@ pub struct Runtime {
     view: ClientView,
     out: Vec<Effect>,
     next_token: u64,
+    hint_token: Option<HintToken>,
     next_inference: u64,
     next_timer: u64,
     in_flight: Option<InFlight>,
@@ -248,6 +249,7 @@ impl Runtime {
         };
         Self {
             config,
+            hint_token: None,
             configuration,
             policy,
             tools,
@@ -387,6 +389,27 @@ impl Runtime {
             Input::TimerFired { timer } => self.timer(timer, env),
             Input::Planned { token, result } => self.planned(token, result, env),
             Input::ToolFinished { token, outcome } => self.tool_finished(token, outcome, env),
+            Input::Hints { token, hints } => {
+                if self.mode == Mode::AwaitingResolution && self.hint_token == Some(token) {
+                    self.hint_token = None;
+                    let hints = hints
+                        .into_iter()
+                        .filter(|(id, _)| {
+                            self.snapshot()
+                                .unresolved_invocations()
+                                .iter()
+                                .any(|v| v.intent.invocation_id == *id)
+                                && self
+                                    .view
+                                    .view()
+                                    .awaiting
+                                    .iter()
+                                    .any(|v| v.invocation_id == *id)
+                        })
+                        .collect();
+                    self.emit(EventKind::RecoveryHints { hints });
+                }
+            }
         }
         std::mem::take(&mut self.out)
     }
@@ -746,8 +769,8 @@ impl Runtime {
     /// Plan the next recovery step from the published snapshot, if nothing is
     /// in flight. Each step is an ordinary commit that storage validates;
     /// nothing is run, retried or invented. An interrupted turn with nothing
-    /// uncertain is closed without asking. An intent without a result is
-    /// recorded as uncertain, and only the user can resolve it.
+    /// uncertain is closed without asking. D9 closes a read-only intent as
+    /// not completed; every other intent requires explicit user resolution.
     fn recover(&mut self, env: &mut dyn Env) {
         if !matches!(self.mode, Mode::Recovering | Mode::AwaitingResolution)
             || self.in_flight.is_some()
@@ -767,7 +790,7 @@ impl Runtime {
         let active = snapshot.active_turn().cloned();
         let unrecorded: Vec<_> = unresolved
             .iter()
-            .filter(|v| !v.uncertainty_recorded)
+            .filter(|v| !v.uncertainty_recorded && !restart_read(v))
             .collect();
         if !unrecorded.is_empty() {
             let mut events: Vec<_> = unrecorded
@@ -783,6 +806,63 @@ impl Runtime {
             let finished = active.filter(|_| finishable).map(|turn| interrupted(&turn));
             events.extend(finished.clone().map(JournalEvent::TurnFinished));
             return self.persist_recovery(audit(&snapshot, events), finished, Vec::new(), env);
+        }
+        if let Some(read) = unresolved.iter().find(|v| restart_read(v)) {
+            // D30: storage permits only one unresolved intent, always the next
+            // call. All following calls are known not started.
+            if pending.first() != Some(&read.intent.call) {
+                return self.fault(FaultCause::Internal("uncertain_call_out_of_order"));
+            }
+            let turn = &read.intent.turn_id;
+            // Entries are validated before events. Enter Recovering in its
+            // own durable commit before using the D9 storage exception.
+            if snapshot.state() != RuntimeState::Recovering {
+                return self.persist_recovery(
+                    audit(
+                        &snapshot,
+                        vec![transition(turn, snapshot.state(), RuntimeState::Recovering)],
+                    ),
+                    None,
+                    Vec::new(),
+                    env,
+                );
+            }
+            let payloads = pending
+                .iter()
+                .map(|call| {
+                    let (mut turn_id, mut payload) = runtime_result(
+                        turn,
+                        call,
+                        ToolStatus::Cancelled,
+                        ResultCode::ProcessRestart,
+                        RESTART_NOT_STARTED,
+                    );
+                    if *call == read.intent.call {
+                        turn_id = Some(turn.clone());
+                        if let EntryPayload::ToolResult(result) = &mut payload {
+                            result.result.invocation_id = Some(read.intent.invocation_id.clone());
+                            result.result.content = vec![ContentBlock::Text {
+                                text: "process_restart: the read did not complete before restart"
+                                    .into(),
+                            }];
+                        }
+                    }
+                    (turn_id, payload)
+                })
+                .collect();
+            let entries = chain(&snapshot, payloads, env);
+            let finished = active.as_ref().map(interrupted);
+            let events = finished
+                .clone()
+                .map(JournalEvent::TurnFinished)
+                .into_iter()
+                .collect();
+            return self.persist_recovery(
+                advancing(&snapshot, entries, events),
+                finished,
+                pending,
+                env,
+            );
         }
         if let Some(turn) = active {
             if !pending.first().is_some_and(uncertain) {
@@ -839,12 +919,52 @@ impl Runtime {
         }
         let invocations: Vec<_> = unresolved
             .iter()
-            .map(|v| uncertain_invocation(&snapshot, v))
+            .filter(|v| !restart_read(v))
+            .map(|v| {
+                let mut invocation = uncertain_invocation(&snapshot, v);
+                invocation.hint = self
+                    .view
+                    .view()
+                    .awaiting
+                    .iter()
+                    .find(|old| old.invocation_id == invocation.invocation_id)
+                    .and_then(|old| old.hint.clone());
+                invocation
+            })
             .collect();
         self.mode = Mode::AwaitingResolution;
         self.sync_phase();
         if self.view.view().awaiting != invocations {
-            self.emit(EventKind::ResolutionRequired { invocations });
+            self.emit(EventKind::ResolutionRequired {
+                invocations: invocations.clone(),
+            });
+            let inspections: Vec<_> = invocations
+                .iter()
+                .filter(|v| matches!(v.tool.as_str(), "write" | "edit"))
+                .filter_map(|v| {
+                    let intent = &unresolved
+                        .iter()
+                        .find(|u| u.intent.invocation_id == v.invocation_id)?
+                        .intent;
+                    snapshot.events().find_map(|(_, _, event)| match event {
+                        JournalEvent::AuthorizationDecided(d)
+                            if d.decision_id == intent.decision_id =>
+                        {
+                            Some((v.invocation_id.clone(), d.plan.clone()))
+                        }
+                        _ => None,
+                    })
+                })
+                .collect();
+            if !inspections.is_empty() {
+                self.next_token += 1;
+                let token = HintToken(self.next_token);
+                self.hint_token = Some(token);
+                self.out.push(Effect::InspectUncertain {
+                    token,
+                    invocations: inspections,
+                });
+            }
         }
     }
 
@@ -974,6 +1094,8 @@ impl Runtime {
         let finished = closes.then(|| interrupted(&turn));
         events.extend(finished.clone().map(JournalEvent::TurnFinished));
         let recovered = finished.as_ref().map(|f| (f.turn_id.clone(), rest));
+        // Advice is no longer relevant once the user's resolution is accepted.
+        self.hint_token = None;
         self.persist(
             advancing(&snapshot, entries, events),
             InFlight {
@@ -2032,6 +2154,15 @@ fn runtime_result(
 }
 
 /// How a client sees an unresolved invocation.
+fn restart_read(invocation: &UnresolvedInvocation) -> bool {
+    !invocation.uncertainty_recorded
+        && invocation
+            .intent
+            .effects
+            .as_ref()
+            .is_some_and(|effects| effects.as_slice() == [crate::session::EffectClass::Read])
+}
+
 fn uncertain_invocation(
     snapshot: &SessionSnapshot,
     unresolved: &UnresolvedInvocation,
@@ -2060,6 +2191,7 @@ fn uncertain_invocation(
         tool,
         plan_digest: intent.plan_digest.clone(),
         intent_at: unresolved.at.clone(),
+        hint: None,
     }
 }
 

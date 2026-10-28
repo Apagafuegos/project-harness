@@ -11,6 +11,7 @@ use crate::session::{
 };
 
 pub use crate::model::{ProviderEvent, ProviderOutcome};
+pub use crate::tools::RecoveryHint;
 
 use super::view::Phase;
 use crate::session::{ApprovalId, Decision, ResultCode};
@@ -42,6 +43,8 @@ local_id!(
     PlanToken,
     /// Identifies an execution effect; stale replies are ignored.
     ExecutionToken,
+    /// Identifies an advisory inspection; stale replies are ignored.
+    HintToken,
 );
 
 /// UUIDv7 identity of one runtime incarnation, never journaled.
@@ -177,6 +180,13 @@ pub enum Input {
         /// The executor's observation, not a promise of rollback.
         outcome: ExecutionOutcome,
     },
+    /// Advisory inspection completed; never persisted.
+    Hints {
+        /// Fresh inspection identity.
+        token: HintToken,
+        /// Current-file evidence, not execution outcomes.
+        hints: Vec<(InvocationId, RecoveryHint)>,
+    },
     /// One event of a provider stream.
     Provider {
         /// The stream it belongs to.
@@ -274,6 +284,8 @@ pub struct UncertainInvocation {
     pub plan_digest: Digest,
     /// Record time of the execution intent.
     pub intent_at: Timestamp,
+    /// Ephemeral current-file evidence, never a journal fact.
+    pub hint: Option<RecoveryHint>,
 }
 
 /// Why a commit was not persisted.
@@ -401,6 +413,13 @@ impl PersistError {
 /// Side effects the driver performs. The core does nothing else.
 #[derive(Clone, Debug)]
 pub enum Effect {
+    /// Inspect authorized plan artifacts without delaying recovery commits.
+    InspectUncertain {
+        /// Fresh advisory job identity.
+        token: HintToken,
+        /// Invocation and authorized plan artifact.
+        invocations: Vec<(InvocationId, ArtifactRef)>,
+    },
     /// Verify media before building the opening commit.
     VerifyArtifacts {
         /// Token echoed by `ArtifactsVerified` (or `PersistFailed`).
@@ -696,6 +715,11 @@ pub enum EventKind {
         answered: Vec<CallRef>,
         /// Why, such as `process_restart`.
         code: String,
+    },
+    /// Advisory evidence, never persisted; resolved invocations are ignored.
+    RecoveryHints {
+        /// Current-file evidence keyed by invocation.
+        hints: Vec<(InvocationId, RecoveryHint)>,
     },
     /// Invocations whose outcome is unknown wait for `ResolveUncertain`. The
     /// list replaces the view's; it is the whole set still waiting.

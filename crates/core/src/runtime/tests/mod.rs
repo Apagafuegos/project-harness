@@ -6,6 +6,7 @@ mod random;
 mod recovery;
 mod scenarios;
 mod tool_gates;
+mod tool_recovery;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -282,6 +283,7 @@ impl Driver {
 
     fn observe(&mut self, effect: &Effect) {
         match effect {
+            Effect::InspectUncertain { .. } => {}
             Effect::VerifyArtifacts { token, refs } => {
                 assert!(self.pending.is_none() && self.verification.is_none());
                 self.verification = Some((*token, refs.clone()));

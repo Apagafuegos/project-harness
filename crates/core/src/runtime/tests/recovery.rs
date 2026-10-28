@@ -161,7 +161,8 @@ pub(super) fn authorize(
             plan_digest: plan.sha256,
             backend: ExecutionBackend::TrustedFs,
             timeout_ms: 1_000,
-            effects: EffectSet::new([EffectClass::Read]),
+            // These legacy recovery scenarios exercise uncertain side effects.
+            effects: EffectSet::new([EffectClass::FilesystemMutation]),
         }));
         events.push(state(
             &turn,
@@ -290,6 +291,23 @@ fn fixture_prefix(records: usize) -> Driver {
         },
     );
     Driver::open_existing(temp, root, session, config)
+}
+
+#[test]
+fn v1_intent_without_effects_never_qualifies_for_d9() {
+    scenario_from(fixture, |d| {
+        d.settle();
+        assert!(
+            d.runtime.snapshot().unresolved_invocations()[0]
+                .intent
+                .effects
+                .is_none()
+        );
+        assert_eq!(d.runtime.phase(), Phase::AwaitingResolution);
+        assert_eq!(d.runtime.view().awaiting.len(), 1);
+        resolve(d, UserResolution::AcknowledgedUnknown);
+        assert!(idle(d));
+    });
 }
 
 /// The version of every record in the driver's journal, in order.

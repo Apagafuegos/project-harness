@@ -153,6 +153,15 @@ impl ClientView {
                     view.awaiting.clear();
                 }
             }
+            EventKind::RecoveryHints { hints } => {
+                for (id, hint) in hints {
+                    if let Some(invocation) =
+                        view.awaiting.iter_mut().find(|v| v.invocation_id == *id)
+                    {
+                        invocation.hint = Some(hint.clone());
+                    }
+                }
+            }
             EventKind::ResolutionRequired { invocations } => {
                 view.awaiting = invocations.clone();
             }

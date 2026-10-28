@@ -16,6 +16,11 @@ type AppendResult = Result<(CommitAck, SessionSnapshot), PersistError>;
 type Opened = Result<(SessionSnapshot, SessionConfiguration), PersistError>;
 
 enum Request {
+    ReadArtifact {
+        reference: ArtifactRef,
+        max_bytes: usize,
+        reply: oneshot::Sender<Result<Vec<u8>, PersistError>>,
+    },
     Append {
         commit: Box<Commit>,
         command: Option<(CommandId, serde_json::Value)>,
@@ -52,6 +57,22 @@ pub(super) enum Opening {
 pub(super) struct WorkerSender(mpsc::Sender<Request>);
 
 impl WorkerSender {
+    pub(super) async fn read_artifact(
+        &self,
+        reference: ArtifactRef,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, PersistError> {
+        let (reply, receive) = oneshot::channel();
+        self.0
+            .send(Request::ReadArtifact {
+                reference,
+                max_bytes,
+                reply,
+            })
+            .await
+            .map_err(|_| PersistError::WorkerLost)?;
+        receive.await.unwrap_or(Err(PersistError::WorkerLost))
+    }
     pub(super) async fn append(
         &self,
         commit: Commit,
@@ -255,6 +276,16 @@ fn run(
             panic!("injected storage worker panic");
         }
         match request {
+            Request::ReadArtifact {
+                reference,
+                max_bytes,
+                reply,
+            } => {
+                let _ = reply.send(
+                    root.read_artifact(&reference, max_bytes)
+                        .map_err(|e| PersistError::from_store(&e)),
+                );
+            }
             Request::Append {
                 mut commit,
                 command,

@@ -900,17 +900,33 @@ For a dispatched call, the required order is:
    `tool_result` referencing the proposal and invocation.
 5. Only then may a subsequent inference consume that result.
 
-If an intent is durable but no result is durable, the outcome is uncertain even
-when the process may never have spawned. On restart, revoke pending approvals,
-mark unfinished turns interrupted, append `execution_uncertain` for unresolved
-intents, and enter `Recovering`. There is no automatic replay, including reads.
-Workspace side effects do not belong only to one conversational branch, so
-choosing a different head MUST NOT bypass unresolved execution recovery.
+If an intent is durable but no result is durable, its outcome is generally
+uncertain even when the process may never have spawned. On restart, revoke
+pending approvals, enter `Recovering`, and mark unfinished turns interrupted.
+There is no automatic replay, including reads. Workspace side effects do not
+belong only to one conversational branch, so choosing a different head MUST
+NOT bypass unresolved execution recovery.
 
-The preceding recovery behavior is the current implementation. Settled M3 D9
-will, in step 6, automatically close unresolved intents whose effects are
-exactly `{read}` with `cancelled`/`process_restart`, without replaying them.
-Missing v1 effects never qualify. Step 3 changes no recovery behavior.
+**D9 (implemented in M3 step 6):** an unresolved intent with effects exactly
+`Some({read})` and no existing `execution_uncertain` closes automatically with
+`cancelled`/`process_restart`, runtime provenance and its invocation ID. This
+claims only that the read did not complete, not that an execution was observed.
+No `execution_uncertain` or `recovery_resolved` is appended for it. Missing v1
+effects never qualify; an already uncertain read still needs the user. Every
+other unresolved intent receives `execution_uncertain` and waits for resolution.
+Storage permits at most one unresolved intent (D30); later calls are not started
+and receive runtime cancelled results without invocation IDs, after any required
+user resolution. Entries precede events, so D9 first commits Recovering, then
+its result and the remaining not-started results with the interrupted finish.
+
+For uncertain `write` and `edit`, the driver loads the authorized plan artifact
+through storage and computes advisory current-file evidence on the executor
+thread. The nonpersisted event/view carries `matches_post_image`,
+`matches_pre_image`, `changed_since`, `missing` or `unavailable`. Edit post-image
+evidence requires a unique overlapping-aware reverse replacement whose digest
+matches the pre-image. Hints never resolve an invocation, block resolution or
+enter the journal/model projection; `bash` gets no hint. See
+[ADR 0013](../decisions/0013-tool-recovery.md).
 
 Resolution is explicit and auditable: `ObservedResult` supplies a user-observed
 outcome, or `AcknowledgeUnknown { note }` records an uncertain result the user

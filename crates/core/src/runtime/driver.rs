@@ -480,6 +480,9 @@ struct Driver<E> {
     tool_receive: mpsc::UnboundedReceiver<Answer>,
     tool_pending: Option<PendingJob>,
     tool_closed: bool,
+    hint_load: Option<Pin<Box<dyn Future<Output = Job> + Send>>>,
+    hint_ready: Option<Job>,
+    deferred_tool: Option<(Job, PendingJob)>,
 }
 
 impl<E: Env + Send + 'static> Driver<E> {
@@ -526,6 +529,9 @@ impl<E: Env + Send + 'static> Driver<E> {
             tool_receive,
             tool_pending: None,
             tool_closed: false,
+            hint_load: None,
+            hint_ready: None,
+            deferred_tool: None,
         }
     }
 
@@ -547,6 +553,7 @@ impl<E: Env + Send + 'static> Driver<E> {
                 }
                 if self.storage.is_none()
                     && self.tool_pending.is_none()
+                    && self.deferred_tool.is_none()
                     && (self.runtime.view().active_turn.is_none()
                         || matches!(
                             self.runtime.phase(),
@@ -556,6 +563,7 @@ impl<E: Env + Send + 'static> Driver<E> {
                     break;
                 }
             }
+            self.dispatch_hints();
             tokio::select! {
                 biased;
                 input = async { self.storage.as_mut().expect("guarded").await }, if self.storage.is_some() => {
@@ -568,6 +576,10 @@ impl<E: Env + Send + 'static> Driver<E> {
                 }
                 answer = self.tool_receive.recv(), if self.tool_worker.is_some() && !self.tool_closed => {
                     self.tool_answer(answer);
+                }
+                job = async { self.hint_load.as_mut().expect("guarded").await }, if self.hint_load.is_some() => {
+                    self.hint_load = None;
+                    self.hint_ready = Some(job);
                 }
                 Some((epoch, timer)) = self.timer_receive.recv() => {
                     // A fire from a replaced runtime could alias a new `TimerId`.
@@ -614,6 +626,8 @@ impl<E: Env + Send + 'static> Driver<E> {
             }
         }
         self.inference = None;
+        self.hint_load = None;
+        self.hint_ready = None;
         for (_, timer) in std::mem::take(&mut self.timers) {
             timer.abort();
         }
@@ -754,6 +768,29 @@ impl<E: Env + Send + 'static> Driver<E> {
                         task.abort();
                     }
                 }
+                Effect::InspectUncertain { token, invocations } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let sender = self.worker.as_ref().map(|w| w.sender.clone());
+                    let limit = self.config.max_artifact_bytes;
+                    self.hint_load = Some(Box::pin(async move {
+                        let mut plans = Vec::new();
+                        for (id, reference) in invocations {
+                            let bytes = match &sender {
+                                Some(sender) => sender
+                                    .read_artifact(reference, limit)
+                                    .await
+                                    .map_err(|_| "artifact_unavailable".to_owned()),
+                                None => Err("artifact_unavailable".into()),
+                            };
+                            plans.push((id, bytes));
+                        }
+                        Job::Hints {
+                            epoch,
+                            token,
+                            plans,
+                        }
+                    }));
+                }
                 Effect::PlanCall {
                     token,
                     call,
@@ -762,7 +799,11 @@ impl<E: Env + Send + 'static> Driver<E> {
                 } => {
                     let epoch = self.runtime.epoch().clone();
                     let policy = self.runtime.policy().ok().cloned();
-                    if self.tool_pending.is_some() {
+                    if self
+                        .tool_pending
+                        .as_ref()
+                        .is_some_and(|p| !matches!(p.token, JobToken::Hints(_)))
+                    {
                         executor_error = Some("executor_overlap");
                     } else if let Some(policy) = policy {
                         let pending = PendingJob {
@@ -793,7 +834,11 @@ impl<E: Env + Send + 'static> Driver<E> {
                 Effect::Execute { token, operation } => {
                     let epoch = self.runtime.epoch().clone();
                     let cancel = CancelToken::new();
-                    if self.tool_pending.is_some() {
+                    if self
+                        .tool_pending
+                        .as_ref()
+                        .is_some_and(|p| !matches!(p.token, JobToken::Hints(_)))
+                    {
                         executor_error = Some("executor_overlap");
                     } else {
                         let pending = PendingJob {
@@ -827,6 +872,12 @@ impl<E: Env + Send + 'static> Driver<E> {
                     {
                         cancel.cancel();
                     }
+                    if let Some((_, pending)) = &self.deferred_tool
+                        && pending.token == JobToken::Execute(token)
+                        && let Some(cancel) = &pending.cancel
+                    {
+                        cancel.cancel();
+                    }
                 }
                 Effect::Emit(event) => {
                     let _ = self.events.send(event);
@@ -850,10 +901,86 @@ impl<E: Env + Send + 'static> Driver<E> {
         // sender failed to close, before local inference IDs can be reused.
         if self.runtime.phase() == Phase::Faulted {
             self.inference = None;
+            self.deferred_tool = None;
+            self.hint_load = None;
+            self.hint_ready = None;
+        }
+    }
+
+    fn dispatch_hints(&mut self) {
+        if self.tool_pending.is_some() {
+            return;
+        }
+        if let Some((job, pending)) = self.deferred_tool.take() {
+            if self.send_tool(job, pending).is_err() {
+                self.step(Input::DriverInvariant {
+                    code: "executor_lost",
+                });
+            }
+            return;
+        }
+        let Some(Job::Hints {
+            epoch,
+            token,
+            plans,
+        }) = self.hint_ready.take()
+        else {
+            return;
+        };
+        if epoch != *self.runtime.epoch() {
+            return;
+        }
+        if self.tool_worker.is_none() || self.tool_closed {
+            let hints = plans
+                .into_iter()
+                .map(|(id, _)| (id, RecoveryHint::unavailable("tools_unavailable")))
+                .collect();
+            self.step(Input::Hints { token, hints });
+            return;
+        }
+        let fallback: Vec<_> = plans
+            .iter()
+            .map(|(id, _)| {
+                (
+                    id.clone(),
+                    RecoveryHint::unavailable("infrastructure_failure"),
+                )
+            })
+            .collect();
+        if self
+            .send_tool(
+                Job::Hints {
+                    epoch: epoch.clone(),
+                    token,
+                    plans,
+                },
+                PendingJob {
+                    epoch,
+                    token: JobToken::Hints(token),
+                    cancel: None,
+                },
+            )
+            .is_err()
+        {
+            self.step(Input::Hints {
+                token,
+                hints: fallback,
+            });
         }
     }
 
     fn send_tool(&mut self, job: Job, pending: PendingJob) -> Result<(), ()> {
+        if self
+            .tool_pending
+            .as_ref()
+            .is_some_and(|p| matches!(p.token, JobToken::Hints(_)))
+        {
+            if self.deferred_tool.is_some() {
+                return Err(());
+            }
+            self.deferred_tool = Some((job, pending));
+            return Ok(());
+        }
         let worker = self.tool_worker.as_ref().ok_or(())?;
         if self.tool_closed {
             return Err(());
@@ -893,6 +1020,9 @@ impl<E: Env + Send + 'static> Driver<E> {
     /// Stop the faulted runtime's worker and attach a new runtime over the
     /// journal `opening` yields, with a new epoch, then let it recover.
     async fn replace(&mut self, opening: Opening) -> Result<RuntimeView, PersistError> {
+        // Drop advisory worker senders before draining the storage worker.
+        self.hint_load = None;
+        self.hint_ready = None;
         // A fault may have requested cancellation without receiving cleanup.
         // Await the thread's answer before storage can label the intent uncertain.
         while self.tool_pending.is_some() {

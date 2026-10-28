@@ -86,6 +86,11 @@ fn unavailable() -> Refusal {
 }
 
 pub(super) enum Job {
+    Hints {
+        epoch: RuntimeEpoch,
+        token: HintToken,
+        plans: Vec<(crate::session::InvocationId, Result<Vec<u8>, String>)>,
+    },
     Plan {
         epoch: RuntimeEpoch,
         token: PlanToken,
@@ -105,6 +110,7 @@ pub(super) enum Job {
 pub(super) enum JobToken {
     Plan(PlanToken),
     Execute(ExecutionToken),
+    Hints(HintToken),
 }
 pub(super) struct Answer {
     pub epoch: RuntimeEpoch,
@@ -136,6 +142,39 @@ impl ToolWorker {
                 let registry = Registry::builtin();
                 while let Ok(job) = jobs.recv() {
                     let answer = match job {
+                        Job::Hints {
+                            epoch,
+                            token,
+                            plans,
+                        } => {
+                            let hints = plans
+                                .into_iter()
+                                .map(|(id, bytes)| {
+                                    let hint = match bytes {
+                                        Err(reason) => {
+                                            crate::tools::RecoveryHint::unavailable(reason)
+                                        }
+                                        Ok(bytes) => catch_unwind(AssertUnwindSafe(|| {
+                                            crate::tools::recovery_hint(
+                                                &bytes,
+                                                host.workspace.as_ref(),
+                                            )
+                                        }))
+                                        .unwrap_or_else(|_| {
+                                            crate::tools::RecoveryHint::unavailable(
+                                                "infrastructure_failure",
+                                            )
+                                        }),
+                                    };
+                                    (id, hint)
+                                })
+                                .collect();
+                            Answer {
+                                epoch,
+                                token: JobToken::Hints(token),
+                                input: Some(Input::Hints { token, hints }),
+                            }
+                        }
                         Job::Plan {
                             epoch,
                             token,

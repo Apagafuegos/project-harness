@@ -626,7 +626,9 @@ impl State {
                     result.metadata.provenance,
                     Provenance::UserObserved | Provenance::UserAcknowledgedUnknown
                 );
-                if !recovering {
+                let restart_read = result.invocation_id.is_some()
+                    && result.metadata.provenance == Provenance::Runtime;
+                if !recovering && !restart_read {
                     self.active(turn)?;
                 } else {
                     require(
@@ -650,7 +652,9 @@ impl State {
                         "invalid_invocation_result",
                     )?;
                     require(
-                        if recovering {
+                        if restart_read {
+                            true // The complete D9 exception is checked below.
+                        } else if recovering {
                             invocation.uncertain
                         } else {
                             !invocation.uncertain
@@ -667,6 +671,14 @@ impl State {
                     )?;
                     require(
                         recovering
+                            || (restart_read
+                                && !invocation.uncertain
+                                && invocation.intent.effects.as_ref().is_some_and(|effects| {
+                                    effects.as_slice() == [EffectClass::Read]
+                                })
+                                && result.status == ToolStatus::Cancelled
+                                && result.metadata.code.as_deref()
+                                    == Some(ResultCode::ProcessRestart.as_str()))
                             || (result.metadata.provenance == Provenance::Executor
                                 && matches!(
                                     result.status,

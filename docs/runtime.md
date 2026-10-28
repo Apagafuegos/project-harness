@@ -58,6 +58,7 @@ active turn, timers, and a requested cancel.
 | `TimerFired` | `TimerId` | Driver timer (inference or approval) |
 | `Planned` | `PlanToken`, `Result<Plan, Refusal>` | Driver workspace planning |
 | `ToolFinished` | `ExecutionToken`, `ExecutionOutcome` | Executor, after cleanup |
+| `Hints` | `HintToken`, invocation/hint pairs | Executor-thread advisory inspection |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
 `SelectHead { head }`, `SwitchModel { model }` and
@@ -84,6 +85,7 @@ fragments itself.
 | `PlanCall` | `PlanToken`, call, tool, validated operation | Plan against the trusted workspace and current policy |
 | `Execute` | `ExecutionToken`, `AuthorizedOperation` | Run after intent acknowledgement |
 | `CancelExecution` | `ExecutionToken` | Request cancellation; still await the executor answer |
+| `InspectUncertain` | `HintToken`, invocation/authorized-plan artifact pairs | Request nonblocking advisory evidence |
 | `CancelInference` | `InferenceId` | Cancel the stream's token; keep delivering it for a confirmation |
 | `ReleaseInference` | `InferenceId` | Stop listening and drop the stream; once per `StartInference` |
 | `SetTimer` / `CancelTimer` | `TimerId`, duration | Driver timer |
@@ -404,7 +406,19 @@ answered, code }`, where `answered` lists those calls, and the session is
 `Idle`. A partial response that was streaming at the crash was never
 persisted, so nothing is written for it.
 
-**An uncertain invocation**, an execution intent without a result, may or may
+**D9 read-only closure:** an unresolved intent with effects exactly `{read}`
+and no recorded `execution_uncertain` closes automatically. First commit the
+transition to Recovering (entries are validated before their own events), then
+commit its runtime result with invocation ID, status `cancelled` and code
+`process_restart`, along with results for later not-started calls and the
+interrupted finish. No uncertainty or resolution event is written; the read is
+never replayed. `effects: None` (v1) and already uncertain reads do not qualify.
+Storage permits only one unresolved intent (D30), so a read following an
+uncertain write is a not-started **call**, not another intent. It receives a
+runtime `cancelled/process_restart` result without invocation ID only after
+the user resolves the write. See [ADR 0013](decisions/0013-tool-recovery.md).
+
+**An uncertain invocation**, every other execution intent without a result, may or may
 not have run. `Start` commits `execution_uncertain` (reason
 `process_restart: …`) for each one not yet recorded; storage moves to
 `recovering`. If no not-started call follows on the branch, the same commit
@@ -413,7 +427,7 @@ turn stays open: storage answers calls in branch order, and the uncertain call
 is first. The core then enters `AwaitingResolution`. `RuntimeView::awaiting`
 and a `ResolutionRequired { invocations }` event list each one as an
 `UncertainInvocation { invocation_id, turn_id, call, tool, plan_digest,
-intent_at }`. Every command is rejected with `ResolutionRequired` except a
+intent_at, hint: Option<RecoveryHint> }`. Every command is rejected with `ResolutionRequired` except a
 `StartTurn` retry with a receipt and:
 
 `ResolveUncertain { invocation_id, resolution }`, where `resolution` is
@@ -432,8 +446,27 @@ not-started calls as above and finishes the turn `interrupted`; storage
 accepts the four records together. An unknown ID is `Invalid("unknown_invocation")`;
 outside `AwaitingResolution` the command is `Invalid("nothing_to_resolve")`,
 `RecoveryRequired` or `Faulted`, and a resolution already in flight makes a
-second one `Busy`. Nothing is resolved automatically and the tool is never run
-again; the user starts a new turn afterwards.
+second one `Busy`. No uncertain invocation is resolved automatically and the
+tool is never run again; the user starts a new turn afterwards.
+
+**Advisory hints:** on entering AwaitingResolution the core requests inspection
+of uncertain `write`/`edit` authorized plan artifacts, never current proposals.
+The storage worker reads verified bytes bounded by `max_artifact_bytes`; the
+executor thread computes `RecoveryHint`. A write compares the current digest
+with post-image first (including no-op writes), then pre-image/absence. An edit
+checks pre-image first, then reverse-applies a unique overlapping-aware
+`new_text` occurrence to compare its SHA-256 with the pre-image. Reads of edit
+text are bounded to 1 MiB. Evidence is `matches_post_image`, `matches_pre_image`,
+`changed_since`, `missing`, or `unavailable { reason }` (refusal code, or
+`tools_unavailable`, `artifact_unavailable`, `infrastructure_failure`). No hint
+is requested for `bash`. Inspection panic is advice unavailable, not a fault.
+
+`Input::Hints` produces nonpersisted `RecoveryHints`, applied by ClientView to
+`awaiting[].hint` so resync preserves it. Hints never enter journal facts or
+model context. Tokens and epochs reject stale answers; resolution works before
+hints arrive, invalidates their token, and drops any late answer. Artifact loads
+have their own future, not the exclusive persistence slot; inspection shares
+the one-job executor queue. Neither blocks recovery commits or user resolution.
 
 The commits storage accepted for each shape:
 
@@ -441,6 +474,7 @@ The commits storage accepted for each shape:
 | --- | --- |
 | Unfinished turn | `<state>>recovering finished(interrupted, process_restart)` |
 | Unanswered calls | `result(cancelled)… processing>recovering finished(…)` |
+| D9 read intent, then not-started calls | `<state>>recovering`; `result(cancelled, invocation)… result(cancelled)… finished(…)` |
 | Uncertain call alone | `execution_uncertain finished(…)`; on resolution `result(<status>) recovery_resolved` |
 | Uncertain, then not-started | `execution_uncertain`; on resolution `result(<status>) result(cancelled) recovery_resolved finished(…)` |
 
@@ -466,6 +500,8 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
   its `TurnFinished`.
 - `ResolutionRequired { invocations }`: the invocations waiting for the user;
   it replaces the view's `awaiting`.
+- `RecoveryHints { hints }`: ephemeral evidence for invocations still awaiting
+  resolution; updates only matching `awaiting[].hint` fields.
 - `InferenceStarted`, `TextDelta`, `ReasoningSummaryDelta`, `ToolCallStarted`
   (with the issued `CallId`), `ToolArgumentsDelta`, `ToolCallReady`,
   `UsageUpdated`, and `PartialCleared`. `PartialCleared` comes when the response
@@ -655,9 +691,8 @@ events that follow.
   library's trusted filesystem executor is available but not installed by CLI.
 - General configuration-update commands, summary generation and compaction.
   Remember is the implemented configuration-change path.
-- Reconciling an uncertain invocation from evidence, such as a file tool
-  checking the workspace to suggest a resolution (Milestone 3). Here a
-  resolution is always the user's statement.
+- Automatic reconciliation of uncertain side effects. Advisory file-image
+  hints are implemented; resolution remains the user's statement.
 - Recovery UI beyond the handle, events and CLI (Milestone 5), and retrying a
   turn after recovery: the user starts a new turn.
 

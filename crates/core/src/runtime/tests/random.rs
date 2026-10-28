@@ -619,6 +619,12 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
     for (_, stored) in finished.reopened.entries() {
         if let EntryPayload::ToolResult(r) = &stored.entry.payload {
             count(format!("tool result {:?}", r.result.status));
+            if r.result.invocation_id.is_some()
+                && r.result.metadata.provenance == Provenance::Runtime
+                && r.result.metadata.code.as_deref() == Some("process_restart")
+            {
+                count("D9 read intent closures".into());
+            }
             count(format!(
                 "tool code {}",
                 r.result.metadata.code.as_deref().unwrap_or("succeeded")
@@ -839,6 +845,12 @@ fn tool_interleavings(d: &mut Driver, rng: &mut Rng, seed: u64) {
             continue;
         }
         if d.executing.is_some() && d.pending.is_none() {
+            if name == "read" && rng.chance(50) {
+                // Crash with the intent durable but no executor answer: D9
+                // must close it without uncertainty or storage rejection.
+                crash(d, rng);
+                continue;
+            }
             let (status, code) = *rng.pick(&[
                 (ToolStatus::Succeeded, None),
                 (ToolStatus::Failed, Some(ResultCode::StalePlan)),
@@ -1020,6 +1032,7 @@ fn randomized_interleavings_keep_storage_and_events_consistent() {
             "executor cancellation requests",
             "planning effects",
             "restarts between denial and result",
+            "D9 read intent closures",
             "restart from Durable(Authorizing)",
             "restart from Durable(Executing)",
             "tool result Failed",

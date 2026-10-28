@@ -1421,6 +1421,7 @@ fn tools_source_has_no_runtime_io() {
         ("exec", include_str!("exec.rs")),
         ("plan", include_str!("plan.rs")),
         ("policy", include_str!("policy.rs")),
+        ("recovery", include_str!("recovery.rs")),
         ("tests", include_str!("tests.rs")),
     ];
     for line in include_str!("mod.rs").lines() {

@@ -7,6 +7,9 @@ use crate::tools::{
 use serde_json::{Value, json};
 use std::sync::{Condvar, Mutex, atomic::AtomicBool};
 
+#[path = "tool_recovery_tests.rs"]
+mod recovery;
+
 const POLICY: &[u8] = br#"{"policy_revision":"initial","enabled_tools":["read","write","edit","bash"],"workspace_read":"allow","workspace_mutation":"ask","process":"ask","network":"deny","protected_paths":[],"allowances":[]}"#;
 const DENY: &[u8] = br#"{"policy_revision":"initial","enabled_tools":["read","write","edit","bash"],"workspace_read":"deny","workspace_mutation":"deny","process":"deny","network":"deny","protected_paths":[],"allowances":[]}"#;
 
@@ -466,7 +469,7 @@ async fn slow_planning_does_not_block_views_subscriptions_or_cancel() {
     assert_eq!(executor.count(), 0);
 }
 #[tokio::test(flavor = "current_thread")]
-async fn executor_lost_is_uncertain_after_reopen_and_never_replayed() {
+async fn executor_lost_read_closes_by_d9_after_reopen_and_never_replayed() {
     let executor = Arc::new(Stub::new(ExecutionBackend::TrustedFs));
     executor.panic.store(true, Ordering::Release);
     let (f, _) = fixture(
@@ -480,10 +483,18 @@ async fn executor_lost_is_uncertain_after_reopen_and_never_replayed() {
     assert_eq!(results(&faulted).len(), 0);
     assert_eq!(executor.count(), 1);
     bounded(f.handle.reopen()).await.unwrap();
-    let view = bounded(f.wait(|v| v.phase == Phase::AwaitingResolution)).await;
-    assert_eq!(view.awaiting.len(), 1);
+    let view = bounded(f.wait(idle)).await;
+    assert!(view.awaiting.is_empty());
     assert_eq!(executor.count(), 1);
-    assert_eq!(results(&view).len(), 0);
+    assert_eq!(results(&view)[0].status, ToolStatus::Cancelled);
+    assert_eq!(
+        results(&view)[0].metadata.code.as_deref(),
+        Some("process_restart")
+    );
+    assert!(view.snapshot.events().all(|(_, _, e)| !matches!(
+        e,
+        JournalEvent::ExecutionUncertain(_) | JournalEvent::RecoveryResolved(_)
+    )));
     f.handle.shutdown().await;
 }
 #[tokio::test(flavor = "current_thread")]
@@ -571,10 +582,11 @@ async fn reopen_during_execution_waits_before_reporting_uncertainty() {
     let (f, _) = fixture(
         host(Workspace::new(), vec![executor.clone()]),
         POLICY,
-        &[("read", json!({"path":"a"}))],
+        &[("write", json!({"path":"new","text":"hello"}))],
     )
     .await;
     start(&f).await;
+    approve(&f, false, Decision::Allow).await;
     hold.entered().await;
     fault(&f.handle).await;
     let handle = f.handle.clone();

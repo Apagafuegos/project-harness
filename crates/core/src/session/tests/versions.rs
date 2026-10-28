@@ -229,6 +229,9 @@ fn effect_sets_are_constructed_canonical() {
     assert!(!stored.is_canonical());
 }
 
+#[path = "recovery.rs"]
+mod recovery;
+
 /// A store in `authorizing` with one `read` call pending, and that call.
 fn authorizing() -> (tempfile::TempDir, Arc<DataRoot>, JournalStore, CallRef) {
     let (temp, root, mut store) = fresh();
