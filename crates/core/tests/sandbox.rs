@@ -704,7 +704,42 @@ exec cat > /dev/null
 
 #[test]
 fn non_cloexec_descriptor_driver() {
-    if std::env::var_os("HARNESS_S02_FD_DRIVER").is_none() {
+    let Some(mode) = std::env::var_os("HARNESS_S02_FD_DRIVER") else {
+        return;
+    };
+    if mode == "launcher" {
+        use rustix::{
+            fs::{OFlags, fcntl_getfl, fcntl_setfl},
+            io::fcntl_dupfd_cloexec,
+        };
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf token"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pipe = child.stdout.take().unwrap();
+        assert!(child.wait().unwrap().success());
+        let descriptor = fcntl_dupfd_cloexec(&pipe, 142).unwrap();
+        fcntl_setfl(
+            &descriptor,
+            fcntl_getfl(&descriptor).unwrap() | OFlags::NONBLOCK,
+        )
+        .unwrap();
+        fcntl_setfd(&descriptor, FdFlags::empty()).unwrap();
+        let launcher =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/with-clean-fds.sh");
+        let result = Command::new(launcher)
+            .args(["/bin/sh", "-c"])
+            .arg(format!(
+                "test ! -e /proc/self/fd/{} && printf sanitized && printf diagnostics >&2",
+                descriptor.as_raw_fd()
+            ))
+            .output();
+        fcntl_setfd(&descriptor, FdFlags::CLOEXEC).unwrap();
+        let result = result.unwrap();
+        assert!(result.status.success(), "{result:?}");
+        assert_eq!(result.stdout, b"sanitized");
+        assert_eq!(result.stderr, b"diagnostics");
         return;
     }
     let f = Fixture::new();
@@ -762,6 +797,22 @@ fn s02_probe_descendant_writer_cannot_hold_capture_open() {
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+#[ignore = "S02 real Linux sandbox"]
+fn s02_ci_launcher_closes_inherited_non_cloexec_pipe() {
+    let result = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "non_cloexec_descriptor_driver", "--nocapture"])
+        .env("HARNESS_S02_FD_DRIVER", "launcher")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]

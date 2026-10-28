@@ -25,7 +25,8 @@ jobs:
           sudo apparmor_parser -r ci/apparmor/harness-ci-bwrap
           bwrap --version
       - name: Validate (including required S02 security suite)
-        run: ./scripts/check.sh
+        # Do not carry the runner's non-CLOEXEC pipe into the test harness.
+        run: ./scripts/with-clean-fds.sh ./scripts/check.sh
 
   host-capabilities:
     # Required real-Linux S02 gate, with before/after doctor evidence.
@@ -54,7 +55,7 @@ jobs:
       - name: Required S02 security suite
         run: |
           bwrap --version
-          cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+          ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
       - name: Summary
         if: always()
         run: |

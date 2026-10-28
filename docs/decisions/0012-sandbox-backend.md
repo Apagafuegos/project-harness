@@ -60,7 +60,21 @@ unsafe code. The only temporary exceptions are backend-owned info/status
 sockets, serialized under a spawn mutex, restored/closed in the parent
 immediately after spawn and consumed/closed by bwrap before bash exec.
 Embedders must create new descriptors close-on-exec too. There is no unsafe
-pre_exec callback. An isolated subprocess test verifies refusal of a deliberately
+pre_exec callback.
+
+The Ubuntu 24.04 GitHub runner supplied an inherited nonblocking pipe at fd 142
+(flags 2048, lacking CLOEXEC). CI run 40752712939 identified the failure in the
+**descriptor audit before spawn**, not namespace acquisition. Startup failures
+now preserve their stage and underlying reason, including fd flags and target
+metadata (never descriptor contents). CI invokes `scripts/with-clean-fds.sh`
+before Cargo: it closes inherited non-CLOEXEC descriptors above stderr in that
+launch child, preserving the runner parent and standard streams. It does not
+relax the backend's audit or change AppArmor. S02 reproduces the condition with
+a real nonblocking pipe duplicated to fd 142 or above, verifies launcher cleanup
+and standard-stream preservation, and separately still requires the product to
+reject an unexpected inheritable descriptor before executing a command. The
+PID namespace identity check is unchanged; the optional-field hypothesis was
+not the cause of these CI failures. An isolated subprocess test verifies refusal of a deliberately
 non-CLOEXEC foreign descriptor; a separate in-sandbox test enumerates actual fds.
 
 `--info-fd` reports the namespace init's host pid; `--json-status-fd` supplies
