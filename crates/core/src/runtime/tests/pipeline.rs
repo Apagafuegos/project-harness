@@ -342,6 +342,7 @@ fn approvals_mismatch_is_commit_free_then_approve_or_deny_or_expire() {
         );
         assert_eq!(d.runtime.snapshot().sequence(), seq);
         assert!(d.pending.is_none());
+        assert_eq!(d.count(), 0, "mismatched approval reached executor");
         if kind == 2 {
             let timer = *d.timers.iter().next().unwrap();
             d.fire(timer);
@@ -455,6 +456,9 @@ fn r02_cancel_approval_answers_every_pending_call_and_revokes_ticket() {
             remember: true,
         });
         assert_eq!(d.rejected(request), Rejection::NotActive);
+        d.run_tools();
+        assert_eq!(d.count(), 0, "revoked approval reached executor");
+        assert_eq!(results(d).len(), 3);
     });
 }
 

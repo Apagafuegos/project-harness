@@ -1,7 +1,8 @@
 # Roadmap
 
 The scaffold, specification artifacts, headless storage (Milestone 1) and the
-headless mock lifecycle with context inspection (Milestone 2) exist.
+headless mock lifecycle with context inspection (Milestone 2), and tools,
+selective security and recovery (Milestone 3) are complete.
 Later stages have acceptance criteria; they are not implemented features.
 
 ## 0. Foundation and proposed specification — present
@@ -59,38 +60,55 @@ fingerprint and size. Every started turn now ends with exactly one
 
 The milestone goal runs in one place as `cargo run --example scripted_session`.
 [Milestone 2 acceptance](milestone-2-acceptance.md) maps every criterion and
-M01–M04, C01, R02 and E01 to tests. It has no gap rows. Three cases are partial
-because their remainder needs later milestones:
+M01–M04, C01, R02 and E01 to tests. It has no gap rows. Two cases remain
+partial; the original third remainder (R02) is now closed:
 
 - **M03:** per-operation deadlines, queue bounds inside a native adapter and a
   second native adapter (Milestone 4).
 - **M04:** the explicit `omit` switch policy and native replay state
   (Milestone 4).
-- **R02:** cancellation while waiting for approval or during execution
-  (Milestone 3).
+- **R02:** the original approval/execution cancellation remainder is now closed
+  by [Milestone 3 acceptance](milestone-3-acceptance.md).
 
-## 3. Tools, selective security, and recovery
+## 3. Tools, selective security, and recovery — complete
 
-Implement registry validation, sequential scheduling, policy, approvals, and
-opaque authorized operations. Add trusted `read`, `write`, and `edit` with
-secure descriptor-relative access and safe replacement semantics. Persist intent
-before side effects, results before inference, and recover uncertainty explicitly.
+Implemented registry validation, sequential scheduling, policy, approvals and
+opaque authorized operations. Trusted `read`, `write` and `edit` use strict
+secure descriptor-relative access and safe replacement. Intent is acknowledged
+before side effects, results before dependent inference, and uncertain mutations
+require user resolution; read-only restart closure follows D9.
 
-Add `bash` only behind the configured Bubblewrap backend with tested mounts,
-network denial, environment filtering, deadlines, bounded output, and descendant
-cleanup. Missing enforcement must fail closed. Run T01–T02, S01–S02, and R01;
-actual Linux security tests are a gate, not an optional successful skip.
+`bash` is offered only with the configured, probed Bubblewrap backend and a
+usable file planning layer. Real Linux tests cover mounts, network denial,
+environment filtering, deadlines, bounded output and descendant cleanup.
+Missing enforcement fails closed. S02 and assembled tool-host tests are required
+in both pinned CI jobs, never a successful skip on an unavailable prerequisite.
 
-Implemented so far: `harness doctor` probes the host's sandbox capabilities
-([decision 0008](decisions/0008-host-sandbox.md)), and journal schema v2 is in
-place ([session storage](session-storage.md#record-versions)). Records are
-versioned one by one; v1 journals stay readable and continue as v2. Results
-carry a machine-readable code, intents their declared effects, and responses
-the fingerprint of the projection their inference was sent. The pure tool
-layer now provides four fixed definitions, strict validation, canonical v2
-plans, configuration allowances and deterministic policy ([decision 0009](decisions/0009-tool-policy.md)).
-No tool executes yet; runtime integration and closing read-only intents after
-a crash remain planned.
+Schema v2 is implemented ([session storage](session-storage.md#record-versions));
+v1 records remain readable and journals continue as v2. The fixed registry,
+canonical plans and policy, pure-core/async pipeline, descriptor-rooted files,
+sandbox and session-owned assembly, and recovery advice are recorded in
+ADRs [0008](decisions/0008-host-sandbox.md),
+[0009](decisions/0009-tool-policy.md), [0010](decisions/0010-tool-pipeline.md),
+[0011](decisions/0011-trusted-file-tools.md),
+[0012](decisions/0012-sandbox-backend.md) and
+[0013](decisions/0013-tool-recovery.md).
+
+[Milestone 3 acceptance](milestone-3-acceptance.md) maps every criterion,
+T01–T02, S01–S02, R01, full R02 and J03's output-artifact clause to gate tests.
+`cargo run --example tool_session` demonstrates real files, approvals, crash,
+uncertainty, advice, user resolution and final context membership offline.
+There are no gap rows; recorded partial capabilities/limits are:
+
+- **Elevated:** not offered in M3; future capability decision (ADR 0009).
+- **Subprocess network:** always denied; constrained egress needs a later backend.
+- **Seccomp:** no filter (ADRs 0008/0012).
+- **Process count:** TasksMax only with a usable systemd user scope (ADR 0008).
+- **Concurrent lock/spawn:** fork/exec can briefly cause session_locked on another
+  journal's immediate release/reopen (ADR 0012 amendment); no bypass or effect retry.
+
+Additional filesystem/sandbox threat-model limits are recorded in the acceptance
+notes and owning ADRs. Native providers and CLI chat remain later work.
 
 ## 4. Native providers and rolling compaction
 

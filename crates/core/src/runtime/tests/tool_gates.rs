@@ -5,6 +5,198 @@ use serde_json::json;
 use std::time::Duration;
 
 #[test]
+fn t02_three_valid_calls_execute_one_at_a_time_even_after_executor_failure() {
+    scenario_from(enabled, |d| {
+        propose(
+            d,
+            &[
+                ("read", json!({"path":"a"})),
+                ("read", json!({"path":"f1"})),
+                ("read", json!({"path":"f2"})),
+            ],
+        );
+        d.settle();
+        for index in 0..3 {
+            assert_eq!(d.count(), index);
+            assert!(d.plan());
+            d.settle();
+            assert!(d.executing.is_some());
+            assert!(d.planning.is_none());
+            assert!(!d.plan());
+            assert!(!d.complete());
+            if index == 0 {
+                d.executor
+                    .outcomes
+                    .lock()
+                    .unwrap()
+                    .push_back(outcome(ToolStatus::Failed, Some(ResultCode::StalePlan)));
+            }
+            let call = d.executing.as_ref().unwrap().1.call().clone();
+            d.execute();
+            assert_eq!(d.count(), index + 1);
+            assert_eq!(results(d).len(), index);
+            assert!(d.planning.is_none());
+            d.settle();
+            assert_eq!(results(d)[index].call, call);
+        }
+        assert_eq!(
+            results(d).iter().map(|r| r.status).collect::<Vec<_>>(),
+            vec![
+                ToolStatus::Failed,
+                ToolStatus::Succeeded,
+                ToolStatus::Succeeded
+            ]
+        );
+        stop(d);
+    });
+}
+
+#[test]
+fn t02_valid_calls_wait_for_terminal_result_ack_and_keep_association_after_failure_and_cancel() {
+    scenario_from(enabled, |d| {
+        propose(
+            d,
+            &[
+                ("read", json!({"path":"a"})),
+                ("read", json!({"path":"f1"})),
+                ("read", json!({"path":"f2"})),
+            ],
+        );
+        d.settle();
+        d.plan();
+        d.settle();
+        let first = d.executing.as_ref().unwrap().1.call().clone();
+        assert!(d.planning.is_none());
+        assert!(!d.complete());
+        assert!(!d.plan());
+        assert_eq!(d.count(), 0);
+        d.executor
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(outcome(ToolStatus::Failed, Some(ResultCode::StalePlan)));
+        d.execute();
+        assert_eq!(d.count(), 1);
+        assert!(d.executing.is_none() && d.planning.is_none());
+        assert!(results(d).is_empty()); // result not yet acknowledged
+        d.settle();
+        d.plan();
+        d.settle();
+        let second = d.executing.as_ref().unwrap().1.call().clone();
+        assert_ne!(first, second);
+        d.cancel();
+        d.settle();
+        assert!(d.planning.is_none());
+        d.execute();
+        d.settle();
+        let r = results(d);
+        assert_eq!(d.count(), 2);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].call, first);
+        assert_eq!(r[1].call, second);
+        assert_eq!(r[0].status, ToolStatus::Failed);
+        assert_eq!(r[1].status, ToolStatus::Cancelled);
+        assert_eq!(r[2].status, ToolStatus::Cancelled);
+        assert_eq!(
+            r.iter()
+                .map(|r| &r.call.call_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3
+        );
+    });
+}
+
+#[test]
+fn r01_four_mutation_crash_points_never_reinvoke_and_navigation_cannot_evade_uncertainty() {
+    for gate in 0..4 {
+        scenario_from(enabled, |d| {
+            propose(d, &[("write", json!({"path":"new","text":"x"}))]);
+            d.settle(); // before intent, PlanCall outstanding
+            let sibling = d
+                .runtime
+                .snapshot()
+                .ancestry(d.runtime.snapshot().head())
+                .unwrap()[0]
+                .entry
+                .id
+                .clone();
+            if gate >= 1 {
+                d.plan();
+                d.settle(); // approval request durable
+                d.approval(Decision::Allow, false);
+                d.settle(); // intent durable, executor not called
+            }
+            if gate >= 2 {
+                d.execute(); // simulated mutation; result awaits append
+            }
+            let before = d.count();
+            assert_eq!(before, usize::from(gate >= 2));
+            d.kill(if gate == 3 {
+                Crash::Durable
+            } else {
+                Crash::Lost
+            });
+            d.restart();
+            d.settle();
+            let r = results(d);
+            assert_eq!(
+                r.iter()
+                    .filter(|r| r.metadata.provenance == Provenance::Executor)
+                    .count(),
+                usize::from(gate == 3),
+                "executor result gate {gate}"
+            );
+            assert_eq!(
+                d.runtime.snapshot().unresolved_invocations().len(),
+                usize::from(gate == 1 || gate == 2),
+                "uncertainty gate {gate}"
+            );
+            if gate == 1 || gate == 2 {
+                let request = d.command(Command::SelectHead {
+                    head: Some(sibling),
+                });
+                assert_eq!(d.rejected(request), Rejection::ResolutionRequired);
+                d.acknowledge_all();
+            }
+            assert_eq!(d.count(), before);
+            assert_eq!(results(d).len(), 1);
+        });
+    }
+}
+
+#[test]
+fn j03_missing_or_digest_mismatched_tool_capture_blocks_reopen_not_empty_success() {
+    for missing in [false, true] {
+        let mut d = enabled();
+        propose(&mut d, &[("read", json!({"path":"a"}))]);
+        d.run_tools();
+        stop(&mut d);
+        let capture = results(&d)[0].metadata.artifacts[0].clone();
+        let path = d
+            .root
+            .path()
+            .join("artifacts")
+            .join(capture.sha256.as_str());
+        d.kill(Crash::Lost);
+        if missing {
+            std::fs::remove_file(path).unwrap();
+        } else {
+            std::fs::write(path, b"fake stub capture").unwrap(); // same length, wrong digest
+        }
+        let inspection = JournalStore::inspect(&d.root, &d.session).unwrap();
+        assert_eq!(
+            inspection.diagnostic.unwrap().kind,
+            DiagnosticKind::Artifact
+        );
+        // Inspection may expose the valid prefix for diagnostics, never an
+        // executable session; open refuses the damaged artifact.
+        assert!(JournalStore::open(d.root.clone(), &d.session).is_err());
+        assert_eq!(d.count(), 1);
+    }
+}
+
+#[test]
 fn approval_wall_clock_expiry_cannot_be_bypassed_by_delaying_the_timer() {
     scenario_from(enabled, |d| {
         propose(d, &[("write", json!({"path":"new","text":"x"}))]);

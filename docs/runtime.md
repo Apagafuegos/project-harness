@@ -5,8 +5,10 @@ Status: Milestone 2 is implemented as `harness_core::runtime`,
 machine, a dedicated storage worker, a Tokio driver/handle with broadcast
 subscriptions, the provider stream seam with a scripted mock, the context
 builder that the core runs in `Preparing`, and startup recovery with explicit
-tail repair. Milestone 3 steps 4a–4b add the pure-core tool pipeline and async
-tool-host dispatch on a dedicated executor thread.
+tail repair. Milestone 3 is complete: the pure-core tool pipeline and async
+tool-host dispatch on a dedicated executor thread, real file/sandbox assembly,
+read-only restart closure and advisory file-image recovery hints.
+[Milestone 3 acceptance](milestone-3-acceptance.md) maps criteria to gate tests.
 [Decision 0010](decisions/0010-tool-pipeline.md) records that boundary. The
 trusted filesystem executor is implemented separately in
 [step 5](decisions/0011-trusted-file-tools.md). Step 7b assembles real file and
@@ -577,7 +579,10 @@ policy change; in-place reopen never silently changes protection capabilities.
   timer/terminal commits and outstanding tool cleanup, drains artifacts, closes
   the executor queue and joins its thread through `spawn_blocking`, then drops
   storage worker senders and awaits worker exit. The lock is released before it
-  returns, including for simultaneous shutdown callers. Immediate open succeeds.
+  returns, including for simultaneous shutdown callers. Immediate open succeeds
+  unless an unrelated concurrent sandbox/probe spawn temporarily inherited that
+  lock between fork and exec (`session_locked`, ADR 0012 amendment). This is a
+  known transient refusal, not an effect-retry or lock-bypass permission.
   During the drain the mailbox is still read: commands get
   `Rejection::ShuttingDown`, uploads and reopen get
   `Rejected { code: "shutting_down" }`, and views are still answered. Messages
@@ -748,8 +753,8 @@ provider is never opened on overflow, that requests carry the configured
 instructions, and that `inspect_context` reads a sibling branch without moving
 the head.
 
-Recovery scenarios (`runtime::tests::recovery`) kill the process after a
-chosen commit, without shutdown, and restart it: in `Preparing`, `Inferring`,
+Recovery scenarios (`runtime::tests::recovery`) simulate process death at a
+chosen commit, without shutdown, and reconstruct the core over real storage: in `Preparing`, `Inferring`,
 `Processing`, `Authorizing`, `Continuing` and `Cancelling`, with unanswered
 calls, with an uncertain call alone or followed by a not-started call, during
 recovery itself (the commit lost, durable but unacknowledged, or torn), while
@@ -763,5 +768,13 @@ once; `finish` restarts any run left faulted or unfinished. Driver tests cover
 recovery through `SessionHandle::open` with a scripted provider that records
 no stream, resolution through the handle, repair on a faulted handle (stale
 fingerprint and size refused, new epoch, subscription reset) and the static
-`repair_tail` refusals. A randomized test runs 512 seeds, with crashes. See
+`repair_tail` refusals. A randomized test runs 512 seeds through policy, approvals and the counted
+executor effects, including cancellation and Lost/Durable/Torn crashes during
+execution. It checks acknowledged intents, no repeated invocation and exactly
+one durable terminal outcome per turn. The 5,000-seed release check prints the
+tool paths reached. Real process death is separately exercised by the SIGKILL
+tool_host integration test and the offline `tool_session` example (an OS
+file-size fault kills its result append). The example prints deterministic
+context membership/provenance after user resolution. See
+[Milestone 3 acceptance](milestone-3-acceptance.md) and
 [development](development.md#runtime-tests).

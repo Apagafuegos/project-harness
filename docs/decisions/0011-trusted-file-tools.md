@@ -1,8 +1,9 @@
 # 0011: Descriptor-relative trusted file tools
 
 Status: Accepted and implemented for Milestone 3 step 5. The shared executor
-interface is implemented; runtime installation/dispatch remains step 4b and
-shell execution remains separate.
+interface is implemented; runtime dispatch is implemented in step 4b and
+real host installation/shell execution in step 7b (ADR 0012). Descriptions of
+runtime wiring below record the step 5 ownership boundary.
 
 Date: 2026-10-27
 

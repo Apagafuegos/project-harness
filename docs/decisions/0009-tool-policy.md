@@ -3,7 +3,9 @@
 Status: Accepted and implemented for Milestone 3 step 3. Execution, approvals in
 runtime state, descriptor resolution, and recovery changes were planned here;
 [decision 0010](0010-tool-pipeline.md) now implements the core approval and
-execution-effect pipeline, with real executors still deferred.
+execution-effect pipeline. Real executors, host assembly and recovery are now
+implemented under decisions 0011–0013; the step-local deferred list below
+records the original boundary, not the current milestone's outstanding work.
 
 Date: 2026-10-27
 

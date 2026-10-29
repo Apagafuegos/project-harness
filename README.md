@@ -10,7 +10,7 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: storage and Milestone 2, steps 2–5.** `harness-core`
+**Status: Milestones 1–3 complete (storage, headless runtime, tools/security/recovery).** `harness-core`
 implements validated session trees, checksummed JSONL transactions, immutable
 snapshots, private content-addressed artifacts, single-writer locking, and
 explicit torn-tail repair. J01–J03 tests cover replay, corruption rejection and
@@ -27,8 +27,12 @@ and returns a report that accounts for every entry on the branch, with
 labelled estimates, an honest budget and a reproducible fingerprint. The core
 builds it before every inference and fails an overflowing turn before calling
 the provider. `SessionHandle::inspect_context` and the read-only
-`harness context` command expose the report. No native provider adapter,
-workspace tool, summary generation or TUI exists, so nothing runs an agent yet.
+`harness context` command expose the report. The library now runs authorized
+read/write/edit via descriptor-rooted Rust operations and bash only through
+probed Bubblewrap, with sequential scheduling, durable intent/results, approvals
+and explicit uncertainty recovery with advisory file-image hints. Real Linux
+security tests are required in CI. Native providers, CLI chat, summary generation
+and the TUI remain planned.
 
 ## Getting started
 
@@ -75,6 +79,8 @@ the [context builder](docs/context.md) and its
 [startup recovery](docs/decisions/0007-startup-recovery.md). Milestone 2 is
 complete; [its acceptance check](docs/milestone-2-acceptance.md) maps each
 criterion to tests, and `cargo run --example scripted_session` runs it end to
-end. See the [roadmap](docs/roadmap.md).
+end. [Milestone 3 acceptance](docs/milestone-3-acceptance.md) maps tools, real
+security and recovery to tests; `cargo run --example tool_session` demonstrates
+real files, approvals and crash resolution offline. See the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

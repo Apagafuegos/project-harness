@@ -1,8 +1,8 @@
 # 0008: Host sandbox requirements and test placement
 
-Status: Accepted for Milestone 3. The `harness doctor` probe and the CI
-profile exist; the shell security suite and its `check.sh` gate arrive with
-step 7 and are planned behavior until then.
+Status: Accepted and implemented for Milestone 3. The `harness doctor` probe,
+CI profile, real shell security suite and required `check.sh` gate exist.
+See [Milestone 3 acceptance](../milestone-3-acceptance.md).
 
 Date: 2026-10-25
 
@@ -50,7 +50,7 @@ is a socket owned by the same uid. The derived value goes to the
 ## Consequences
 
 - A contributor on a stock Ubuntu 24.04 host without a `bwrap` profile cannot
-  pass `check.sh` once step 7 lands without either a profile they choose to
+  pass `check.sh` without either a profile they choose to
   install or the explicit opt-out.
 - CI evidence depends on the committed profile; a change to it is a reviewed
   change to the test environment, not to the product.

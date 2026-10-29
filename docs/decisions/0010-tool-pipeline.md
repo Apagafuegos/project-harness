@@ -2,8 +2,10 @@
 
 Status: Implemented through Milestone 3 step 4b in the pure core and async
 session driver. The trusted filesystem executor is implemented separately in
-step 5 ([0011](0011-trusted-file-tools.md)); sandbox execution and CLI host
-installation remain deferred.
+step 5 ([0011](0011-trusted-file-tools.md)); sandbox execution and library
+host assembly are now implemented in [0012](0012-sandbox-backend.md), and
+recovery in [0013](0013-tool-recovery.md). Step-local deferrals below describe
+the original boundary. CLI chat remains later work.
 
 Date: 2026-10-27
 

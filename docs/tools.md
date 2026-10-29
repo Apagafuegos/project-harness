@@ -1,5 +1,10 @@
 # Built-in tools
 
+Milestone 3 is complete; [acceptance](milestone-3-acceptance.md) maps the
+implemented pipeline, file/shell security and recovery guarantees to gate tests.
+`cargo run --example tool_session` is an offline deterministic walkthrough using
+real files, approval, a process crash, recovery advice and user resolution.
+
 ## Implemented: validation, plans, and policy
 
 The fixed `harness_core::tools::Registry` validates and plans `read`, `write`,
@@ -202,3 +207,9 @@ upload limit. Executor capture publication is not `put_artifact` upload: the
 worker publishes the full configured capture (64 MiB by default) before the
 result, without the upload cap or silent truncation. Artifact storage's numeric
 bound is the journal's safe-integer bound, not a smaller capture-size limit.
+
+The ADR 0012 amendment also records the in-process fork/exec lock window:
+a concurrent sandbox/probe spawn can briefly retain another thread's journal
+lock after that writer closes, so immediate reopen may report `session_locked`.
+This transient refusal does not justify bypassing the lock or retrying effects.
+Tests that spawn run in separate integration targets, not the core unit binary.

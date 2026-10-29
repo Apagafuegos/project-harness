@@ -26,8 +26,16 @@ describing a future component is not evidence that it is implemented.
 - [Host sandbox decision](decisions/0008-host-sandbox.md): accepted shell
   security suite placement, the CI AppArmor profile and the opt-out.
 - [Tool policy decision](decisions/0009-tool-policy.md): implemented pure tool
-  validation/planning, canonical v2 plans, configuration allowances and policy;
-  runtime integration and execution remain planned.
+  validation/planning, canonical v2 plans, configuration allowances and policy.
+- [Tool pipeline decision](decisions/0010-tool-pipeline.md): pure-core approvals,
+  write-ahead execution, sequential executor threading and cancellation.
+- [Trusted file decision](decisions/0011-trusted-file-tools.md): descriptor-rooted
+  file operations, atomic replacement and real-filesystem S01 tests.
+- [Sandbox decision](decisions/0012-sandbox-backend.md): Bubblewrap enforcement,
+  mandatory S02 gate, session-owned host assembly and lock/spawn limitation.
+- [Tool recovery decision](decisions/0013-tool-recovery.md): D9 read-only closure,
+  advisory file-image hints and explicit user resolution.
+- [Built-in tools usage](tools.md): implemented file/shell backends and host assembly.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
   cancellation, worker/driver, provider stream, media, resync, recovery and
   tail repair.
@@ -48,6 +56,8 @@ describing a future component is not evidence that it is implemented.
 - [Roadmap](roadmap.md): small vertical slices with observable acceptance criteria.
 - [Milestone 2 acceptance](milestone-2-acceptance.md): each criterion and RFC
   case mapped to tests, with partial rows stated.
+- [Milestone 3 acceptance](milestone-3-acceptance.md): tools, security, recovery,
+  full R02, output artifacts, randomized coverage and mutation checks.
 
 ## Document status
 
@@ -63,8 +73,10 @@ accepted and tested under decision 0003; the pure runtime core's turn commits
 and async worker/driver under decision 0004; the provider stream seam under
 decision 0005; the context builder and report under decision 0006; startup
 recovery and tail repair under decision 0007; the pure tool layer and policy
-under decision 0009. Other details, including runtime approval integration,
-native adapters and compaction generation, remain proposed. Schema/examples alone are
+under decision 0009; approval/execution integration under decision 0010;
+trusted files under decision 0011; sandbox and host assembly under decision 0012;
+and tool recovery under decision 0013. Native adapters and compaction generation
+remain proposed. Schema/examples alone are
 not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

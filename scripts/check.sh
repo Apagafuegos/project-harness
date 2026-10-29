@@ -14,6 +14,7 @@ else
     cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
     cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
 fi
+./scripts/test-security-gate.sh
 cargo build --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo run --locked -p harness -- --help
@@ -43,3 +44,12 @@ cargo run --locked -q -p harness-core --example scripted_session >"$smoke/exampl
 diff -u "$smoke/example-1.txt" "$smoke/example-2.txt"
 grep -q "streams opened by recovery: 0" "$smoke/example-1.txt"
 echo "scripted_session example: deterministic, recovered without a stream"
+
+# M3: real descriptor-rooted read/edit, approval, process death during write
+# result append, explicit tail repair and user resolution. No sandbox backend.
+cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-1.txt"
+cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-2.txt"
+diff -u "$smoke/tool-example-1.txt" "$smoke/tool-example-2.txt"
+grep -q 'advisory hint matches_post_image' "$smoke/tool-example-1.txt"
+grep -q 'ToolResult Some(UserObserved)' "$smoke/tool-example-1.txt"
+echo "tool_session example: deterministic, uncertain write resolved by the user"

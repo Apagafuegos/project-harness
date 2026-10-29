@@ -8,6 +8,10 @@ and the RFC-001 cases it names (M01–M04, C01, R02, E01) to tests, as of
 each run twice, are replayed byte for byte, are resync-checked from every view
 and end with every started turn finished exactly once.
 
+Update 2026-10-29: [Milestone 3 acceptance](milestone-3-acceptance.md) closes
+R02's approval/execution cancellation remainder. The dated table below preserves
+the original Milestone 2 scope.
+
 Status: **met** means the criterion is covered as Milestone 2 scopes it;
 **partial** means part of it depends on something Milestone 2 does not build,
 and the note says what and where it goes; **gap** means in scope and not

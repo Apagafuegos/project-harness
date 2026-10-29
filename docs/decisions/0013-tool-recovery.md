@@ -103,4 +103,5 @@ operation.
 - Break-on-purpose checks cover v1 D9 widening, uncertain-read storage
   widening, no-op ordering, nonoverlapping edit counting and waiting for hints.
 
-CLI installation of real executors and recovery UI remain later steps.
+Real executor installation through SessionHandle is now implemented in step 7b
+(ADR 0012). CLI chat and recovery UI remain later work.
