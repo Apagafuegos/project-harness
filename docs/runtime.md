@@ -66,7 +66,7 @@ active turn, timers, and a requested cancel.
 | `Hints` | `HintToken`, invocation/hint pairs | Executor-thread advisory inspection |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
-`SelectHead { head }`, `SwitchModel { model }` and
+`SelectHead { head }`, `SwitchModel { model, policy }` and
 `ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)), and
 `SubmitApproval { approval_id, plan_digest, decision, remember }`. `RequestId`, `CommitToken`,
 `InferenceId` and `TimerId` are `u64` values local to one runtime and never
@@ -104,7 +104,7 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
 `Resolved { invocation_id, ack }`, `HeadSelected { ack }` or
-`ModelSwitched { ack }` or `ApprovalSubmitted { approval_id, ack }` (decision durable).
+`ModelSwitched { ack, preview }` or `ApprovalSubmitted { approval_id, ack }` (decision durable).
 `Rejection` is `Busy`, `RecoveryRequired`,
 `ResolutionRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
 The handle can also return `Overloaded` before submission, and the driver
@@ -115,6 +115,20 @@ the core.
 (4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s),
 `provider_idle_timeout` (300 s), `inference_deadline` (`None`) and `context`, the builder's `ContextConfig`
 (model catalog, budget deductions, compaction trigger, estimator).
+
+### Model switching
+
+`Command::switch_model(model)` defaults to `Portability::Reject`. An explicit
+`SwitchModel { model, policy }` builds a pure target preview before committing.
+`Reject` refuses optional native losses or required media/tool incompatibilities
+with `Rejection::PortabilityLoss(Box<PreviewReport>)` (`portability_loss`).
+`OmitOptional` allows only optional native losses. The reply and the post-ack
+`EventKind::ModelSwitched { preview }` contain every affected entry/part, owner,
+schema and byte count, never payload. Required incompatibilities cannot be
+omitted. `ConvertSupported` returns `Invalid("unsupported_policy")` in M4.
+Refusals append nothing; successful switches persist only the existing
+`ModelChanged { model, portability }`. History is never rewritten.
+See [decision 0015](decisions/0015-switching-model-metadata.md).
 
 ### Complete requests and native replay
 

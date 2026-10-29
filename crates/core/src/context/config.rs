@@ -19,12 +19,63 @@ pub struct ModelLimits {
     pub max_output_tokens: Option<u32>,
 }
 
+/// Accepted user input media kinds; text is always supported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMediaKind {
+    /// Image input.
+    Image,
+    /// Audio input.
+    Audio,
+    /// File input.
+    File,
+}
+
+/// Application-supplied capabilities, also constructible by adapter crates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    /// Accepted media. An empty set means text-only.
+    pub input_media: std::collections::BTreeSet<InputMediaKind>,
+    /// Tool calls and results are accepted.
+    pub tools: bool,
+    /// Reasoning effort can be requested.
+    pub reasoning_effort: bool,
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self {
+            input_media: Default::default(),
+            tools: true,
+            reasoning_effort: false,
+        }
+    }
+}
+
+/// Limits and capabilities of one model. Unknown models use this default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Known limits, never guessed from a model name.
+    pub limits: ModelLimits,
+    /// Accepted features.
+    pub capabilities: ModelCapabilities,
+}
+
+impl From<ModelLimits> for ModelInfo {
+    fn from(limits: ModelLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+}
+
 /// Explicitly configured model limits. A model missing from the catalog has
 /// unknown limits, which the core refuses to infer with. The provider is never
 /// consulted, which keeps the builder pure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelCatalog {
-    models: BTreeMap<ModelRef, ModelLimits>,
+    models: BTreeMap<ModelRef, ModelInfo>,
 }
 
 impl ModelCatalog {
@@ -34,19 +85,31 @@ impl ModelCatalog {
     }
 
     /// Add or replace one model's limits.
-    pub fn insert(&mut self, model: ModelRef, limits: ModelLimits) {
-        self.models.insert(model, limits);
+    pub fn insert(&mut self, model: ModelRef, info: impl Into<ModelInfo>) {
+        self.models.insert(model, info.into());
     }
 
     /// Builder form of [`insert`](Self::insert).
-    pub fn with(mut self, model: ModelRef, limits: ModelLimits) -> Self {
-        self.insert(model, limits);
+    pub fn with(mut self, model: ModelRef, info: impl Into<ModelInfo>) -> Self {
+        self.insert(model, info);
         self
     }
 
     /// The configured limits of `model`, if any.
     pub fn limits(&self, model: &ModelRef) -> Option<&ModelLimits> {
+        self.models.get(model).map(|info| &info.limits)
+    }
+
+    /// Configured metadata, if present.
+    pub fn info(&self, model: &ModelRef) -> Option<&ModelInfo> {
         self.models.get(model)
+    }
+
+    /// Unknown models accept text and tools, with no reasoning control.
+    pub fn capabilities(&self, model: &ModelRef) -> ModelCapabilities {
+        self.info(model)
+            .map(|info| info.capabilities.clone())
+            .unwrap_or_default()
     }
 }
 

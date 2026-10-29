@@ -54,7 +54,8 @@ mod report;
 
 pub use builder::{BuiltContext, ContextBuilder, ContextError};
 pub use config::{
-    ConfigurationError, ContextConfig, ModelCatalog, ModelLimits, SessionConfiguration,
+    ConfigurationError, ContextConfig, InputMediaKind, ModelCapabilities, ModelCatalog, ModelInfo,
+    ModelLimits, SessionConfiguration,
 };
 pub use estimate::{
     Estimate, EstimateMethod, EstimatorInfo, HeuristicEstimator, MediaKind, TokenEstimator,

@@ -8,7 +8,9 @@ Milestone 4 step 01a adds complete tool/options input and fingerprints,
 owner-scoped native state/validated continuation replay, read-only request
 artifact access and core-enforced inference deadlines
 ([decision 0014](../decisions/0014-model-seam.md)).
-No native provider adapter exists yet.
+Milestone 4 step 01b adds catalog capabilities, enforced model-switch policies
+([decision 0015](../decisions/0015-switching-model-metadata.md)) and a public
+fixture conformance suite. No native provider adapter exists yet.
 
 ## Purpose and ownership
 
@@ -166,6 +168,54 @@ Live streaming text, complete tool-call reconstruction, usage, errors, and
 cancellation must be checked explicitly. A second provider must work without
 provider-specific branches in orchestration before this abstraction is
 considered validated. Routine tests must not require credentials or network.
+
+## Public adapter conformance suite
+
+Enable core's off-by-default `conformance` Cargo feature in the adapter's test
+dependency (no new dependencies are added by that feature). The public module is
+`harness_core::model::conformance`:
+
+```rust,ignore
+#[tokio::test]
+async fn recorded_native_fixtures_conform() {
+    harness_core::model::conformance::run(&RecordedFixtures, &manifest())
+        .await.unwrap();
+}
+```
+
+Implement `FixtureFactory::build(&self, fixture: &str) -> Fixture`. Each fresh
+fixture contains `Arc<dyn ModelProvider>` and an `observe` closure over its native
+fixture transport. `Observation` reports `submitted: Option<SubmittedRequest>`
+(decoded from the **actual native request**, including every tool name,
+description, schema and option) and `released: bool` (all stream-owned resources
+released). Merely copying the incoming logical request is not transport evidence.
+
+A manifest is `&[Case]`: each row has `kind: CaseKind`, a named `fixture`, the
+full input `request`, independent normalized `expected: Expected`, and optional
+`unsupported_option` (the exact required field/namespace name). `Expected`
+specifies terminal outcome/reason/error, reassembled text/reasoning, tool names,
+native call IDs and parsed JSON objects, ordered cumulative usage snapshots,
+and metadata-only native block/continuation expectations. It never prints opaque
+payloads. `run` requires exactly one of each of the 17 `CaseKind::ALL` scenarios;
+`run_case` runs an individual row for focused diagnostics. See the external
+consumer example in `crates/core/tests/model_conformance.rs` and complete
+scripted manifest in `crates/core/src/model/conformance/tests.rs`.
+
+Checks cover start/finish order, block identity and call-fragment lifecycle,
+JSON object reconstruction, outcomes and retry delays, nullable replacement
+usage snapshots, native schema/bounds, cancellation during pending setup and
+streaming, drop release, an expired deadline, and lossless request options/tools
+or a named `unsupported_capability`. Control and release checks are bounded by
+the core's default two-second grace. Adapters may harmlessly ignore deadlines;
+the core still enforces its own deadline. The adapter suite requires native
+state only on `Completed`; this does not alter ADR 0014's defensive core
+retention when the core itself fails an already partially received response.
+
+`ScriptedProvider` runs the complete suite. Deliberately broken scripts test
+every validator, including cross-kind index reuse and continuation on failure.
+`./scripts/check.sh` also builds/tests the public feature and its external
+consumer; no credentials or network are required. Native queue bounds and
+explicit opt-in live checks remain separate adapter gates.
 
 ## Concrete specification
 

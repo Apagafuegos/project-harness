@@ -3,6 +3,193 @@
 use super::*;
 use crate::model::{ArtifactReadError, NativeContinuation};
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn switch_required_media_rejected_under_both_policies() {
+    use crate::context::{InputMediaKind, ModelCapabilities, ModelInfo, RequiredCapability};
+    for (kind, capability) in [
+        (InputMediaKind::Image, RequiredCapability::Image),
+        (InputMediaKind::Audio, RequiredCapability::Audio),
+        (InputMediaKind::File, RequiredCapability::File),
+    ] {
+        let mut settings = config();
+        let other = ModelRef {
+            provider_instance: "mock".into(),
+            model: "text-only".into(),
+        };
+        settings.runtime.context.catalog.insert(
+            test_model(),
+            ModelInfo {
+                limits: ModelLimits {
+                    context_tokens: Some(1_000_000),
+                    max_output_tokens: None,
+                },
+                capabilities: ModelCapabilities {
+                    input_media: [kind].into(),
+                    ..Default::default()
+                },
+            },
+        );
+        let (fixture, _) =
+            Fixture::scripted(settings, WorkerOptions::default(), [reply("seen")]).await;
+        let artifact = fixture
+            .handle
+            .put_artifact(b"media".to_vec())
+            .await
+            .unwrap();
+        let block = match kind {
+            InputMediaKind::Image => ContentBlock::Image {
+                artifact,
+                mime_type: "image/png".into(),
+            },
+            InputMediaKind::Audio => ContentBlock::Audio {
+                artifact,
+                mime_type: "audio/wav".into(),
+            },
+            InputMediaKind::File => ContentBlock::File {
+                artifact,
+                mime_type: "application/pdf".into(),
+                name: "file.pdf".into(),
+            },
+        };
+        let Command::StartTurn { command_id, .. } = Fixture::command(1) else {
+            unreachable!()
+        };
+        fixture
+            .handle
+            .command(Command::StartTurn {
+                command_id,
+                content: vec![block],
+            })
+            .await
+            .unwrap();
+        let before = fixture.wait(idle).await;
+        for policy in [Portability::Reject, Portability::OmitOptional] {
+            let rejection = fixture
+                .handle
+                .command(Command::SwitchModel {
+                    model: other.clone(),
+                    policy,
+                })
+                .await
+                .unwrap_err();
+            let Rejection::PortabilityLoss(preview) = rejection else {
+                panic!("expected portability_loss")
+            };
+            assert!(preview.would_stop_being_portable.is_empty());
+            assert_eq!(preview.required_incompatibilities.len(), 1);
+            assert_eq!(preview.required_incompatibilities[0].capability, capability);
+            assert_eq!(
+                preview.required_incompatibilities[0].part,
+                crate::context::Part::Block { index: 0 }
+            );
+            assert_eq!(
+                fixture.handle.view().await.unwrap().snapshot.sequence(),
+                before.snapshot.sequence()
+            );
+        }
+        assert_eq!(
+            fixture
+                .handle
+                .command(Command::SwitchModel {
+                    model: other,
+                    policy: Portability::ConvertSupported
+                })
+                .await,
+            Err(Rejection::Invalid("unsupported_policy"))
+        );
+        fixture.handle.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn switch_required_tools_rejected_and_clean_switch_policies() {
+    use crate::context::{ModelCapabilities, ModelInfo, RequiredCapability};
+    let mut settings = config();
+    let other = ModelRef {
+        provider_instance: "mock".into(),
+        model: "no-tools".into(),
+    };
+    settings.runtime.context.catalog.insert(
+        other.clone(),
+        ModelInfo {
+            capabilities: ModelCapabilities {
+                tools: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let (fixture, _) = Fixture::scripted(
+        settings,
+        WorkerOptions::default(),
+        [
+            Script::new(tool_script().into_iter().map(Step::Event)),
+            reply("done"),
+        ],
+    )
+    .await;
+    // A clean projection succeeds under either supported policy, even with unknown limits.
+    for policy in [Portability::Reject, Portability::OmitOptional] {
+        let accepted = fixture
+            .handle
+            .command(Command::SwitchModel {
+                model: test_model(),
+                policy,
+            })
+            .await
+            .unwrap();
+        let Accepted::ModelSwitched { preview, .. } = accepted else {
+            panic!("switch")
+        };
+        assert!(preview.would_stop_being_portable.is_empty());
+        assert!(preview.required_incompatibilities.is_empty());
+    }
+    assert!(matches!(
+        Command::switch_model(other.clone()),
+        Command::SwitchModel {
+            policy: Portability::Reject,
+            ..
+        }
+    ));
+    fixture.handle.command(Fixture::command(1)).await.unwrap();
+    let before = fixture.wait(idle).await;
+    for policy in [Portability::Reject, Portability::OmitOptional] {
+        let rejected = fixture
+            .handle
+            .command(Command::SwitchModel {
+                model: other.clone(),
+                policy,
+            })
+            .await
+            .unwrap_err();
+        let Rejection::PortabilityLoss(preview) = rejected else {
+            panic!("portability_loss")
+        };
+        assert_eq!(preview.required_incompatibilities.len(), 2);
+        assert!(
+            preview
+                .required_incompatibilities
+                .iter()
+                .all(|part| part.capability == RequiredCapability::Tools)
+        );
+        assert_eq!(
+            fixture.handle.view().await.unwrap().snapshot.sequence(),
+            before.snapshot.sequence()
+        );
+    }
+    assert_eq!(
+        fixture
+            .handle
+            .command(Command::SwitchModel {
+                model: other,
+                policy: Portability::ConvertSupported
+            })
+            .await,
+        Err(Rejection::Invalid("unsupported_policy"))
+    );
+    fixture.handle.shutdown().await;
+}
+
 fn native_reply(payload: &'static [u8]) -> Script {
     Script::new([
         Step::Event(ProviderEvent::Started),
@@ -39,6 +226,7 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
             native_reply(b"first state"),
             native_reply(b"second state"),
             reply("switched"),
+            reply("back"),
         ],
     )
     .await;
@@ -108,13 +296,40 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
         Err(ArtifactReadError::NotReferenced)
     );
 
-    fixture
+    let before = fixture.handle.view().await.unwrap().snapshot.sequence();
+    let rejected = fixture
         .handle
         .command(Command::SwitchModel {
             model: other.clone(),
+            policy: Portability::Reject,
+        })
+        .await
+        .unwrap_err();
+    let Rejection::PortabilityLoss(preview) = rejected else {
+        panic!("expected portability_loss")
+    };
+    assert_eq!(preview.would_stop_being_portable.len(), 4);
+    assert!(preview.required_incompatibilities.is_empty());
+    assert_eq!(
+        fixture.handle.view().await.unwrap().snapshot.sequence(),
+        before
+    );
+    let accepted = fixture
+        .handle
+        .command(Command::SwitchModel {
+            model: other.clone(),
+            policy: Portability::OmitOptional,
         })
         .await
         .unwrap();
+    let Accepted::ModelSwitched {
+        preview: accepted_preview,
+        ..
+    } = accepted
+    else {
+        panic!("expected switch")
+    };
+    assert_eq!(accepted_preview, preview);
     fixture.handle.command(Fixture::command(4)).await.unwrap();
     fixture.wait(idle).await;
     let third = provider.streams()[2].request.clone();
@@ -133,6 +348,25 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
         third.artifacts.read(&state).await,
         Err(ArtifactReadError::NotReferenced)
     );
+    fixture
+        .handle
+        .command(Command::SwitchModel {
+            model: test_model(),
+            policy: Portability::Reject,
+        })
+        .await
+        .unwrap();
+    fixture.handle.command(Fixture::command(5)).await.unwrap();
+    fixture.wait(idle).await;
+    let back = provider.streams()[3].request.clone();
+    assert!(
+        back.input.continuation.is_none(),
+        "B is now the latest response"
+    );
+    assert!(back.input.items.iter().any(|item| matches!(item,
+        ContextItem::Assistant { content, .. } if content.iter().any(|block|
+            matches!(block, ContentBlock::ProviderState { owner, .. } if owner == &test_model()))
+    )));
     fixture.handle.shutdown().await;
 }
 

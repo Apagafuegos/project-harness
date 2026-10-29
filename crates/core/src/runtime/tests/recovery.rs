@@ -210,6 +210,7 @@ fn refuses_all_but_resolution(d: &mut Driver, turn: &TurnId) {
         },
         Command::SelectHead { head: None },
         Command::SwitchModel {
+            policy: Portability::Reject,
             model: ModelRef {
                 provider_instance: "mock".into(),
                 model: "other".into(),

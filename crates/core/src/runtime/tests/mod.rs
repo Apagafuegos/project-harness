@@ -429,7 +429,7 @@ impl Driver {
 
     fn rejected(&self, request: RequestId) -> Rejection {
         match self.reply(request) {
-            Some(Err(rejection)) => *rejection,
+            Some(Err(rejection)) => rejection.clone(),
             other => panic!("{request} was not rejected: {other:?}"),
         }
     }
@@ -1032,7 +1032,7 @@ fn normalized(finished: &Finished) -> Vec<String> {
                         ack: a,
                     } => format!("Resolved({invocation_id}, {})", ack(a)),
                     Accepted::HeadSelected { ack: a } => format!("HeadSelected({})", ack(a)),
-                    Accepted::ModelSwitched { ack: a } => format!("ModelSwitched({})", ack(a)),
+                    Accepted::ModelSwitched { ack: a, .. } => format!("ModelSwitched({})", ack(a)),
                     Accepted::ApprovalSubmitted {
                         approval_id,
                         ack: a,

@@ -2,7 +2,7 @@
 
 use std::{fmt, time::Duration};
 
-use crate::context::{ContextConfig, ContextError, Flags, Totals};
+use crate::context::{ContextConfig, ContextError, Flags, PreviewReport, Totals};
 use crate::model::ModelInput;
 use crate::session::{
     ArtifactRef, CallId, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, EntryId,
@@ -242,6 +242,8 @@ pub enum Command {
     SwitchModel {
         /// The model for later inferences on this branch.
         model: ModelRef,
+        /// Explicit omission policy; callers should default to `Reject`.
+        policy: crate::session::Portability,
     },
     /// State what happened to an invocation whose outcome is unknown. Only
     /// accepted while the runtime awaits resolution.
@@ -251,6 +253,16 @@ pub enum Command {
         /// The user's statement.
         resolution: UserResolution,
     },
+}
+
+impl Command {
+    /// Switch with the safe default: refuse any portability loss.
+    pub fn switch_model(model: ModelRef) -> Self {
+        Self::SwitchModel {
+            model,
+            policy: crate::session::Portability::Reject,
+        }
+    }
 }
 
 /// The user's statement about an uncertain invocation. It becomes the call's
@@ -556,11 +568,13 @@ pub enum Accepted {
     ModelSwitched {
         /// Its acknowledgement.
         ack: CommitAck,
+        /// Classified target preview, with metadata only for every affected part.
+        preview: Box<PreviewReport>,
     },
 }
 
 /// Why a command was refused. Refused commands change nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Rejection {
     /// The bounded command channel is full; submission never waits for room.
     Overloaded,
@@ -580,6 +594,8 @@ pub enum Rejection {
     StaleCommand,
     /// The command itself is invalid, with a stable code.
     Invalid(&'static str),
+    /// `portability_loss`: the target cannot accept the projection under this policy.
+    PortabilityLoss(Box<PreviewReport>),
 }
 
 /// One broadcast event. `seq` starts at 1 per runtime and has no gaps.
@@ -597,6 +613,11 @@ pub struct RuntimeEvent {
 /// deltas are live observations that are never persisted individually.
 #[derive(Clone, Debug)]
 pub enum EventKind {
+    /// A model switch is durable; never contains opaque payload bytes.
+    ModelSwitched {
+        /// Classified target preview.
+        preview: Box<PreviewReport>,
+    },
     /// A commit is durable. One per `Persisted`.
     Committed {
         /// Storage's acknowledgement.

@@ -327,6 +327,11 @@ fn random_command(d: &mut Driver, rng: &mut Rng, issued: &mut Vec<(CommandId, St
             Command::SelectHead { head }
         }
         _ => Command::SwitchModel {
+            policy: *rng.pick(&[
+                Portability::Reject,
+                Portability::OmitOptional,
+                Portability::ConvertSupported,
+            ]),
             model: ModelRef {
                 provider_instance: "mock".into(),
                 model: rng.pick(&["a", "b", ""]).to_string(),

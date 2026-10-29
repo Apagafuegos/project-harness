@@ -379,6 +379,11 @@ impl<'a> ContextBuilder<'a> {
         let (overflow, compaction_recommended) = thresholds(&budget);
         let budget_unknown = matches!(budget, Budget::Unknown { .. });
         let preview = walk.preview.then(|| PreviewReport {
+            required_incompatibilities: required_incompatibilities(
+                &walk.items,
+                &walk.included,
+                &self.config.catalog.capabilities(model),
+            ),
             model_at_head: head_model.clone(),
             preview_model: model.clone(),
             would_stop_being_portable: std::mem::take(&mut walk.stop_portable),
@@ -908,6 +913,66 @@ impl Walk<'_> {
 }
 
 /// The budget of an estimate under `model`'s configured limits.
+fn required_incompatibilities(
+    items: &[ContextItem],
+    included: &[IncludedItem],
+    capabilities: &super::config::ModelCapabilities,
+) -> Vec<RequiredIncompatibility> {
+    use super::config::InputMediaKind;
+    let mut required = Vec::new();
+    for (item, source) in items.iter().zip(included) {
+        match item {
+            ContextItem::User { entry_id, content } => {
+                for (index, block) in content.iter().enumerate() {
+                    let media = match block {
+                        ContentBlock::Image { .. } => {
+                            Some((InputMediaKind::Image, RequiredCapability::Image))
+                        }
+                        ContentBlock::Audio { .. } => {
+                            Some((InputMediaKind::Audio, RequiredCapability::Audio))
+                        }
+                        ContentBlock::File { .. } => {
+                            Some((InputMediaKind::File, RequiredCapability::File))
+                        }
+                        _ => None,
+                    };
+                    if let Some((kind, capability)) = media
+                        && !capabilities.input_media.contains(&kind)
+                    {
+                        required.push(RequiredIncompatibility {
+                            entry_id: entry_id.clone(),
+                            part: Part::Block {
+                                index: index as u32,
+                            },
+                            capability,
+                        });
+                    }
+                }
+            }
+            ContextItem::Assistant { entry_id, .. } if !capabilities.tools => {
+                for block in &source.blocks {
+                    if block.kind == BlockKind::ToolCall {
+                        required.push(RequiredIncompatibility {
+                            entry_id: entry_id.clone(),
+                            part: block.part,
+                            capability: RequiredCapability::Tools,
+                        });
+                    }
+                }
+            }
+            ContextItem::ToolResult { entry_id, .. } if !capabilities.tools => {
+                required.push(RequiredIncompatibility {
+                    entry_id: entry_id.clone(),
+                    part: Part::Entry,
+                    capability: RequiredCapability::Tools,
+                });
+            }
+            _ => {}
+        }
+    }
+    required
+}
+
 fn budget_for(config: &ContextConfig, model: &ModelRef, estimated: u64, opaque: u64) -> Budget {
     let deductions = Deductions {
         output_reserve: config.output_reserve.into(),

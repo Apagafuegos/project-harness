@@ -313,6 +313,7 @@ impl ClientView {
             | EventKind::ToolFinished { .. }
             | EventKind::Recovered { .. }
             | EventKind::ContextBuilt { .. }
+            | EventKind::ModelSwitched { .. }
             | EventKind::Diagnostic(_) => {}
         }
         ApplyOutcome::Applied

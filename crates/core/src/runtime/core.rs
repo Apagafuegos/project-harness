@@ -120,7 +120,7 @@ enum Waiter {
     TurnStarted(TurnId),
     Resolved(InvocationId),
     HeadSelected,
-    ModelSwitched,
+    ModelSwitched(Box<crate::context::PreviewReport>),
     ApprovalSubmitted(crate::session::ApprovalId),
 }
 
@@ -464,7 +464,9 @@ impl Runtime {
                 remember,
             } => self.submit_approval(request, approval_id, plan_digest, decision, remember, env),
             Command::SelectHead { head } => self.select_head(request, head, env),
-            Command::SwitchModel { model } => self.switch_model(request, model, env),
+            Command::SwitchModel { model, policy } => {
+                self.switch_model(request, model, policy, env)
+            }
             Command::ResolveUncertain {
                 invocation_id,
                 resolution,
@@ -765,6 +767,7 @@ impl Runtime {
         &mut self,
         request: RequestId,
         model: ModelRef,
+        policy: Portability,
         env: &mut dyn Env,
     ) -> Option<Result<Accepted, Rejection>> {
         if let Err(rejection) = self.idle_check() {
@@ -777,22 +780,37 @@ impl Runtime {
         if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
             return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
         }
-        // Portability previews arrive with the context builder; until then the
-        // default policy is recorded.
+        if policy == Portability::ConvertSupported {
+            return Some(Err(Rejection::Invalid("unsupported_policy")));
+        }
+        let report = match self.inspect_context(None, Some(model.clone())) {
+            Ok(report) => report,
+            Err(_) => return Some(Err(Rejection::Invalid("context_preview_failed"))),
+        };
+        let preview = Box::new(
+            report
+                .preview
+                .expect("model override always produces a preview"),
+        );
+        if !preview.required_incompatibilities.is_empty()
+            || (policy == Portability::Reject && !preview.would_stop_being_portable.is_empty())
+        {
+            return Some(Err(Rejection::PortabilityLoss(preview)));
+        }
         let entries = chain(
             &snapshot,
             vec![(
                 None,
                 EntryPayload::ModelChanged(ModelChanged {
                     model,
-                    portability: Portability::Reject,
+                    portability: policy,
                 }),
             )],
             env,
         );
         self.persist(
             advancing(&snapshot, entries, Vec::new()),
-            waiting(request, Waiter::ModelSwitched),
+            waiting(request, Waiter::ModelSwitched(preview)),
             None,
             env,
         );
@@ -1223,7 +1241,15 @@ impl Runtime {
                     ack: ack.clone(),
                 },
                 Waiter::HeadSelected => Accepted::HeadSelected { ack: ack.clone() },
-                Waiter::ModelSwitched => Accepted::ModelSwitched { ack: ack.clone() },
+                Waiter::ModelSwitched(preview) => {
+                    self.emit(EventKind::ModelSwitched {
+                        preview: preview.clone(),
+                    });
+                    Accepted::ModelSwitched {
+                        ack: ack.clone(),
+                        preview,
+                    }
+                }
                 Waiter::ApprovalSubmitted(approval_id) => Accepted::ApprovalSubmitted {
                     approval_id,
                     ack: ack.clone(),
@@ -1255,7 +1281,7 @@ impl Runtime {
         };
         let cancel = self.cancel.take().expect("checked above");
         for request in cancel.waiters {
-            let result = result.map(|()| Accepted::Cancelling {
+            let result = result.clone().map(|()| Accepted::Cancelling {
                 turn_id: cancel.turn_id.clone(),
                 ack: ack.clone(),
             });

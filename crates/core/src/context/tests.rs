@@ -877,6 +877,69 @@ fn responses_with_nothing_to_project_are_accounted_for_without_an_item() {
 }
 
 #[test]
+fn switch_preview_classifies_every_projected_tool_part_and_unknown_model_defaults() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("tools")]);
+    let proposal = journal.respond(
+        Response::completed(vec![
+            text("look"),
+            call(&CallId::new(), "read"),
+            call(&CallId::new(), "list"),
+        ])
+        .finish(FinishReason::ToolCalls),
+    );
+    let results = journal.answer();
+    journal.respond(Response::completed(vec![text("done")]));
+    let mut config = ContextConfig::default();
+    assert_eq!(
+        config.catalog.capabilities(&other()),
+        ModelCapabilities::default()
+    );
+    assert!(config.catalog.limits(&other()).is_none());
+    config.catalog.insert(
+        other(),
+        ModelInfo {
+            capabilities: ModelCapabilities {
+                tools: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let preview = journal
+        .build_with(&config, journal.snapshot().head(), Some(&other()))
+        .unwrap()
+        .report
+        .preview
+        .unwrap();
+    assert_eq!(
+        preview.required_incompatibilities,
+        vec![
+            RequiredIncompatibility {
+                entry_id: proposal.clone(),
+                part: Part::Block { index: 1 },
+                capability: RequiredCapability::Tools
+            },
+            RequiredIncompatibility {
+                entry_id: proposal,
+                part: Part::Block { index: 2 },
+                capability: RequiredCapability::Tools
+            },
+            RequiredIncompatibility {
+                entry_id: results[0].clone(),
+                part: Part::Entry,
+                capability: RequiredCapability::Tools
+            },
+            RequiredIncompatibility {
+                entry_id: results[1].clone(),
+                part: Part::Entry,
+                capability: RequiredCapability::Tools
+            },
+        ]
+    );
+}
+
+#[test]
 fn answered_calls_are_included_with_their_results_directly_after() {
     let mut journal = Journal::new();
     let user = journal.user(vec![text("use tools")]);

@@ -374,6 +374,7 @@ mod bodies {
         plain_turn(d, "first", "one");
         let switch = d.command(Command::SwitchModel {
             model: unlisted.clone(),
+            policy: Portability::Reject,
         });
         d.settle();
         assert!(matches!(d.accepted(switch), Accepted::ModelSwitched { .. }));
@@ -396,7 +397,10 @@ mod bodies {
             .inspect_context(None, Some(scripted.clone()))
             .unwrap();
         assert!(matches!(preview.budget, Budget::Known { .. }));
-        let switch = d.command(Command::SwitchModel { model: scripted });
+        let switch = d.command(Command::SwitchModel {
+            model: scripted,
+            policy: Portability::Reject,
+        });
         d.settle();
         assert!(matches!(d.accepted(switch), Accepted::ModelSwitched { .. }));
         plain_turn(d, "third", "three");
@@ -963,6 +967,7 @@ mod bodies {
                 },
                 Command::SelectHead { head: None },
                 Command::SwitchModel {
+                    policy: Portability::Reject,
                     model: ModelRef {
                         provider_instance: "mock".into(),
                         model: "other".into(),
@@ -1306,11 +1311,13 @@ mod bodies {
         plain_turn(d, "first", "one");
         let first_head = d.runtime.snapshot().head().cloned();
         let switch = d.command(Command::SwitchModel {
+            policy: Portability::Reject,
             model: other.clone(),
         });
         d.settle();
         assert!(matches!(d.accepted(switch), Accepted::ModelSwitched { .. }));
         let empty = d.command(Command::SwitchModel {
+            policy: Portability::Reject,
             model: ModelRef {
                 provider_instance: "mock".into(),
                 model: String::new(),
@@ -1327,6 +1334,7 @@ mod bodies {
         // Busy during the turn.
         let busy_head = d.command(Command::SelectHead { head: None });
         let busy_model = d.command(Command::SwitchModel {
+            policy: Portability::Reject,
             model: other.clone(),
         });
         assert_eq!(d.rejected(busy_head), Rejection::Busy);

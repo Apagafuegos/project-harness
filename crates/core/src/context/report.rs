@@ -363,10 +363,38 @@ pub struct PortabilityLoss {
     pub bytes: u64,
 }
 
+/// A required projected part that cannot be omitted by a switch policy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequiredIncompatibility {
+    /// Source entry.
+    pub entry_id: EntryId,
+    /// Source part (tool results name the whole entry).
+    #[serde(flatten)]
+    pub part: Part,
+    /// Unsupported feature, never content or native payload.
+    pub capability: RequiredCapability,
+}
+
+/// Features required by projected dialogue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequiredCapability {
+    /// User image.
+    Image,
+    /// User audio.
+    Audio,
+    /// User file.
+    File,
+    /// Tool call or result.
+    Tools,
+}
+
 /// What switching from the head's model to the preview model would change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewReport {
+    /// Required dialogue the target cannot accept. Neither policy may omit it.
+    pub required_incompatibilities: Vec<RequiredIncompatibility>,
     /// The model in effect at the head.
     pub model_at_head: ModelRef,
     /// The model the projection was built for.

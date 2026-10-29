@@ -7,6 +7,10 @@ cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+# Public adapter fixture contract must also build and run for downstream users.
+cargo clippy -p harness-core --all-targets --features conformance --locked -- -D warnings
+cargo test -p harness-core --features conformance --locked
+RUSTDOCFLAGS="-D warnings" cargo doc -p harness-core --features conformance --no-deps --locked
 if [ "${HARNESS_ALLOW_NO_SANDBOX:-}" = 1 ]; then
     echo "SKIPPED: shell security suite"
 else
