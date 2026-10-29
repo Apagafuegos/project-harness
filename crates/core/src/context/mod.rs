@@ -47,6 +47,7 @@
 
 mod builder;
 mod check;
+pub mod compaction;
 mod config;
 mod estimate;
 mod projection;
@@ -54,8 +55,8 @@ mod report;
 
 pub use builder::{BuiltContext, ContextBuilder, ContextError};
 pub use config::{
-    ConfigurationError, ContextConfig, InputMediaKind, ModelCapabilities, ModelCatalog, ModelInfo,
-    ModelLimits, SessionConfiguration,
+    CompactionConfig, ConfigurationError, ContextConfig, InputMediaKind, ModelCapabilities,
+    ModelCatalog, ModelInfo, ModelLimits, SessionConfiguration,
 };
 pub use estimate::{
     Estimate, EstimateMethod, EstimatorInfo, HeuristicEstimator, MediaKind, TokenEstimator,

@@ -1,0 +1,158 @@
+{
+  "identity": {
+    "session_id": "019a0000-0000-7000-8000-000000000003",
+    "journal_sequence": 12,
+    "head": "019a0000-0000-7000-8000-000000000999",
+    "model": {
+      "provider_instance": "mock-default",
+      "model": "scripted-text"
+    },
+    "configuration": "45d45a33f482f314821bdad4d4bd247bdc883256ce7d35031ed28967bda53f1d",
+    "builder_version": 4,
+    "projection_version": 4
+  },
+  "fingerprint": "b34bfc5a3d5dbc59bcded603850eaf2da141d77705ad6a311b662b2e30775ffb",
+  "instructions": {
+    "status": "included",
+    "count": 1,
+    "estimated_tokens": 5
+  },
+  "included": [
+    {
+      "entry_id": null,
+      "kind": "instructions",
+      "estimated_tokens": 5,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000999",
+      "kind": "summary",
+      "estimated_tokens": 41,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000259",
+      "kind": "user",
+      "estimated_tokens": 7,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-00000000025b",
+      "kind": "assistant",
+      "estimated_tokens": 6,
+      "opaque_bytes": 0,
+      "blocks": [
+        {
+          "part": "block",
+          "index": 0,
+          "kind": "text",
+          "estimated_tokens": 6,
+          "opaque_bytes": 0
+        }
+      ]
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000002bd",
+      "kind": "user",
+      "estimated_tokens": 7,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000002bf",
+      "kind": "assistant",
+      "estimated_tokens": 10,
+      "opaque_bytes": 0,
+      "blocks": [
+        {
+          "part": "block",
+          "index": 0,
+          "kind": "text",
+          "estimated_tokens": 10,
+          "opaque_bytes": 0
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000001f5",
+      "part": "entry",
+      "reason": "covered_by_summary",
+      "summary_id": "019a0000-0000-7000-8000-000000000999"
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000001f7",
+      "part": "entry",
+      "reason": "covered_by_summary",
+      "summary_id": "019a0000-0000-7000-8000-000000000999"
+    }
+  ],
+  "summaries": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000000999",
+      "included": true,
+      "strategy": "rolling_summary",
+      "strategy_version": "1",
+      "covered_entry_ids": [
+        "019a0000-0000-7000-8000-0000000001f5",
+        "019a0000-0000-7000-8000-0000000001f7"
+      ],
+      "supersedes": [],
+      "estimated_tokens": 41
+    }
+  ],
+  "totals": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 5,
+    "estimated_user": 14,
+    "estimated_assistant_text": 16,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 41,
+    "estimated_media": 0,
+    "estimated_total": 76,
+    "opaque_provider_state_bytes": 0
+  },
+  "budget": {
+    "status": "known",
+    "limits": {
+      "context_tokens": 128000,
+      "max_output_tokens": null
+    },
+    "context_tokens": 128000,
+    "deductions": {
+      "output_reserve": 4096,
+      "tool_headroom": 8192,
+      "safety_margin": 4096
+    },
+    "usable_tokens": 111616,
+    "estimated_tokens": 76,
+    "headroom_tokens": 111540,
+    "overflow_tokens": 0,
+    "compaction_trigger_permille": 850,
+    "compaction_threshold_tokens": 94874,
+    "unestimated_opaque_bytes": 0
+  },
+  "reported_usage": null,
+  "portability": [],
+  "preview": null,
+  "flags": {
+    "budget_unknown": false,
+    "overflow": false,
+    "compaction_recommended": false,
+    "preview": false
+  }
+}

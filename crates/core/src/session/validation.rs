@@ -94,16 +94,14 @@ pub(crate) fn record_artifacts(root: &DataRoot, record: &Record, state: &State) 
 }
 
 fn manifest(root: &DataRoot, compaction: &Compaction, state: &State) -> Result<()> {
-    use serde_json::json;
     let bytes = root.read_artifact(&compaction.source_manifest, codec::MAX_LINE_BYTES)?;
     let actual = codec::unique_json(&bytes)?;
-    let references = |ids: &[EntryId]| -> Result<Vec<serde_json::Value>> {
-        ids.iter().map(|id| {
-            let stored = state.entries.get(id).ok_or(StoreError::Invalid("manifest_unknown_entry"))?;
-            Ok(json!({"entry_id":id,"record_checksum":stored.record_checksum,"entry_index":stored.entry_index}))
-        }).collect()
-    };
-    let expected = json!({"covered":references(&compaction.covered_entry_ids)?, "supersedes":references(&compaction.supersedes)?, "configuration_fingerprint":compaction.configuration_fingerprint});
+    let expected = codec::unique_json(&super::manifest::manifest_bytes(
+        &compaction.covered_entry_ids,
+        &compaction.supersedes,
+        &compaction.configuration_fingerprint,
+        |id| state.entries.get(id).map(std::sync::Arc::as_ref),
+    )?)?;
     if actual != expected {
         return Err(StoreError::Invalid("source_manifest_mismatch"));
     }

@@ -2,6 +2,9 @@
 //! fixtures, and journals appended through `JournalStore` for histories the
 //! runtime core does not produce, such as tool calls in cancelled responses.
 
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
+
 use std::{
     fs,
     io::Write,

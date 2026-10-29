@@ -164,6 +164,9 @@ pub enum ConfigurationError {
     /// `inference` must be an object with supported field shapes.
     #[error("invalid_inference")]
     InvalidInference,
+    /// `compaction` must have supported fields and valid bounds.
+    #[error("invalid_compaction")]
+    InvalidCompaction,
 }
 
 impl ConfigurationError {
@@ -175,6 +178,7 @@ impl ConfigurationError {
             Self::NotAnObject => "configuration_not_an_object",
             Self::InvalidInstructions => "invalid_instructions",
             Self::InvalidInference => "invalid_inference",
+            Self::InvalidCompaction => "invalid_compaction",
         }
     }
 }
@@ -188,6 +192,45 @@ pub struct SessionConfiguration {
     bytes: Vec<u8>,
     instructions: Option<Vec<Instruction>>,
     inference: ConfiguredInference,
+    compaction: CompactionConfig,
+}
+
+/// Independently configured summary generation; never defaults to the session model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompactionConfig {
+    /// Required for generation, but not for pure selection.
+    pub summary_model: Option<ModelRef>,
+    /// Maximum estimated summary tokens; defaults to 2048.
+    pub max_summary_tokens: u32,
+    /// Completed turns left verbatim; at least two, plus any current turn.
+    pub retain_recent_turns: usize,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            summary_model: None,
+            max_summary_tokens: 2048,
+            retain_recent_turns: 2,
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Validate programmatically constructed values as well as decoded values.
+    pub fn validate(&self) -> Result<(), ConfigurationError> {
+        if self.retain_recent_turns < 2
+            || self.max_summary_tokens == 0
+            || self
+                .summary_model
+                .as_ref()
+                .is_some_and(|m| m.provider_instance.is_empty() || m.model.is_empty())
+        {
+            return Err(ConfigurationError::InvalidCompaction);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -238,11 +281,20 @@ impl SessionConfiguration {
             }
             Some(_) => return Err(ConfigurationError::InvalidInference),
         };
+        let compaction = match object.remove("compaction") {
+            None => CompactionConfig::default(),
+            Some(value) if value.is_object() => {
+                serde_json::from_value(value).map_err(|_| ConfigurationError::InvalidCompaction)?
+            }
+            Some(_) => return Err(ConfigurationError::InvalidCompaction),
+        };
+        compaction.validate()?;
         Ok(Self {
             artifact,
             bytes: bytes.to_vec(),
             instructions,
             inference,
+            compaction,
         })
     }
 
@@ -272,6 +324,11 @@ impl SessionConfiguration {
             reasoning_effort: self.inference.reasoning_effort,
             provider_options: self.inference.provider_options.clone(),
         }
+    }
+
+    /// Optional compaction policy, with defaults applied.
+    pub fn compaction(&self) -> &CompactionConfig {
+        &self.compaction
     }
 
     /// The `instructions` field, or `None` when it is absent.

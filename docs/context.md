@@ -6,7 +6,9 @@ builder, its report and fingerprint, the core's use of it in `Preparing`,
 [Decision 0006](decisions/0006-context-builder.md) records the design.
 Milestone 4 step 01a adds tool definitions, inference options and validated
 native continuation selection ([decision 0014](decisions/0014-model-seam.md)).
-Summary generation, compaction commands and native wire formats remain planned; see [Not implemented](#not-implemented).
+Milestone 4 step 05 adds preview-only rolling summary generation
+([decision 0019](decisions/0019-compaction.md)). Compaction commands, automatic
+triggering and native wire formats remain planned; see [Not implemented](#not-implemented).
 
 ## Three layers
 
@@ -296,10 +298,49 @@ session it exits at once with a message saying so. `--model` builds a preview.
 is reported as unknown, which is a report, not an error. A journal with an invalid suffix is reported from its valid prefix,
 with a warning on stderr. See [development](development.md#context-inspection).
 
+## Compaction previews
+
+`context::compaction::select_span(snapshot, head, config)` is pure. It selects
+whole completed turns before at least the two newest completed turns and the
+current turn. A rolling span includes prior active summary coverage and explicitly
+supersedes applicable ancestor summaries. Sibling summaries never apply.
+`NotEligible` explains empty history, only recent turns, unresolved work, no new
+dialogue since a summary, a non-completed turn barrier, an unknown head or invalid
+policy. Pins are not implemented and have no exclusion policy yet.
+
+The optional session configuration object is independently shape-checked:
+
+```json
+{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2}}
+```
+
+Without `summary_model`, selection still works but generation returns
+`summary_model_unconfigured`; the session model is never used by default.
+`max_summary_tokens` defaults to 2048 and must be positive; retention defaults
+to 2 and cannot be lower. Malformed compaction configuration fails loading as
+`invalid_compaction`.
+
+`RollingSummary::new(Arc<dyn ModelProvider>)` implements `CompactionStrategy`.
+`propose(CompactionInput, OperationControl)` uses the existing builder's source
+projection and prior summaries, fixed structured-section instructions, no tools
+and no session-owned native state or continuation. Cancellation and deadlines
+return `Cancelled` without a preview. Provider failures, refusals, empty,
+over-budget or malformed summaries are coded errors, not truncated results.
+
+The result is data only: the unchanged proposed compaction entry, exact manifest
+artifact bytes and reference, session-model before/after reports, and bindings
+for head, journal sequence, session model, source and strategy/configuration
+policy fingerprints. `session::compaction_manifest` shares provenance construction
+with storage validation. The hypothetical after snapshot uses the existing
+builder, not a second summary placement algorithm. Its journal sequence stays
+at the base sequence until a future real commit allocates one. Generating a
+preview publishes nothing and cannot write a journal or run a tool.
+
 ## Not implemented
 
-- Summary generation and manual or automatic compaction (Milestone 4). The
-  builder only honors summaries already in the journal.
+- Preview commit commands, stale-preview enforcement, automatic compaction,
+  inspection diffs and full C02 integration (m4-06). The ordinary builder still
+  honors only summaries already present in its supplied snapshot.
 - Native wire formats (Milestone 4) and real tokenizers.
 - Pinning and alternative strategies (Milestone 6).
 
