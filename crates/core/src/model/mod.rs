@@ -24,6 +24,8 @@ use crate::{
 };
 
 mod artifacts;
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
 pub mod scripted;
 pub use artifacts::{ArtifactReadError, ArtifactSource};
 

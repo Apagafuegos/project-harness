@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+conformance = []
+
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
