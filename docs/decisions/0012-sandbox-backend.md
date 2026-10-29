@@ -88,6 +88,42 @@ never starts. Cleanup uncertainty blocks completion rather than claiming a clean
 cancellation. Probe processes use bounded nonblocking capture and a private
 process group; an inherited output writer cannot cause an unbounded thread join.
 
+## Amendment: fast-exit namespace acquisition (S02 flake)
+
+The original CI failure's cause cannot be identified without its result text.
+The sandbox and tool-host status assertions now share a helper that prints code
+and model-facing text. Local Bubblewrap **0.11.1** experiments nevertheless proved
+a `/proc/<init>/ns/pid` teardown race: after a successful `pidfd_open`, lookup
+can fail with EACCES or ESRCH, not only ENOENT. In 3,000 immediate `exit 7`
+runs with acquisition delayed until launcher reaping, 76 EACCES and 5 ESRCH
+lookups were immediately followed by pidfd fdinfo `Pid: -1`. Only these two
+additional lookup errors are treated as disappearance, and only with that
+positive pidfd-retirement evidence; an unreadable fdinfo, live pidfd, identity
+mismatch or unrelated error still fails closed. No unverified pidfd is installed
+or signalled. A retired pidfd proves the process bearing the reported init PID
+was reaped; even if that PID was reused, the original init necessarily died
+first. Launcher reaping, capture draining and existing cleanup waits remain.
+Pure injected-facts tests cover both errors with and without retirement and
+retain refusal of mismatched or missing namespace identities.
+
+Do **not** use `exit-code` alone as proof that init exited: the 0.11.1
+[manual](https://github.com/containers/bubblewrap/blob/v0.11.1/bwrap.xml)
+describes the child command's exit, while
+[`do_init` and `monitor_child`](https://github.com/containers/bubblewrap/blob/v0.11.1/bubblewrap.c)
+show PID 1 writing the foreground command's status to an eventfd after reaping
+it, then continuing to reap descendants. The outer monitor writes JSON status
+from that eventfd without first reaping PID 1 (or, on the SIGCHLD path, after
+reaping PID 1). With the production namespace/session/die-with-parent flags,
+`(sleep 30 &) ; exit 7` reported `exit-code: 7` while init's pidfd was still
+live in 100/100 trials. A direct bwrap exec of a nonexistent executable emitted
+init information but no exit-code, as the setup-finished pipe requires a
+successful exec. Immediate foreground failure cannot itself omit either
+control message or cause a socket, waitpid, capture or spawn error. PID reuse
+remains a theoretical identity-mismatch cause, not an observed one (local
+`pid_max=4194304`). In a separate 1,000-run delayed-acquisition experiment,
+447 pidfd opens returned ESRCH, 172 namespace lookups returned ENOENT, 363
+matched, 17 returned EACCES and one returned ESRCH.
+
 ## Output and results
 
 Separate stdout/stderr reader threads retain a total of at most 64 MiB by

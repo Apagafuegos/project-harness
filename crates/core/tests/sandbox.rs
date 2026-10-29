@@ -20,6 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "sandbox/assertions.rs"]
+mod assertions;
+
 fn backend() -> &'static Sandbox {
     static BACKEND: OnceLock<Sandbox> = OnceLock::new();
     BACKEND.get_or_init(|| {
@@ -157,12 +160,17 @@ fn text(outcome: &ExecutionOutcome) -> String {
 }
 fn succeeded(outcome: &ExecutionOutcome) {
     assert!(serde_json::to_vec(&outcome.content).unwrap().len() <= 32768);
-    assert_eq!(outcome.status, ToolStatus::Succeeded, "{outcome:?}");
+    assertions::assert_status(
+        outcome.status,
+        ToolStatus::Succeeded,
+        outcome.code,
+        &outcome.content,
+    );
     assert_eq!(outcome.code, None);
 }
 fn failed(outcome: &ExecutionOutcome, status: ToolStatus, code: ResultCode) {
     assert!(serde_json::to_vec(&outcome.content).unwrap().len() <= 32768);
-    assert_eq!(outcome.status, status, "{outcome:?}");
+    assertions::assert_status(outcome.status, status, outcome.code, &outcome.content);
     assert_eq!(outcome.code, Some(code), "{outcome:?}");
 }
 fn denied_write(path: &str, errno: i32) {

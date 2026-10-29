@@ -85,10 +85,7 @@ impl Supervisor {
         }
     }
     fn init_gone(&self) -> bool {
-        self.init.as_ref().is_none_or(|fd| {
-            fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd()))
-                .is_ok_and(|text| text.lines().any(|line| line.trim() == "Pid:\t-1"))
-        })
+        self.init.as_ref().is_none_or(pidfd_retired)
     }
     fn poll(&mut self) -> io::Result<()> {
         if !self.reaped {
@@ -231,6 +228,40 @@ fn spawn(sandbox: &Sandbox, spec: &Spec) -> io::Result<(Supervisor, Channel, Cha
     Ok((supervisor, info, status, capture))
 }
 
+fn pidfd_retired(fd: &OwnedFd) -> bool {
+    fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.as_raw_fd()))
+        .is_ok_and(|text| text.lines().any(|line| line.trim() == "Pid:\t-1"))
+}
+
+// Pure facts seam: tests inject teardown errors and retirement without spawning.
+fn check_init_identity(
+    raw: Pid,
+    expected: Option<u64>,
+    observed: io::Result<u64>,
+    retired: impl FnOnce() -> bool,
+) -> io::Result<bool> {
+    match observed {
+        Ok(inode) if Some(inode) == expected => Ok(true),
+        Ok(inode) => Err(io::Error::other(format!(
+            "namespace init identity mismatch: child-pid={}, reported pid-namespace={expected:?}, observed pid-namespace={inode}",
+            raw.as_raw_nonzero(),
+        ))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        // proc namespace lookup can race init teardown with EACCES or ESRCH,
+        // not just ENOENT. Only a reaped pidfd (Pid: -1) proves disappearance;
+        // exit-code alone reports the foreground process, not namespace init.
+        // If the PID was reused, its original init necessarily died already.
+        Err(e)
+            if (e.raw_os_error() == Some(rustix::io::Errno::ACCESS.raw_os_error())
+                || e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()))
+                && retired() =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn acquire_init(info: &Channel) -> io::Result<Option<OwnedFd>> {
     let Some(facts) = info.info() else {
         return Ok(None);
@@ -244,19 +275,12 @@ fn acquire_init(info: &Channel) -> io::Result<Option<OwnedFd>> {
         Ok(fd) => {
             // Bind the pidfd to the reported namespace, not a potentially reused pid.
             use std::os::unix::fs::MetadataExt;
-            match fs::metadata(format!("/proc/{}/ns/pid", raw.as_raw_nonzero())) {
-                Ok(metadata) if Some(metadata.ino()) == facts["pid-namespace"].as_u64() => {
-                    Ok(Some(fd))
-                }
-                Ok(metadata) => Err(io::Error::other(format!(
-                    "namespace init identity mismatch: child-pid={}, reported pid-namespace={:?}, observed pid-namespace={}",
-                    raw.as_raw_nonzero(),
-                    facts["pid-namespace"].as_u64(),
-                    metadata.ino()
-                ))),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e),
-            }
+            let observed = fs::metadata(format!("/proc/{}/ns/pid", raw.as_raw_nonzero()))
+                .map(|metadata| metadata.ino());
+            let live = check_init_identity(raw, facts["pid-namespace"].as_u64(), observed, || {
+                pidfd_retired(&fd)
+            })?;
+            Ok(live.then_some(fd))
         }
         Err(rustix::io::Errno::SRCH) => Ok(None),
         Err(e) => Err(e.into()),
@@ -435,5 +459,55 @@ pub(super) fn run(
         duration_ms: Some(start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         output_truncated: overflow || elided,
         artifacts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_proc_teardown_requires_retired_pidfd() {
+        let pid = Pid::from_raw(123).unwrap();
+        for errno in [13, 3] {
+            // EACCES and ESRCH during /proc namespace teardown.
+            for retired in [false, true] {
+                let result = check_init_identity(
+                    pid,
+                    Some(42),
+                    Err(io::Error::from_raw_os_error(errno)),
+                    || retired,
+                );
+                if retired {
+                    assert!(!result.unwrap(), "retired init must not be signalled");
+                } else {
+                    assert_eq!(result.unwrap_err().raw_os_error(), Some(errno));
+                }
+            }
+        }
+        // Retirement does not hide unrelated control/host failures, even EPERM
+        // (which shares ErrorKind::PermissionDenied with the observed EACCES).
+        for error in [io::Error::other("I/O"), io::Error::from_raw_os_error(1)] {
+            assert!(check_init_identity(pid, Some(42), Err(error), || true).is_err());
+        }
+    }
+
+    #[test]
+    fn init_identity_mismatch_is_not_exit_evidence() {
+        let pid = Pid::from_raw(123).unwrap();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mut status = Channel::new(socket).unwrap();
+        status.bytes = b"{\"exit-code\":7}\n".to_vec();
+        assert_eq!(status.exit_code(), Some(7));
+        for retired in [false, true] {
+            let error = check_init_identity(pid, Some(42), Ok(99), || retired).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("namespace init identity mismatch")
+            );
+        }
+        assert!(check_init_identity(pid, None, Ok(42), || true).is_err());
+        assert!(check_init_identity(pid, Some(42), Ok(42), || false).unwrap());
     }
 }

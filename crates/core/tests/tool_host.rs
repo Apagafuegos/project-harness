@@ -19,6 +19,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "sandbox/assertions.rs"]
+mod assertions;
+
+fn assert_status(result: &ToolResult, expected: ToolStatus) {
+    assertions::assert_status(
+        result.status,
+        expected,
+        &result.metadata.code,
+        &result.content,
+    );
+}
+
 fn policy(paths: &[&str]) -> Vec<u8> {
     serde_json::to_vec(
         &json!({"policy_revision":"p1", "enabled_tools":["read","write","edit","bash"],
@@ -278,7 +290,7 @@ async fn s02_edit_approval_and_remember_preserve_policy() {
     approve(&handle, true).await;
     let view = wait(&handle, idle).await;
     let result = results(&view)[0];
-    assert_eq!(result.status, ToolStatus::Succeeded);
+    assert_status(result, ToolStatus::Succeeded);
     assert!(text(result).contains(Digest::of(b"after\n").as_str()));
     let remembered: Value = serde_json::from_slice(
         &f.root
@@ -311,7 +323,7 @@ async fn s02_bash_approval_publishes_verified_capture() {
         "hi\n"
     );
     let result = results(&view)[0];
-    assert_eq!(result.status, ToolStatus::Succeeded);
+    assert_status(result, ToolStatus::Succeeded);
     assert!(text(result).contains("done"));
     let capture = &result.metadata.artifacts[0];
     let bytes = f.root.read_artifact(capture, 64 * 1024 * 1024).unwrap();
@@ -332,7 +344,7 @@ async fn s02_bash_protected_and_git_writes_fail_unchanged() {
                 json!({"command":format!("echo changed > {target}")}),
             )
             .await;
-        assert_eq!(results(&view)[0].status, ToolStatus::Failed);
+        assert_status(results(&view)[0], ToolStatus::Failed);
         assert_eq!(
             fs::read(f.host.workspace_root.join(target)).unwrap(),
             original
@@ -354,7 +366,7 @@ async fn s02_bash_network_is_denied() {
             json!({"command":format!("echo leak > /dev/tcp/127.0.0.1/{port}")}),
         )
         .await;
-    assert_eq!(results(&view)[0].status, ToolStatus::Failed);
+    assert_status(results(&view)[0], ToolStatus::Failed);
     assert!(listener.accept().is_err());
     handle.shutdown().await;
 }
@@ -364,7 +376,7 @@ async fn s02_bash_network_is_denied() {
 async fn s02_bash_timeout_cleans_namespace() {
     let f = Fixture::new(&[]);
     let (handle, view) = f.run("bash", json!({"command":format!("{NAMESPACE}trap '' TERM; (trap '' TERM; sleep 30 & wait) & wait"), "timeout_ms":200})).await;
-    assert_eq!(results(&view)[0].status, ToolStatus::TimedOut);
+    assert_status(results(&view)[0], ToolStatus::TimedOut);
     assert_eq!(results(&view)[0].metadata.code.as_deref(), Some("timeout"));
     assert_namespace_gone(&f.host.workspace_root).await;
     handle.shutdown().await;
@@ -383,7 +395,7 @@ async fn s02_cancel_cleans_namespace_and_accepts_next_turn() {
     let started = Instant::now();
     handle.command(Command::Cancel { turn_id }).await.unwrap();
     let view = wait(&handle, idle).await;
-    assert_eq!(results(&view)[0].status, ToolStatus::Cancelled);
+    assert_status(results(&view)[0], ToolStatus::Cancelled);
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "kill grace plus scheduling allowance"
@@ -415,7 +427,7 @@ async fn s02_drop_is_graceful_cancellation_without_uncertainty() {
     let handle = f.open(Arc::new(ScriptedProvider::new([]))).await;
     let view = wait(&handle, idle).await;
     assert!(view.awaiting.is_empty());
-    assert_eq!(results(&view)[0].status, ToolStatus::Cancelled);
+    assert_status(results(&view)[0], ToolStatus::Cancelled);
     assert!(
         !view
             .snapshot
@@ -649,7 +661,7 @@ async fn s02_multimegabyte_capture_uses_append_path_not_upload_limit() {
     approve(&handle, false).await;
     let view = wait(&handle, idle).await;
     let result = results(&view)[0];
-    assert_eq!(result.status, ToolStatus::Succeeded);
+    assert_status(result, ToolStatus::Succeeded);
     assert!(result.metadata.output_truncated);
     let capture = &result.metadata.artifacts[0];
     let bytes = f.root.read_artifact(capture, 64 * 1024 * 1024).unwrap();
