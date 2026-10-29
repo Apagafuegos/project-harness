@@ -6,7 +6,8 @@
 
 use super::pipeline::{configuration, outcome};
 use super::*;
-use crate::context::{ContextBuilder, ModelLimits};
+use crate::context::{ContextBuilder, ContextItem, ModelLimits};
+use crate::model::NativeContinuation;
 use std::sync::atomic::Ordering;
 
 /// Seeds run by default. Set `RUNTIME_SEED` to rerun one seed, or
@@ -93,6 +94,11 @@ fn provider_event(rng: &mut Rng) -> ProviderEvent {
                 reasoning_tokens: rng.chance(5).then_some(u64::MAX),
             },
         },
+        15 => ProviderEvent::ProviderState {
+            block_index,
+            schema: "mock.state.v1".into(),
+            payload: vec![rng.below(256) as u8; rng.below(32) as usize],
+        },
         _ => {
             let outcome = *rng.pick(&[
                 ProviderOutcome::Completed,
@@ -123,6 +129,10 @@ fn provider_event(rng: &mut Rng) -> ProviderEvent {
                 outcome,
                 finish_reason,
                 error,
+                continuation: rng.chance(40).then(|| NativeContinuation {
+                    schema: "mock.continuation.v1".into(),
+                    payload: vec![1, 2, 3],
+                }),
             }
         }
     }
@@ -200,10 +210,24 @@ fn script(rng: &mut Rng) -> std::collections::VecDeque<ProviderEvent> {
             },
         });
     }
+    if rng.chance(50) {
+        events.push_back(ProviderEvent::ProviderState {
+            block_index: 8,
+            schema: "mock.state.v1".into(),
+            payload: vec![rng.below(256) as u8; 16],
+        });
+    }
+    let continue_native = rng.chance(50);
     let finished = |outcome, finish_reason, error| ProviderEvent::Finished {
         outcome,
         finish_reason,
         error,
+        continuation: (continue_native && outcome == ProviderOutcome::Completed).then(|| {
+            NativeContinuation {
+                schema: "mock.continuation.v1".into(),
+                payload: b"handle".to_vec(),
+            }
+        }),
     };
     match ending {
         0..=39 => events.push_back(finished(
@@ -738,7 +762,14 @@ fn check_contexts(finished: &Finished, rng: &mut Rng) {
                         .find(|v| v.event_seq >= event.seq)
                         .unwrap();
                     let configuration = &configurations[&view.snapshot.configuration().sha256];
-                    let builder = ContextBuilder::new(&segment.config.context, configuration);
+                    let definitions = crate::tools::PolicySnapshot::parse(
+                        configuration.artifact().clone(),
+                        configuration.bytes(),
+                    )
+                    .map(|p| segment.tools.definitions(&p))
+                    .unwrap_or_default();
+                    let builder = ContextBuilder::new(&segment.config.context, configuration)
+                        .with_tools(&definitions);
                     let rebuilt = builder.build(&view.snapshot, Some(head), None).unwrap();
                     assert_eq!(
                         &rebuilt.projection.fingerprint, fingerprint,
@@ -760,9 +791,14 @@ fn check_contexts(finished: &Finished, rng: &mut Rng) {
     }
     for effect in finished.segments.iter().flat_map(|s| &s.effects) {
         if let Effect::StartInference {
-            head, fingerprint, ..
+            head,
+            fingerprint,
+            input,
+            ..
         } = effect
         {
+            assert_native_owners(input);
+            assert_eq!(crate::context::fingerprint(input), *fingerprint);
             let flags = built_contexts
                 .get(&(head.clone(), fingerprint.clone()))
                 .unwrap();
@@ -781,9 +817,11 @@ fn check_contexts(finished: &Finished, rng: &mut Rng) {
     };
     let built = builder.build(snapshot, head.as_ref(), None).unwrap();
     assert_eq!(builder.build(snapshot, head.as_ref(), None).unwrap(), built);
-    builder
+    assert_native_owners(&built.projection.input);
+    let switched = builder
         .build(snapshot, head.as_ref(), Some(&other))
         .unwrap();
+    assert_native_owners(&switched.projection.input);
 }
 
 /// Bias part of each known-budget run toward the new gates. Purely random
@@ -897,6 +935,7 @@ fn tool_interleavings(d: &mut Driver, rng: &mut Rng, seed: u64) {
                     outcome: ProviderOutcome::Completed,
                     finish_reason: Some(FinishReason::Stop),
                     error: None,
+                    continuation: None,
                 });
             }
             phase => panic!("tool-biased run stalled in {phase:?}"),
@@ -911,6 +950,7 @@ fn run_seed(seed: u64) -> Finished {
     let mut config = RuntimeConfig {
         max_inferences_per_turn: 1 + rng.below(3) as u32,
         max_partial_bytes: *rng.pick(&[600, 4_000, 1 << 20]),
+        inference_deadline: rng.chance(30).then(|| std::time::Duration::from_secs(10)),
         ..RuntimeConfig::default()
     };
     // A separate generator, so the interleavings of each seed are unchanged.
@@ -1049,5 +1089,23 @@ fn randomized_interleavings_keep_storage_and_events_consistent() {
     }
     for (key, n) in &coverage {
         eprintln!("{n:>7}  {key}");
+    }
+}
+
+fn assert_native_owners(input: &crate::model::ModelInput) {
+    if let Some(continuation) = &input.continuation {
+        assert_eq!(
+            continuation.owner, input.model,
+            "continuation crossed owners"
+        );
+    }
+    for item in &input.items {
+        if let ContextItem::Assistant { content, .. } = item {
+            for block in content {
+                if let ContentBlock::ProviderState { owner, .. } = block {
+                    assert_eq!(owner, &input.model, "native state crossed owners");
+                }
+            }
+        }
     }
 }

@@ -176,6 +176,10 @@ pub enum ExclusionReason {
     ReasoningDisplayOnly,
     /// Provider state or a continuation owned by another model.
     ProviderStateNotPortable,
+    /// A continuation from a response other than the last included assistant.
+    ContinuationNotLatest,
+    /// The current rebuilt input at the response parent no longer matches.
+    ContinuationPrefixMismatch,
     /// A `model_changed` entry; it selects the model and is not dialogue.
     ModelChangeMarker,
     /// A response with no blocks and no continuation: nothing to replay.

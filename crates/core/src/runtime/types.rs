@@ -15,9 +15,7 @@ pub use crate::tools::RecoveryHint;
 
 use super::view::Phase;
 use crate::session::{ApprovalId, Decision, ResultCode};
-use crate::tools::{
-    AuthorizedOperation, ExecutionOutcome, Plan, Refusal, ToolDefinition, ValidatedOperation,
-};
+use crate::tools::{AuthorizedOperation, ExecutionOutcome, Plan, Refusal, ValidatedOperation};
 
 macro_rules! local_id {
     ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {$(
@@ -92,6 +90,8 @@ pub struct RuntimeConfig {
     /// after every event; on expiry the stream is released and the response
     /// recorded as interrupted, failing the turn with `provider_stalled`.
     pub provider_idle_timeout: Duration,
+    /// Maximum elapsed time per inference, including setup; no deadline by default.
+    pub inference_deadline: Option<Duration>,
     /// Model limits, budget deductions and estimator of the context builder.
     /// The default catalog is empty, and a turn whose model has no context
     /// limit fails with `context_budget_unknown`.
@@ -109,6 +109,7 @@ impl Default for RuntimeConfig {
             max_user_bytes: 1024 * 1024,
             cancel_grace: Duration::from_secs(2),
             provider_idle_timeout: Duration::from_secs(300),
+            inference_deadline: None,
             context: ContextConfig::default(),
         }
     }
@@ -451,8 +452,6 @@ pub enum Effect {
         head: EntryId,
         /// The projection built in `Preparing`, for the model at that head.
         input: ModelInput,
-        /// Enabled, available tools in registry order; outside the projection.
-        tools: Vec<ToolDefinition>,
         /// The projection's fingerprint.
         fingerprint: Digest,
         /// Identity the assistant entry will carry.
@@ -692,6 +691,17 @@ pub enum EventKind {
         inference: InferenceId,
         /// Response-local block.
         block_index: u32,
+    },
+    /// Native block metadata only. Payload bytes remain private to the core.
+    ProviderState {
+        /// Stream identity.
+        inference: InferenceId,
+        /// Fresh response-local block index.
+        block_index: u32,
+        /// Provider schema, not display text.
+        schema: String,
+        /// Opaque payload length, not payload bytes.
+        bytes: usize,
     },
     /// Cumulative usage replaced.
     UsageUpdated {

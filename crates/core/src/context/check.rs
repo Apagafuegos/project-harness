@@ -11,10 +11,21 @@ use crate::session::{CallId, ContentBlock, EntryId, EntryPayload, StoredEntry};
 
 pub(super) fn check(
     branch: &[&StoredEntry],
-    items: &[ContextItem],
+    input: &crate::model::ModelInput,
     report: &ContextReport,
 ) -> Result<(), &'static str> {
+    let items = &input.items;
     agrees(items, report)?;
+    if report
+        .included
+        .iter()
+        .flat_map(|r| &r.blocks)
+        .filter(|b| b.part == Part::Continuation)
+        .count()
+        != usize::from(input.continuation.is_some())
+    {
+        return Err("continuation_disagrees_with_projection");
+    }
     complete(branch, report)?;
     paired(items)
 }
@@ -49,19 +60,13 @@ fn agrees(items: &[ContextItem], report: &ContextReport) -> Result<(), &'static 
         if provenance != record.provenance {
             return Err("report_disagrees_with_projection");
         }
-        if let ContextItem::Assistant {
-            content,
-            continuation,
-            ..
-        } = item
-        {
+        if let ContextItem::Assistant { content, .. } = item {
             let blocks = record
                 .blocks
                 .iter()
                 .filter(|b| matches!(b.part, Part::Block { .. }))
                 .count();
-            let continued = record.blocks.iter().any(|b| b.part == Part::Continuation);
-            if blocks != content.len() || continued != continuation.is_some() {
+            if blocks != content.len() {
                 return Err("report_disagrees_with_projection");
             }
             if record.blocks.is_empty() {

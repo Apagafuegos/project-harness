@@ -28,6 +28,7 @@ pub(super) fn finish(
         outcome,
         finish_reason: reason,
         error: None,
+        continuation: None,
     })
 }
 pub(super) fn stop(d: &mut Driver) -> Vec<Effect> {
@@ -608,6 +609,7 @@ mod bodies {
                 provider_code: None,
                 retry_after_ms: None,
             }),
+            continuation: None,
         });
         d.settle();
         begin(d, "user cancels");
@@ -1397,6 +1399,7 @@ mod bodies {
                 provider_code: Some("429".into()),
                 retry_after_ms: Some(1000),
             }),
+            continuation: None,
         });
         d.settle();
         assert_eq!(outcome(d, &turn_of(d, request)), Some(TurnOutcome::Failed));

@@ -4,15 +4,16 @@ Status: Milestone 2, step 5 is implemented as `harness_core::context`: a pure
 builder, its report and fingerprint, the core's use of it in `Preparing`,
 `SessionHandle::inspect_context` and the read-only `harness context` command.
 [Decision 0006](decisions/0006-context-builder.md) records the design.
-Summary generation, compaction commands, tool definitions, inference options
-and native wire formats are not implemented; see [Not implemented](#not-implemented).
+Milestone 4 step 01a adds tool definitions, inference options and validated
+native continuation selection ([decision 0014](decisions/0014-model-seam.md)).
+Summary generation, compaction commands and native wire formats remain planned; see [Not implemented](#not-implemented).
 
 ## Three layers
 
 | Layer | What it is | Where it lives |
 | --- | --- | --- |
 | History | The append-only journal. Never changes. | `JournalStore`, `SessionSnapshot` |
-| Projection | What the model should see, derived purely from one branch of history | `Projection`, `ModelInput { model, items }` |
+| Projection | What the model should see, derived purely from one branch of history | `Projection`, `ModelInput { model, items, tools, options, continuation }` |
 | Provider request | The projection in one provider's wire format | Native adapters, Milestone 4 |
 
 `ContextBuilder::build` is the only path from history to anything a provider
@@ -21,7 +22,7 @@ report cannot disagree with the projection. Neither is persisted: both can
 always be rebuilt from history.
 
 ```rust,ignore
-let builder = ContextBuilder::new(&config, &session_configuration);
+let builder = ContextBuilder::new(&config, &session_configuration).with_tools(&definitions);
 let built = builder.build(&snapshot, head, model_override)?; // BuiltContext { projection, report }
 ```
 
@@ -51,7 +52,10 @@ the closed enum `ExclusionReason`.
 | Tool-call block with a result on the branch | Included | — |
 | Tool-call block without a result on the branch | Excluded | `orphan_tool_call` |
 | Reasoning-summary block | Excluded; display-only, never replayed | `reasoning_display_only` |
-| Provider-state block or continuation owned by the projection's model | Included, attached to its response | — |
+| Provider-state block owned by the projection's model | Included in its response | — |
+| Continuation owned by the projection model, from the last included assistant, matching its rebuilt parent prefix | Included in `ModelInput.continuation` | — |
+| Earlier continuation | Excluded | `continuation_not_latest` |
+| Continuation whose current rebuilt parent prefix differs | Excluded | `continuation_prefix_mismatch` |
 | The same, owned by another model | Excluded, listed under `portability` | `provider_state_not_portable` |
 | Assistant response, failed | Excluded, with all its parts | `failed_response` |
 | Tool result | Included as a `tool_result` item with its `provenance`, directly after its call | — |
@@ -84,8 +88,8 @@ Notes:
 - **No empty items.** A response whose every part is excluded, for example a
   cancelled response holding only reasoning and an unanswered call, is no item:
   its part exclusions account for it. A response with no parts at all is
-  excluded as `empty_response`. An `assistant` item always has content or a
-  continuation.
+  excluded as `empty_response`. An `assistant` item has content or is the source of the valid selected
+  request-level continuation. Invalid continuation-only assistants are omitted.
 - **Provenance.** A `tool_result` item carries the result's `provenance`:
   `executor`, `runtime`, `user_observed` or `user_acknowledged_unknown`. A
   result the user supplied while resolving an uncertain invocation (see
@@ -108,7 +112,8 @@ Notes:
 The session's configuration artifact may hold an `instructions` field: an
 ordered array of `{"level": "system" | "developer", "text": "..."}`, as in
 RFC-001 section 3.1. The artifact must be one JSON object without duplicate
-keys; other fields are ignored here. `SessionConfiguration::load` reads and
+keys. The builder also parses `inference` as described below; unrelated fields
+are ignored here. `SessionConfiguration::load` reads and
 decodes it, which is I/O the builder never performs. The storage worker does it
 once when a session opens, and `harness context` does it under its shared lock.
 An open fails with `invalid_instructions` or `configuration_not_an_object`
@@ -120,6 +125,31 @@ estimated and counted like any other. The report's `instructions` section is
 for `[]` (the RFC-001 fixtures), or `{"status": "absent"}` when the field is
 missing. The builder refuses a `SessionConfiguration` decoded from any artifact
 other than the snapshot's current configuration (`configuration_mismatch`).
+
+## Tools, options and continuation
+
+The runtime supplies enabled and backend-available definitions through
+`ContextBuilder::with_tools`; callers inspecting outside the runtime must supply
+the corresponding definitions themselves. Empty is the default. The same
+input is fingerprinted and sent; definitions are no longer a separate effect
+field. Tool headroom still accounts for definition/wire overhead.
+
+The optional session `inference` object accepts `reasoning_effort`
+(`low | medium | high`, nullable/optional) and `provider_options`, an object
+mapping nonempty provider namespaces to objects. Malformed/unknown fields fail
+with `invalid_inference`. `max_output_tokens` is not independently configured:
+it equals `ContextConfig.output_reserve`. Namespaced options pass through intact;
+adapters must reject unsupported required options, never silently drop them.
+
+The selected continuation is request-level, not attached to assistant items.
+The builder rebuilds the last included assistant response's parent under current
+instructions, tools, options and model, reproducing prior valid
+continuation-only assistants, and
+compares that fingerprint to `input_fingerprint`. Only a match with the same
+owner is replayed. A later assistant without a handle prevents fallback. A
+changed branch, instructions, tools, options or model can therefore invalidate
+replay. Reports explain omissions with the closed reasons above; covered or
+failed responses keep their existing whole-entry exclusion.
 
 ## Budget and estimates
 
@@ -206,25 +236,27 @@ response, and every result has its call. A violation is
 ## Fingerprint
 
 `fingerprint = SHA-256` of the canonical JSON of
-`{"items": [...], "model": {...}, "projection_version": N}`. Canonical means the
+`{"items": [...], "model": {...}, "tools": [...], "options": {...}, "projection_version": N}`. Canonical means the
 compact `serde_json` serialization of these types: struct fields in declared
-order, enum tags first, map keys sorted bytewise, no whitespace. Map keys (only
-tool-call arguments) are sorted because `serde_json`'s `preserve_order` feature
+order, enum tags first, map keys sorted bytewise, no whitespace. Map keys (including
+tool-call arguments, tool schemas and provider options) are sorted because `serde_json`'s `preserve_order` feature
 is off; a test fails if it is ever enabled. Items carry entry IDs, so identical
 text on different branches has different fingerprints.
 
-Only the projection is hashed, never the report, response IDs or request
-options. The same snapshot branch, head, model and configuration give the same
-fingerprint on any machine and after any reopen. Entries are immutable, so a
-later snapshot rebuilds the same fingerprint for an earlier head.
+Only the logical projection is hashed, never the report, response IDs,
+continuation or deadline. Tools and inference options are hashed. The same snapshot branch, head, model and configuration give the same
+fingerprint on any machine and after any reopen. Entries are immutable; rebuilding an earlier head gives the same fingerprint
+when current instructions, tools and options are unchanged.
 
 **`PROJECTION_VERSION` policy.** It is hashed into every fingerprint. Bump it
 whenever an inclusion rule, an item type or its serialization changes, so old
 and new fingerprints can never collide. `BUILDER_VERSION` versions the report
-and checks; bump it when report fields change. Both are 3. Version 2 omits
+and checks; bump it when report fields change. Both are 4. Version 2 omits
 responses with nothing to project, and adds `empty_response`,
 `effective_summary` and the `budget_unknown` flag. Version 3 adds
-`provenance` to `tool_result` items and to their report records.
+`provenance` to `tool_result` items and to their report records. Version 4
+adds tools/options to the fingerprint and selects a single validated continuation
+outside assistant items; builder version 4 checks/accounts for that selection.
 
 ## Integration
 
@@ -268,9 +300,6 @@ with a warning on stderr. See [development](development.md#context-inspection).
 
 - Summary generation and manual or automatic compaction (Milestone 4). The
   builder only honors summaries already in the journal.
-- Tool definitions, inference options and continuation selection in
-  `ModelInput`. Each response's own continuation is attached to its item;
-  choosing which one a request uses belongs to native adapters.
 - Native wire formats (Milestone 4) and real tokenizers.
 - Pinning and alternative strategies (Milestone 6).
 

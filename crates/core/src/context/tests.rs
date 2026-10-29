@@ -275,7 +275,7 @@ fn fixture_reports_are_identical_after_reopening_and_across_data_roots() {
         );
         assert_eq!(
             built.projection.fingerprint,
-            fingerprint(&built.projection.input.model, &built.projection.input.items)
+            fingerprint(&built.projection.input)
         );
     }
 }
@@ -285,16 +285,19 @@ fn projection_version_is_part_of_the_fingerprint() {
     let built = Fixture::new("compaction").build(None);
     let input = &built.projection.input;
     assert_eq!(
-        fingerprint_with_version(PROJECTION_VERSION, &input.model, &input.items),
+        fingerprint_with_version(PROJECTION_VERSION, input),
         built.projection.fingerprint
     );
     assert_ne!(
-        fingerprint_with_version(PROJECTION_VERSION + 1, &input.model, &input.items),
+        fingerprint_with_version(PROJECTION_VERSION + 1, input),
         built.projection.fingerprint
     );
     // The model is hashed too.
     assert_ne!(
-        fingerprint(&other(), &input.items),
+        fingerprint(&crate::model::ModelInput {
+            model: other(),
+            ..input.clone()
+        }),
         built.projection.fingerprint
     );
 }
@@ -322,21 +325,31 @@ fn canonical_projection_bytes_are_compact_with_sorted_argument_keys() {
             arguments,
             provider_call_id: None,
         }],
-        continuation: None,
     }];
-    let bytes = super::projection::canonical_bytes(&mock(), &items);
+    let input = crate::model::ModelInput {
+        model: mock(),
+        items: items.to_vec(),
+        tools: vec![],
+        options: crate::model::InferenceOptions {
+            max_output_tokens: 4096,
+            reasoning_effort: None,
+            provider_options: Default::default(),
+        },
+        continuation: None,
+    };
+    let bytes = super::projection::canonical_bytes(&input);
     assert_eq!(
         String::from_utf8(bytes.clone()).unwrap(),
         concat!(
             r#"{"items":[{"kind":"assistant","entry_id":"019a0000-0000-7000-8000-000000000065","#,
             r#""outcome":"completed","content":[{"kind":"tool_call","#,
             r#""call_id":"019a0000-0000-7000-8000-000000000066","name":"read","#,
-            r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}],"#,
-            r#""continuation":null}],"model":{"provider_instance":"mock","model":"scripted"},"#,
-            r#""projection_version":3}"#
+            r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}]}],"#,
+            r#""model":{"provider_instance":"mock","model":"scripted"},"tools":[],"#,
+            r#""options":{"max_output_tokens":4096,"reasoning_effort":null,"provider_options":{}},"projection_version":4}"#
         )
     );
-    assert_eq!(fingerprint(&mock(), &items), Digest::of(&bytes));
+    assert_eq!(fingerprint(&input), Digest::of(&bytes));
 }
 
 // ----- journals appended through storage -------------------------------------
@@ -516,7 +529,9 @@ impl Journal {
             owner: model.clone(),
             schema: "mock.continuation.v1".into(),
             artifact,
-            input_fingerprint: Digest::of(b"prefix"),
+            input_fingerprint: response
+                .input_fingerprint
+                .unwrap_or_else(|| self.build().projection.fingerprint),
         });
         self.append(
             vec![(
@@ -694,6 +709,7 @@ struct Response {
     content: Vec<ContentBlock>,
     usage: Option<Usage>,
     continuation: Option<ArtifactRef>,
+    input_fingerprint: Option<Digest>,
 }
 
 impl Response {
@@ -707,6 +723,7 @@ impl Response {
             content,
             usage: None,
             continuation: None,
+            input_fingerprint: None,
         }
     }
     fn finish(self, finish: FinishReason) -> Self {
@@ -846,16 +863,15 @@ fn responses_with_nothing_to_project_are_accounted_for_without_an_item() {
     });
     let snapshot = journal.snapshot();
     let branch = snapshot.ancestry(snapshot.head()).unwrap();
-    let items = &built.projection.input.items;
     assert_eq!(
-        super::check::check(&branch, items, &twice),
+        super::check::check(&branch, &built.projection.input, &twice),
         Err("duplicate_decision")
     );
     // Dropping one part decision leaves the response incompletely decided.
     let mut partial = built.report.clone();
     partial.excluded.pop();
     assert_eq!(
-        super::check::check(&branch, items, &partial),
+        super::check::check(&branch, &built.projection.input, &partial),
         Err("incomplete_part_decisions")
     );
 }
@@ -955,16 +971,11 @@ fn provider_state_is_owner_scoped_and_previews_show_what_a_switch_loses() {
     // Included for its own model, attached to its response, counted in bytes.
     let own = journal.build();
     assert!(own.report.excluded.is_empty() && own.report.portability.is_empty());
-    let ContextItem::Assistant {
-        content,
-        continuation: attached,
-        ..
-    } = &own.projection.input.items[1]
-    else {
+    let ContextItem::Assistant { content, .. } = &own.projection.input.items[1] else {
         panic!("no assistant item");
     };
     assert_eq!(content.len(), 2);
-    assert!(attached.is_some());
+    assert!(own.projection.input.continuation.is_some());
     assert_eq!(own.report.totals.opaque_provider_state_bytes, opaque);
     assert_eq!(own.report.included[1].opaque_bytes, opaque);
     assert!(matches!(
@@ -1483,8 +1494,16 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
     let branch = snapshot.ancestry(snapshot.head()).unwrap();
     let built = journal.build();
     let items = &built.projection.input.items;
-    let check =
-        |items: &[ContextItem], report: &ContextReport| super::check::check(&branch, items, report);
+    let check = |items: &[ContextItem], report: &ContextReport| {
+        super::check::check(
+            &branch,
+            &crate::model::ModelInput {
+                items: items.to_vec(),
+                ..built.projection.input.clone()
+            },
+            report,
+        )
+    };
     assert_eq!(check(items, &built.report), Ok(()));
 
     let mut dropped = built.report.clone();
@@ -1626,11 +1645,11 @@ fn context_build_benchmark() {
     });
     let input = &built.projection.input;
     let hashing = time(&|| {
-        std::hint::black_box(fingerprint(&input.model, &input.items));
+        std::hint::black_box(fingerprint(input));
     });
     let branch_entries = snapshot.ancestry(snapshot.head()).unwrap();
     let checking = time(&|| {
-        super::check::check(&branch_entries, &input.items, &built.report).unwrap();
+        super::check::check(&branch_entries, input, &built.report).unwrap();
     });
     eprintln!(
         "context build over {branch} entries: median {:?}, min {:?}, max {:?} \
@@ -1643,5 +1662,289 @@ fn context_build_benchmark() {
         built.report.included.len(),
         built.report.excluded.len(),
         built.report.totals.estimated_total,
+    );
+}
+
+// M4: continuation validity is a logical-input rule, independent of I/O.
+fn native_journal() -> (Journal, EntryId) {
+    let mut journal = Journal::new();
+    journal.user(vec![text("hello")]);
+    let artifact = journal.root.put_artifact(b"continuation").unwrap();
+    let response = journal.respond(Response {
+        continuation: Some(artifact),
+        ..Response::completed(vec![text("answer")])
+    });
+    assert!(journal.build().projection.input.continuation.is_some());
+    (journal, response)
+}
+
+fn replace_configuration(journal: &mut Journal, bytes: &[u8]) {
+    let artifact = journal.root.put_artifact(bytes).unwrap();
+    journal.append(
+        vec![],
+        vec![JournalEvent::ConfigurationChanged(ConfigurationChanged {
+            configuration: artifact.clone(),
+            policy_revision: "changed".into(),
+        })],
+    );
+    journal.configuration = SessionConfiguration::load(&journal.root, &artifact).unwrap();
+}
+
+fn prefix_mismatch(built: &BuiltContext) {
+    assert!(built.projection.input.continuation.is_none());
+    assert!(
+        built
+            .report
+            .excluded
+            .iter()
+            .any(|e| e.part == Part::Continuation
+                && e.reason == ExclusionReason::ContinuationPrefixMismatch)
+    );
+}
+
+#[test]
+fn continuation_changed_instructions_invalidates_rebuilt_prefix() {
+    let (mut journal, _) = native_journal();
+    replace_configuration(
+        &mut journal,
+        br#"{"instructions":[{"level":"system","text":"new rules"}]}"#,
+    );
+    prefix_mismatch(&journal.build());
+}
+
+#[test]
+fn continuation_changed_tool_set_invalidates_rebuilt_prefix() {
+    let (journal, _) = native_journal();
+    let tools: Vec<_> = crate::tools::Registry::builtin()
+        .definitions()
+        .cloned()
+        .collect();
+    assert!(!tools.is_empty());
+    let snapshot = journal.snapshot();
+    let config = ContextConfig::default();
+    let built = ContextBuilder::new(&config, &journal.configuration)
+        .with_tools(&tools)
+        .build(&snapshot, snapshot.head(), None)
+        .unwrap();
+    assert_eq!(built.projection.input.tools, tools);
+    prefix_mismatch(&built);
+}
+
+#[test]
+fn continuation_changed_options_invalidates_rebuilt_prefix() {
+    for bytes in [
+        br#"{"inference":{"reasoning_effort":"high"}}"#.as_slice(),
+        br#"{"inference":{"provider_options":{"mock":{"required_mode":"native"}}}}"#,
+    ] {
+        let (mut journal, _) = native_journal();
+        replace_configuration(&mut journal, bytes);
+        prefix_mismatch(&journal.build());
+    }
+    let (journal, _) = native_journal();
+    let config = ContextConfig {
+        output_reserve: 123,
+        ..ContextConfig::default()
+    };
+    let built = journal
+        .build_with(&config, journal.head().as_ref(), None)
+        .unwrap();
+    assert_eq!(built.projection.input.options.max_output_tokens, 123);
+    prefix_mismatch(&built);
+}
+
+#[test]
+fn continuation_branch_change_rejects_a_handle_bound_to_another_prefix() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("branch A")]);
+    let fingerprint_a = journal.build().projection.fingerprint;
+    journal.respond(Response::completed(vec![text("A")]));
+    journal.navigate(None);
+    journal.user(vec![text("branch B")]);
+    let artifact = journal
+        .root
+        .put_artifact(b"copied handle from branch A")
+        .unwrap();
+    journal.respond(Response {
+        continuation: Some(artifact),
+        input_fingerprint: Some(fingerprint_a),
+        ..Response::completed(vec![text("B")])
+    });
+    prefix_mismatch(&journal.build());
+}
+
+#[test]
+fn continuation_model_switch_later_response_and_other_branch_omit_it() {
+    let (mut journal, response) = native_journal();
+    journal.user(vec![text("next")]);
+    assert!(journal.build().projection.input.continuation.is_some());
+    journal.respond(Response::completed(vec![text("no handle")]));
+    let built = journal.build();
+    assert!(built.projection.input.continuation.is_none());
+    assert!(
+        built
+            .report
+            .excluded
+            .iter()
+            .any(|e| e.reason == ExclusionReason::ContinuationNotLatest)
+    );
+    journal.navigate(Some(response));
+    journal.switch_model(other());
+    let built = journal.build();
+    assert!(built.projection.input.continuation.is_none());
+    assert!(
+        built
+            .report
+            .excluded
+            .iter()
+            .any(|e| e.reason == ExclusionReason::ProviderStateNotPortable)
+    );
+    journal.navigate(None);
+    journal.user(vec![text("unrelated branch")]);
+    assert!(journal.build().projection.input.continuation.is_none());
+    journal.respond(Response::completed(vec![text("done")]));
+}
+
+#[test]
+fn fingerprint_excludes_continuation_but_covers_options_and_tool_definitions() {
+    let (journal, _) = native_journal();
+    let mut input = journal.build().projection.input;
+    let before = fingerprint(&input);
+    input.continuation = None;
+    assert_eq!(before, fingerprint(&input));
+    input.options.max_output_tokens += 1;
+    assert_ne!(before, fingerprint(&input));
+    input.options.max_output_tokens -= 1;
+    input.tools = crate::tools::Registry::builtin()
+        .definitions()
+        .cloned()
+        .collect();
+    assert_ne!(before, fingerprint(&input));
+    let tools_fingerprint = fingerprint(&input);
+    input.tools[0].description.push_str("changed");
+    assert_ne!(tools_fingerprint, fingerprint(&input));
+}
+
+#[test]
+fn inference_configuration_is_shape_checked_and_passed_through() {
+    for value in [
+        json!(null),
+        json!([]),
+        json!(true),
+        json!({"reasoning_effort":"extreme"}),
+        json!({"max_output_tokens":42}),
+        json!({"provider_options":null}),
+        json!({"provider_options":[]}),
+        json!({"provider_options":{"mock":false}}),
+        json!({"provider_options":{"":{}}}),
+        json!({"unknown":1}),
+    ] {
+        let bytes = serde_json::to_vec(&json!({"inference":value})).unwrap();
+        let reference = ArtifactRef {
+            sha256: Digest::of(&bytes),
+            bytes: bytes.len() as u64,
+        };
+        assert_eq!(
+            SessionConfiguration::parse(reference, &bytes).unwrap_err(),
+            ConfigurationError::InvalidInference
+        );
+    }
+    let journal = Journal::with_configuration(br#"{"inference":{"reasoning_effort":"medium","provider_options":{"mock":{"required":true}}}}"#);
+    let input = journal.build().projection.input;
+    assert_eq!(
+        input.options.max_output_tokens,
+        ContextConfig::default().output_reserve
+    );
+    assert_eq!(
+        input.options.reasoning_effort,
+        Some(crate::model::ReasoningEffort::Medium)
+    );
+    assert_eq!(
+        input.options.provider_options,
+        json!({"mock":{"required":true}})
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+}
+
+#[test]
+fn continuation_only_response_replays_and_invalid_one_is_omitted() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("hello")]);
+    let artifact = journal.root.put_artifact(b"handle").unwrap();
+    let response = journal.respond(Response {
+        continuation: Some(artifact),
+        ..Response::completed(vec![])
+    });
+    let built = journal.build();
+    assert!(built.projection.input.continuation.is_some());
+    assert!(
+        matches!(&built.projection.input.items[1], ContextItem::Assistant { content, .. } if content.is_empty())
+    );
+    assert_eq!(built.report.included[1].blocks[0].part, Part::Continuation);
+    replace_configuration(
+        &mut journal,
+        br#"{"inference":{"reasoning_effort":"high"}}"#,
+    );
+    let built = journal.build();
+    prefix_mismatch(&built);
+    assert!(
+        !built
+            .projection
+            .input
+            .items
+            .iter()
+            .any(|i| i.entry_id() == Some(&response))
+    );
+}
+
+#[test]
+fn continuation_prefix_rebuild_includes_an_earlier_continuation_only_response() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("hello")]);
+    let artifact = journal.root.put_artifact(b"handle").unwrap();
+    let first = journal.respond(Response {
+        continuation: Some(artifact.clone()),
+        ..Response::completed(vec![])
+    });
+    journal.user(vec![text("next")]);
+    let prefix = journal.build().projection.fingerprint;
+    let second = journal.respond(Response {
+        continuation: Some(artifact),
+        ..Response::completed(vec![])
+    });
+    let built = journal.build();
+    assert_eq!(
+        built
+            .projection
+            .input
+            .continuation
+            .as_ref()
+            .unwrap()
+            .input_fingerprint,
+        prefix
+    );
+    assert!(
+        !built
+            .projection
+            .input
+            .items
+            .iter()
+            .any(|i| i.entry_id() == Some(&first))
+    );
+    assert!(
+        built
+            .projection
+            .input
+            .items
+            .iter()
+            .any(|i| i.entry_id() == Some(&second))
+    );
+    assert!(
+        built
+            .report
+            .excluded
+            .iter()
+            .any(|e| e.entry_id == first && e.reason == ExclusionReason::ContinuationNotLatest)
     );
 }

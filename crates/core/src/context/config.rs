@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::{estimate::HeuristicEstimator, projection::Instruction};
+use crate::model::{InferenceOptions, ReasoningEffort};
 use crate::session::{ArtifactRef, DataRoot, Digest, ModelRef, codec};
 
 /// Context limits of one model. `None` means unknown, never zero.
@@ -97,6 +98,9 @@ pub enum ConfigurationError {
     /// `instructions` is present but not an array of instructions.
     #[error("invalid_instructions")]
     InvalidInstructions,
+    /// `inference` must be an object with supported field shapes.
+    #[error("invalid_inference")]
+    InvalidInference,
 }
 
 impl ConfigurationError {
@@ -107,6 +111,7 @@ impl ConfigurationError {
             Self::Mismatch => "configuration_mismatch",
             Self::NotAnObject => "configuration_not_an_object",
             Self::InvalidInstructions => "invalid_instructions",
+            Self::InvalidInference => "invalid_inference",
         }
     }
 }
@@ -119,6 +124,16 @@ pub struct SessionConfiguration {
     artifact: ArtifactRef,
     bytes: Vec<u8>,
     instructions: Option<Vec<Instruction>>,
+    inference: ConfiguredInference,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredInference {
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    provider_options: serde_json::Map<String, serde_json::Value>,
 }
 
 impl SessionConfiguration {
@@ -127,8 +142,9 @@ impl SessionConfiguration {
 
     /// Decode the exact bytes of `artifact`. The artifact must be one JSON
     /// object. Its optional `instructions` field is an ordered array of
-    /// `{"level": "system" | "developer", "text": ...}`; other fields are
-    /// ignored here.
+    /// `{"level": "system" | "developer", "text": ...}`. Optional `inference`
+    /// holds reasoning effort and namespaced provider option objects. Unrelated
+    /// configuration fields are ignored here.
     pub fn parse(artifact: ArtifactRef, bytes: &[u8]) -> Result<Self, ConfigurationError> {
         if bytes.len() as u64 != artifact.bytes || Digest::of(bytes) != artifact.sha256 {
             return Err(ConfigurationError::Mismatch);
@@ -143,10 +159,27 @@ impl SessionConfiguration {
                     .map_err(|_| ConfigurationError::InvalidInstructions)?,
             ),
         };
+        let inference = match object.remove("inference") {
+            None => ConfiguredInference::default(),
+            Some(value) if value.is_object() => {
+                let parsed: ConfiguredInference = serde_json::from_value(value)
+                    .map_err(|_| ConfigurationError::InvalidInference)?;
+                if parsed
+                    .provider_options
+                    .iter()
+                    .any(|(namespace, value)| namespace.is_empty() || !value.is_object())
+                {
+                    return Err(ConfigurationError::InvalidInference);
+                }
+                parsed
+            }
+            Some(_) => return Err(ConfigurationError::InvalidInference),
+        };
         Ok(Self {
             artifact,
             bytes: bytes.to_vec(),
             instructions,
+            inference,
         })
     }
 
@@ -167,6 +200,15 @@ impl SessionConfiguration {
     /// Exact verified source bytes, also decoded by the runtime's policy layer.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Build request options using the same output budget as the projection.
+    pub fn inference_options(&self, output_reserve: u32) -> InferenceOptions {
+        InferenceOptions {
+            max_output_tokens: output_reserve,
+            reasoning_effort: self.inference.reasoning_effort,
+            provider_options: self.inference.provider_options.clone(),
+        }
     }
 
     /// The `instructions` field, or `None` when it is absent.

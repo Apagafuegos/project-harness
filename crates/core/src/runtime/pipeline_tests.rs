@@ -180,6 +180,7 @@ fn pending_approval() -> Rig {
             outcome: ProviderOutcome::Completed,
             finish_reason: Some(crate::session::FinishReason::ToolCalls),
             error: None,
+            continuation: None,
         },
     ] {
         rig.feed(Input::Provider { inference, event });

@@ -17,6 +17,7 @@ use crate::{
         ArtifactRef, AssistantResponse, CallId, Compaction, ContentBlock, EntryId, EntryPayload,
         ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry, ToolResultEntry, UserMessage,
     },
+    tools::ToolDefinition,
 };
 
 /// Why no context could be built. None of these is an overflow: an
@@ -64,6 +65,7 @@ pub struct ContextBuilder<'a> {
     config: &'a ContextConfig,
     configuration: &'a SessionConfiguration,
     estimator: &'a dyn TokenEstimator,
+    tools: &'a [ToolDefinition],
 }
 
 impl std::fmt::Debug for ContextBuilder<'_> {
@@ -83,7 +85,13 @@ impl<'a> ContextBuilder<'a> {
             config,
             configuration,
             estimator: &config.estimator,
+            tools: &[],
         }
+    }
+
+    /// Enabled, available definitions used for both requests and fingerprints.
+    pub fn with_tools(self, tools: &'a [ToolDefinition]) -> Self {
+        Self { tools, ..self }
     }
 
     /// Replace the estimator.
@@ -100,6 +108,40 @@ impl<'a> ContextBuilder<'a> {
         snapshot: &SessionSnapshot,
         head: Option<&EntryId>,
         model_override: Option<&ModelRef>,
+    ) -> Result<BuiltContext, ContextError> {
+        let branch = snapshot
+            .ancestry(head)
+            .map_err(|_| ContextError::UnknownHead)?;
+        let model = model_override.unwrap_or(
+            snapshot
+                .model_at(head)
+                .map_err(|_| ContextError::UnknownHead)?,
+        );
+        // Build required prefixes oldest first. Every continuation's parent
+        // precedes it, so a fingerprint is computed once, without recursion or
+        // an exponential re-walk of earlier continuation-only responses.
+        let mut prefixes = BTreeMap::new();
+        for stored in branch {
+            if let EntryPayload::AssistantResponse(response) = &stored.entry.payload
+                && response.continuation.is_some()
+            {
+                let parent = stored.entry.parent_id.clone();
+                if !prefixes.contains_key(&parent) {
+                    let prefix =
+                        self.build_inner(snapshot, parent.as_ref(), Some(model), &prefixes)?;
+                    prefixes.insert(parent, prefix.projection.fingerprint);
+                }
+            }
+        }
+        self.build_inner(snapshot, head, model_override, &prefixes)
+    }
+
+    fn build_inner(
+        &self,
+        snapshot: &SessionSnapshot,
+        head: Option<&EntryId>,
+        model_override: Option<&ModelRef>,
+        prefixes: &BTreeMap<Option<EntryId>, crate::session::Digest>,
     ) -> Result<BuiltContext, ContextError> {
         if !(1..=1000).contains(&self.config.compaction_trigger_permille) {
             return Err(ContextError::InvalidConfig("compaction_trigger_permille"));
@@ -183,6 +225,132 @@ impl<'a> ContextBuilder<'a> {
             }
         }
 
+        let by_id: BTreeMap<_, _> = branch.iter().map(|s| (&s.entry.id, *s)).collect();
+        let mut invalid = BTreeSet::new();
+        let selected = loop {
+            let Some((index, id, empty)) =
+                walk.items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, item)| match item {
+                        ContextItem::Assistant {
+                            entry_id, content, ..
+                        } => Some((index, entry_id.clone(), content.is_empty())),
+                        _ => None,
+                    })
+            else {
+                break None;
+            };
+            let stored = by_id[&id];
+            let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                unreachable!("assistant source")
+            };
+            let Some(native) = &response.continuation else {
+                break None;
+            };
+            if native.owner != *model {
+                break None;
+            }
+            let prefix = prefixes
+                .get(&stored.entry.parent_id)
+                .ok_or(ContextError::Invariant("missing_continuation_prefix"))?;
+            if *prefix == native.input_fingerprint {
+                break Some(id);
+            }
+            invalid.insert(id.clone());
+            if !empty {
+                break None;
+            }
+            // An invalid continuation cannot keep an empty assistant alive.
+            walk.items.remove(index);
+            walk.included.remove(index);
+        };
+        // Only the selected continuation may stand for an otherwise empty
+        // assistant. Earlier continuation-only responses are part exclusions.
+        let mut index = 0;
+        while index < walk.items.len() {
+            if matches!(&walk.items[index], ContextItem::Assistant { entry_id, content, .. }
+                if content.is_empty() && selected.as_ref() != Some(entry_id))
+            {
+                walk.items.remove(index);
+                walk.included.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        let mut continuation = None;
+        for stored in &branch {
+            let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                continue;
+            };
+            let Some(native) = &response.continuation else {
+                continue;
+            };
+            let id = &stored.entry.id;
+            // Entry-level exclusions already account for all parts.
+            if walk
+                .excluded
+                .iter()
+                .any(|e| &e.entry_id == id && e.part == Part::Entry)
+            {
+                continue;
+            }
+            let owned = walk.owned(
+                id,
+                Part::Continuation,
+                &native.owner,
+                &native.schema,
+                &native.artifact,
+            );
+            if !owned {
+                continue;
+            }
+            let reason = if invalid.contains(id) {
+                Some(ExclusionReason::ContinuationPrefixMismatch)
+            } else if selected.as_ref() != Some(id) {
+                Some(ExclusionReason::ContinuationNotLatest)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                if native.owner == *head_model {
+                    walk.opaque_at_head = walk.opaque_at_head.saturating_sub(native.artifact.bytes);
+                }
+                walk.exclude(id, Part::Continuation, reason, None);
+            } else {
+                let record = walk
+                    .included
+                    .iter_mut()
+                    .find(|r| r.entry_id.as_ref() == Some(id))
+                    .ok_or(ContextError::Invariant("continuation_without_assistant"))?;
+                record.blocks.push(IncludedBlock {
+                    part: Part::Continuation,
+                    kind: BlockKind::Continuation,
+                    estimated_tokens: 0,
+                    opaque_bytes: native.artifact.bytes,
+                });
+                record.opaque_bytes = record.opaque_bytes.saturating_add(native.artifact.bytes);
+                walk.counts.opaque = walk.counts.opaque.saturating_add(native.artifact.bytes);
+                continuation = Some(native.clone());
+            }
+        }
+
+        // Continuation decisions are made after the content walk; restore
+        // branch/part order so the report remains source-discoverable.
+        let positions: BTreeMap<_, _> = branch
+            .iter()
+            .enumerate()
+            .map(|(n, s)| (&s.entry.id, n))
+            .collect();
+        walk.excluded
+            .sort_by_key(|e| (positions[&e.entry_id], e.part));
+        walk.portability
+            .sort_by_key(|e| (positions[&e.entry_id], e.part));
+        walk.stop_portable
+            .sort_by_key(|e| (positions[&e.entry_id], e.part));
+        walk.become_portable
+            .sort_by_key(|e| (positions[&e.entry_id], e.part));
         let counts = &walk.counts;
         let estimated = [
             counts.instructions,
@@ -226,7 +394,16 @@ impl<'a> ContextBuilder<'a> {
                 usage,
             })
         });
-        let fingerprint = fingerprint(model, &walk.items);
+        let input = ModelInput {
+            model: model.clone(),
+            items: walk.items,
+            tools: self.tools.to_vec(),
+            options: self
+                .configuration
+                .inference_options(self.config.output_reserve),
+            continuation,
+        };
+        let fingerprint = fingerprint(&input);
         let report = ContextReport {
             identity: ReportIdentity {
                 session_id: snapshot.session_id().clone(),
@@ -254,14 +431,11 @@ impl<'a> ContextBuilder<'a> {
                 preview: model_override.is_some(),
             },
         };
-        check::check(&branch, &walk.items, &report).map_err(ContextError::Invariant)?;
+        check::check(&branch, &input, &report).map_err(ContextError::Invariant)?;
         Ok(BuiltContext {
             projection: Projection {
                 head: head.cloned(),
-                input: ModelInput {
-                    model: model.clone(),
-                    items: walk.items,
-                },
+                input,
                 fingerprint,
                 preview: model_override.is_some(),
             },
@@ -621,30 +795,14 @@ impl Walk<'_> {
                 opaque_bytes: bytes,
             });
         }
-        let continuation = match &response.continuation {
-            Some(continuation)
-                if self.owned(
-                    id,
-                    Part::Continuation,
-                    &continuation.owner,
-                    &continuation.schema,
-                    &continuation.artifact,
-                ) =>
-            {
-                opaque = opaque.saturating_add(continuation.artifact.bytes);
-                blocks.push(IncludedBlock {
-                    part: Part::Continuation,
-                    kind: BlockKind::Continuation,
-                    estimated_tokens: 0,
-                    opaque_bytes: continuation.artifact.bytes,
-                });
-                Some(continuation.clone())
-            }
-            _ => None,
-        };
         // Nothing survived: the part exclusions already account for every
         // block, and an empty item would only cost the provider a turn.
-        if blocks.is_empty() {
+        if blocks.is_empty()
+            && !response
+                .continuation
+                .as_ref()
+                .is_some_and(|c| c.owner == *self.model)
+        {
             return Ok(());
         }
         self.counts.opaque = self.counts.opaque.saturating_add(opaque);
@@ -653,7 +811,6 @@ impl Walk<'_> {
                 entry_id: id.clone(),
                 outcome: response.outcome,
                 content,
-                continuation,
             },
             IncludedItem {
                 entry_id: Some(id.clone()),

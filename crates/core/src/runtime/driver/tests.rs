@@ -2,6 +2,8 @@
 
 #[path = "host_tests.rs"]
 mod host_tests;
+#[path = "model_tests.rs"]
+mod model_tests;
 #[path = "tool_tests.rs"]
 mod tool_tests;
 
@@ -220,6 +222,7 @@ fn finished(reason: FinishReason) -> ProviderEvent {
         outcome: ProviderOutcome::Completed,
         finish_reason: Some(reason),
         error: None,
+        continuation: None,
     }
 }
 fn delta(text: &str) -> ProviderEvent {
@@ -1620,10 +1623,7 @@ async fn requests_carry_the_projection_and_inspection_reads_any_branch() {
         .inspect_context(Some(user), None)
         .await
         .unwrap();
-    assert_eq!(
-        inspected.fingerprint,
-        fingerprint(&input.model, &input.items)
-    );
+    assert_eq!(inspected.fingerprint, fingerprint(input));
 
     // Start a sibling of the second turn, then inspect the old branch.
     assert!(matches!(

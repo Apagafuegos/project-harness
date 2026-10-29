@@ -31,6 +31,13 @@ pub enum PartialBlock {
     Text(String),
     /// Accumulated displayable reasoning summary.
     ReasoningSummary(String),
+    /// Opaque native block metadata. Never contains or renders the payload.
+    ProviderState {
+        /// Native schema.
+        schema: String,
+        /// Payload length only.
+        bytes: usize,
+    },
     /// A proposed call. Never executable while partial.
     ToolCall {
         /// Engine-issued call identity.
@@ -249,6 +256,22 @@ impl ClientView {
                         partial.blocks.get_mut(block_index)
                 {
                     *ready = true;
+                }
+            }
+            EventKind::ProviderState {
+                inference,
+                block_index,
+                schema,
+                bytes,
+            } => {
+                if let Some(partial) = partial(view, inference) {
+                    partial.blocks.insert(
+                        *block_index,
+                        PartialBlock::ProviderState {
+                            schema: schema.clone(),
+                            bytes: *bytes,
+                        },
+                    );
                 }
             }
             EventKind::UsageUpdated { inference, usage } => {

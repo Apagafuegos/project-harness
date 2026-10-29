@@ -11,6 +11,7 @@ use crate::{
 fn request(n: u128) -> ModelRequest {
     let id = uuid::Uuid::from_u128((0x019a_0000_0000_u128 << 80) | (0x7 << 76) | (0b10 << 62) | n);
     ModelRequest {
+        artifacts: Default::default(),
         response_id: ResponseId::try_from(id.to_string()).unwrap(),
         input: ModelInput {
             model: ModelRef {
@@ -18,6 +19,13 @@ fn request(n: u128) -> ModelRequest {
                 model: "scripted".into(),
             },
             items: Vec::new(),
+            tools: Vec::new(),
+            options: super::super::InferenceOptions {
+                max_output_tokens: 4096,
+                reasoning_effort: None,
+                provider_options: Default::default(),
+            },
+            continuation: None,
         },
     }
 }
@@ -54,7 +62,8 @@ fn events_are_yielded_in_order_then_eof_repeats() {
         Poll::Ready(Some(ProviderEvent::Finished {
             outcome: ProviderOutcome::Completed,
             finish_reason: Some(FinishReason::Stop),
-            error: None
+            error: None,
+            continuation: None,
         }))
     ));
     assert!(matches!(

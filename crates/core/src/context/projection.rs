@@ -5,11 +5,12 @@ use sha2::{Digest as _, Sha256};
 
 use super::PROJECTION_VERSION;
 use crate::{
-    model::ModelInput,
+    model::{InferenceOptions, ModelInput},
     session::{
         ArtifactRef, CallRef, ContentBlock, Digest, EntryId, InvocationId, ModelRef, Provenance,
-        ProviderContinuation, ResponseOutcome, ToolMetadata, ToolResult, ToolStatus,
+        ResponseOutcome, ToolMetadata, ToolResult, ToolStatus,
     },
+    tools::ToolDefinition,
 };
 
 /// Who an instruction speaks for, in RFC-001 order of authority.
@@ -58,8 +59,6 @@ pub enum ContextItem {
         /// Text, answered tool calls, media and provider state owned by the
         /// projection's model.
         content: Vec<ContentBlock>,
-        /// The response's continuation, when owned by the projection's model.
-        continuation: Option<ProviderContinuation>,
     },
     /// A tool result, directly after the response proposing its call.
     ToolResult {
@@ -163,7 +162,8 @@ pub struct Projection {
     pub preview: bool,
 }
 
-/// SHA-256 of the canonical JSON of `{"items", "model", "projection_version"}`.
+/// SHA-256 of canonical `items`, `model`, `tools`, `options` and version.
+/// Continuation, response identity and deadline are deliberately not hashed.
 ///
 /// Canonical means `serde_json`'s compact output of these types: struct fields
 /// in declared order, enum tags first, map keys (tool-call arguments) sorted
@@ -171,27 +171,27 @@ pub struct Projection {
 /// `serde_json`'s `preserve_order` feature is off, which a test enforces.
 /// Changing any item type changes these bytes, so it must bump
 /// [`PROJECTION_VERSION`]. Responses, requests and the report are not hashed.
-pub fn fingerprint(model: &ModelRef, items: &[ContextItem]) -> Digest {
-    fingerprint_with_version(PROJECTION_VERSION, model, items)
+pub fn fingerprint(input: &ModelInput) -> Digest {
+    fingerprint_with_version(PROJECTION_VERSION, input)
 }
 
-pub(super) fn fingerprint_with_version(
-    version: u32,
-    model: &ModelRef,
-    items: &[ContextItem],
-) -> Digest {
+pub(super) fn fingerprint_with_version(version: u32, input: &ModelInput) -> Digest {
     #[derive(Serialize)]
     struct Canonical<'a> {
         items: &'a [ContextItem],
         model: &'a ModelRef,
+        tools: &'a [ToolDefinition],
+        options: &'a InferenceOptions,
         projection_version: u32,
     }
     let mut hasher = Hashing(Sha256::new());
     serde_json::to_writer(
         &mut hasher,
         &Canonical {
-            items,
-            model,
+            items: &input.items,
+            model: &input.model,
+            tools: &input.tools,
+            options: &input.options,
             projection_version: version,
         },
     )
@@ -215,16 +215,20 @@ impl std::io::Write for Hashing {
 }
 
 #[cfg(test)]
-pub(super) fn canonical_bytes(model: &ModelRef, items: &[ContextItem]) -> Vec<u8> {
+pub(super) fn canonical_bytes(input: &ModelInput) -> Vec<u8> {
     #[derive(Serialize)]
     struct Canonical<'a> {
         items: &'a [ContextItem],
         model: &'a ModelRef,
+        tools: &'a [ToolDefinition],
+        options: &'a InferenceOptions,
         projection_version: u32,
     }
     serde_json::to_vec(&Canonical {
-        items,
-        model,
+        items: &input.items,
+        model: &input.model,
+        tools: &input.tools,
+        options: &input.options,
         projection_version: PROJECTION_VERSION,
     })
     .unwrap()

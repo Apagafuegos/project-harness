@@ -2,8 +2,12 @@
 
 Status: High-level behavior provisionally agreed. Concrete types, lifecycle,
 and defaults are proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
-The stream seam and a deterministic scripted mock are implemented in
+The stream seam and deterministic scripted mock are implemented in
 `harness_core::model` ([decision 0005](../decisions/0005-provider-stream.md)).
+Milestone 4 step 01a adds complete tool/options input and fingerprints,
+owner-scoped native state/validated continuation replay, read-only request
+artifact access and core-enforced inference deadlines
+([decision 0014](../decisions/0014-model-seam.md)).
 No native provider adapter exists yet.
 
 ## Purpose and ownership

@@ -1,6 +1,7 @@
 //! Runtime tests against real storage. Every commit the core emits is appended
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
+mod model;
 pub(crate) mod pipeline;
 mod random;
 mod recovery;
@@ -878,6 +879,25 @@ fn check_turns(finished: &Finished) {
                 let sent = streamed.get(&r.response_id);
                 assert!(sent.is_some(), "an assistant response no stream produced");
                 assert_eq!(r.projection_fingerprint.as_ref(), sent, "{:?}", r.outcome);
+                let mut native_bytes = 0;
+                for block in &r.content {
+                    if let ContentBlock::ProviderState {
+                        owner, artifact, ..
+                    } = block
+                    {
+                        assert_eq!(owner, &r.model);
+                        assert!(artifact.bytes <= 256 * 1024);
+                        native_bytes += artifact.bytes;
+                    }
+                }
+                if let Some(continuation) = &r.continuation {
+                    assert_eq!(continuation.owner, r.model);
+                    assert_eq!(Some(&continuation.input_fingerprint), sent);
+                    assert_eq!(r.outcome, ResponseOutcome::Completed);
+                    assert!(continuation.artifact.bytes <= 256 * 1024);
+                    native_bytes += continuation.artifact.bytes;
+                }
+                assert!(native_bytes <= 4 * 1024 * 1024);
             }
             EntryPayload::ToolResult(r) => {
                 if r.result.metadata.provenance == Provenance::Executor {

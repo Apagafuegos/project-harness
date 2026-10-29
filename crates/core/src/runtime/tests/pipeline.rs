@@ -159,6 +159,7 @@ pub(super) fn propose(d: &mut Driver, calls: &[(&str, Value)]) {
         outcome: ProviderOutcome::Completed,
         finish_reason: Some(FinishReason::ToolCalls),
         error: None,
+        continuation: None,
     });
 }
 pub(super) fn stop(d: &mut Driver) {
@@ -168,6 +169,7 @@ pub(super) fn stop(d: &mut Driver) {
         outcome: ProviderOutcome::Completed,
         finish_reason: Some(FinishReason::Stop),
         error: None,
+        continuation: None,
     });
     d.settle();
 }
@@ -600,8 +602,8 @@ fn provider_definitions_filter_enabled_available_in_registry_order() {
         .effects
         .iter()
         .find_map(|e| {
-            if let Effect::StartInference { tools, .. } = e {
-                Some(tools)
+            if let Effect::StartInference { input, .. } = e {
+                Some(&input.tools)
             } else {
                 None
             }
@@ -628,7 +630,7 @@ fn provider_definitions_filter_enabled_available_in_registry_order() {
         d.segment
             .effects
             .iter()
-            .all(|e| !matches!(e, Effect::StartInference { tools, .. } if !tools.is_empty()))
+            .all(|e| !matches!(e, Effect::StartInference { input, .. } if !input.tools.is_empty()))
     );
     stop(&mut d);
     checked(d);

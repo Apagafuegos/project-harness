@@ -40,7 +40,8 @@ use tokio::sync::oneshot;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use super::{
-    ModelEventStream, ModelProvider, ModelRequest, OperationControl, ProviderEvent, ProviderOutcome,
+    ModelEventStream, ModelProvider, ModelRequest, NativeContinuation, OperationControl,
+    ProviderEvent, ProviderOutcome,
 };
 use crate::session::{FinishReason, ModelError, ModelErrorCode};
 
@@ -68,12 +69,35 @@ impl Step {
         })
     }
 
+    /// One complete native block. The adapter cannot supply an owner.
+    pub fn provider_state(block_index: u32, schema: impl Into<String>, payload: Vec<u8>) -> Self {
+        Self::Event(ProviderEvent::ProviderState {
+            block_index,
+            schema: schema.into(),
+            payload,
+        })
+    }
+
+    /// Completed response with a native continuation payload.
+    pub fn completed_with_continuation(
+        reason: FinishReason,
+        continuation: NativeContinuation,
+    ) -> Self {
+        Self::Event(ProviderEvent::Finished {
+            outcome: ProviderOutcome::Completed,
+            finish_reason: Some(reason),
+            error: None,
+            continuation: Some(continuation),
+        })
+    }
+
     /// A successful `Finished` with `reason`.
     pub fn completed(reason: FinishReason) -> Self {
         Self::Event(ProviderEvent::Finished {
             outcome: ProviderOutcome::Completed,
             finish_reason: Some(reason),
             error: None,
+            continuation: None,
         })
     }
 
@@ -83,6 +107,7 @@ impl Step {
             outcome: ProviderOutcome::Failed,
             finish_reason: None,
             error: Some(error),
+            continuation: None,
         })
     }
 
@@ -92,6 +117,7 @@ impl Step {
             outcome: ProviderOutcome::Cancelled,
             finish_reason: None,
             error: None,
+            continuation: None,
         })
     }
 }
@@ -112,6 +138,8 @@ impl Script {
 pub struct StreamRecord {
     /// The request the stream was opened for.
     pub request: ModelRequest,
+    /// Deadline supplied by the driver, if configured.
+    pub deadline: Option<tokio::time::Instant>,
     /// Events yielded so far.
     pub yielded: usize,
     /// Whether the operation's token has been cancelled.
@@ -122,6 +150,7 @@ pub struct StreamRecord {
 
 struct Shared {
     request: ModelRequest,
+    deadline: Option<tokio::time::Instant>,
     cancel: CancellationToken,
     yielded: usize,
     dropped: bool,
@@ -164,6 +193,7 @@ impl ScriptedProvider {
                 let shared = shared.lock().unwrap();
                 StreamRecord {
                     request: shared.request.clone(),
+                    deadline: shared.deadline,
                     yielded: shared.yielded,
                     cancelled: shared.cancel.is_cancelled(),
                     dropped: shared.dropped,
@@ -185,6 +215,7 @@ impl ModelProvider for ScriptedProvider {
         });
         let shared = Arc::new(Mutex::new(Shared {
             request,
+            deadline: control.deadline,
             cancel: control.cancel.clone(),
             yielded: 0,
             dropped: false,

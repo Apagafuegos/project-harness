@@ -1,6 +1,9 @@
 //! The pure runtime state machine: one input in, effects out, nothing else.
 
+use crate::model::NativeContinuation;
+use crate::session::{ArtifactRef, ProviderContinuation};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[path = "pipeline.rs"]
 mod pipeline;
@@ -152,6 +155,10 @@ struct Inference {
     timer: Option<TimerId>,
     /// The armed idle timer, while the stream is open.
     idle: Option<TimerId>,
+    deadline: Option<TimerId>,
+    deadline_expired: bool,
+    native: BTreeMap<u32, Vec<u8>>,
+    native_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -186,6 +193,7 @@ enum End {
         outcome: ProviderOutcome,
         finish_reason: Option<FinishReason>,
         error: Option<ModelError>,
+        continuation: Option<NativeContinuation>,
     },
     /// Closed without `Finished`.
     Eof,
@@ -197,6 +205,10 @@ enum End {
     Cancelled,
     /// No event within `provider_idle_timeout`.
     Stalled,
+    /// Per-inference deadline expired, including cancellation cleanup.
+    Deadline,
+    /// Native payload or response-native-state limit exceeded.
+    NativeTooLarge,
 }
 
 /// How a finished stream is recorded.
@@ -314,7 +326,7 @@ impl Runtime {
         let snapshot = self.snapshot();
         let head = head.or_else(|| snapshot.head().cloned());
         Ok(self
-            .builder()
+            .builder(&self.definitions())
             .build(snapshot, head.as_ref(), model_override.as_ref())?
             .report)
     }
@@ -353,8 +365,18 @@ impl Runtime {
         Ok(policy)
     }
 
-    fn builder(&self) -> ContextBuilder<'_> {
-        ContextBuilder::new(&self.config.context, &self.configuration)
+    fn definitions(&self) -> Vec<crate::tools::ToolDefinition> {
+        self.policy
+            .as_ref()
+            .map(|p| self.tools.definitions(p))
+            .unwrap_or_default()
+    }
+
+    fn builder<'a>(
+        &'a self,
+        definitions: &'a [crate::tools::ToolDefinition],
+    ) -> ContextBuilder<'a> {
+        ContextBuilder::new(&self.config.context, &self.configuration).with_tools(definitions)
     }
 
     /// Process one input. Returns every effect it causes, in order.
@@ -685,6 +707,7 @@ impl Runtime {
             .is_some_and(|inference| matches!(inference.status, Stream::Open))
         {
             self.disarm_idle();
+            self.disarm_deadline();
         }
         if let Some(inference) = &mut self.inference
             && matches!(inference.status, Stream::Open)
@@ -1257,7 +1280,10 @@ impl Runtime {
                     inference: inference.id,
                 });
             }
-            for timer in [inference.timer, inference.idle].into_iter().flatten() {
+            for timer in [inference.timer, inference.idle, inference.deadline]
+                .into_iter()
+                .flatten()
+            {
                 self.out.push(Effect::CancelTimer { timer });
             }
             if self.view.view().partial.is_some() {
@@ -1407,6 +1433,9 @@ impl Runtime {
                     Some(PartialBlock::ToolCall { ready: true, .. }) => {
                         return self.malformed("arguments_after_ready", env);
                     }
+                    Some(PartialBlock::ProviderState { .. }) => {
+                        return self.malformed("block_kind_mismatch", env);
+                    }
                     _ => return self.malformed("unknown_tool_call", env),
                 }
                 let cost = fragment.len();
@@ -1429,6 +1458,9 @@ impl Runtime {
                     Some(PartialBlock::ToolCall { ready: true, .. }) => {
                         return self.malformed("duplicate_ready", env);
                     }
+                    Some(PartialBlock::ProviderState { .. }) => {
+                        return self.malformed("block_kind_mismatch", env);
+                    }
                     _ => return self.malformed("unknown_tool_call", env),
                 };
                 let Some(object) = arguments_object(arguments) else {
@@ -1443,6 +1475,41 @@ impl Runtime {
                     EventKind::ToolCallReady {
                         inference: id,
                         block_index,
+                    },
+                    cost,
+                )
+            }
+            ProviderEvent::ProviderState {
+                block_index,
+                schema,
+                payload,
+            } => {
+                if block(&block_index).is_some() {
+                    return self.malformed("duplicate_block", env);
+                }
+                if schema.is_empty() {
+                    return self.malformed("empty_native_schema", env);
+                }
+                if payload.len() > 256 * 1024
+                    || inference.native_bytes.saturating_add(payload.len()) > 4 * 1024 * 1024
+                {
+                    return self.end(End::NativeTooLarge, env);
+                }
+                // Payload has its own bounds. Charge only the journal envelope
+                // against the inline bound, preventing unbounded empty blocks.
+                let cost = BLOCK_OVERHEAD + json_len(&schema);
+                if inference.bytes.saturating_add(cost) > max {
+                    return self.too_large(env);
+                }
+                let bytes = payload.len();
+                inference.native_bytes += bytes;
+                inference.native.insert(block_index, payload);
+                (
+                    EventKind::ProviderState {
+                        inference: id,
+                        block_index,
+                        schema,
+                        bytes,
                     },
                     cost,
                 )
@@ -1469,7 +1536,8 @@ impl Runtime {
                 outcome,
                 finish_reason,
                 error,
-            } => return self.on_finished(outcome, finish_reason, error, env),
+                continuation,
+            } => return self.on_finished(outcome, finish_reason, error, continuation, env),
         };
         if inference.bytes + cost > max {
             return self.too_large(env);
@@ -1483,8 +1551,30 @@ impl Runtime {
         outcome: ProviderOutcome,
         finish_reason: Option<FinishReason>,
         error: Option<ModelError>,
+        continuation: Option<NativeContinuation>,
         env: &mut dyn Env,
     ) {
+        if let Some(native) = &continuation {
+            if outcome != ProviderOutcome::Completed {
+                return self.malformed("continuation_on_partial_finish", env);
+            }
+            if native.schema.is_empty() {
+                return self.malformed("empty_native_schema", env);
+            }
+            let inference = self.inference.as_ref().expect("current inference");
+            if native.payload.len() > 256 * 1024
+                || inference.native_bytes.saturating_add(native.payload.len()) > 4 * 1024 * 1024
+            {
+                return self.end(End::NativeTooLarge, env);
+            }
+            if inference
+                .bytes
+                .saturating_add(BLOCK_OVERHEAD + json_len(&native.schema))
+                > self.config.max_partial_bytes
+            {
+                return self.too_large(env);
+            }
+        }
         let max = self.config.max_partial_bytes;
         let inference = self.inference.as_ref().expect("current inference");
         let partial = self.view.view().partial.as_ref().expect("partial");
@@ -1536,6 +1626,7 @@ impl Runtime {
                 outcome,
                 finish_reason,
                 error,
+                continuation,
             },
             env,
         );
@@ -1564,7 +1655,28 @@ impl Runtime {
             && inference.timer == Some(timer)
         {
             inference.timer = None;
-            self.end(End::Cancelled, env);
+            let end = if inference.deadline_expired {
+                End::Deadline
+            } else {
+                End::Cancelled
+            };
+            self.end(end, env);
+        } else if let Some(inference) = &mut self.inference
+            && inference.deadline == Some(timer)
+        {
+            inference.deadline = None;
+            inference.deadline_expired = true;
+            inference.status = Stream::Cancelling;
+            let id = inference.id;
+            self.disarm_idle();
+            self.next_timer += 1;
+            let timer = TimerId(self.next_timer);
+            self.inference.as_mut().expect("current inference").timer = Some(timer);
+            self.out.push(Effect::CancelInference { inference: id });
+            self.out.push(Effect::SetTimer {
+                timer,
+                duration: self.config.cancel_grace,
+            });
         } else if let Some(inference) = &mut self.inference
             && inference.idle == Some(timer)
         {
@@ -1582,7 +1694,12 @@ impl Runtime {
         if let Some(timer) = inference.timer.take() {
             self.out.push(Effect::CancelTimer { timer });
         }
-        self.end(End::Cancelled, env);
+        let end = if inference.deadline_expired {
+            End::Deadline
+        } else {
+            End::Cancelled
+        };
+        self.end(end, env);
     }
 
     fn malformed(&mut self, reason: &'static str, env: &mut dyn Env) {
@@ -1601,6 +1718,7 @@ impl Runtime {
     /// The core stops listening: release the stream, then decide what follows.
     fn end(&mut self, end: End, env: &mut dyn Env) {
         self.disarm_idle();
+        self.disarm_deadline();
         let inference = self.inference.as_mut().expect("current inference");
         inference.status = Stream::Ended(end);
         let id = inference.id;
@@ -1682,7 +1800,10 @@ impl Runtime {
         let Some(head) = snapshot.head().cloned() else {
             return self.fault(FaultCause::Internal("inference_without_head"));
         };
-        let built = match self.builder().build(snapshot, Some(&head), None) {
+        let built = match self
+            .builder(&self.definitions())
+            .build(snapshot, Some(&head), None)
+        {
             Ok(built) => built,
             Err(error) => return self.fault(FaultCause::Internal(error.code())),
         };
@@ -1771,6 +1892,10 @@ impl Runtime {
             status: Stream::Open,
             timer: None,
             idle: None,
+            deadline: None,
+            deadline_expired: false,
+            native: BTreeMap::new(),
+            native_bytes: 0,
         });
         self.emit(EventKind::InferenceStarted {
             inference,
@@ -1783,15 +1908,22 @@ impl Runtime {
             turn_id,
             head,
             input: projection.input,
-            tools: self
-                .policy
-                .as_ref()
-                .map(|p| self.tools.definitions(p))
-                .unwrap_or_default(),
             fingerprint: projection.fingerprint,
             response_id,
         });
         self.arm_idle();
+        if let Some(duration) = self.config.inference_deadline {
+            self.next_timer += 1;
+            let timer = TimerId(self.next_timer);
+            self.inference.as_mut().expect("current inference").deadline = Some(timer);
+            self.out.push(Effect::SetTimer { timer, duration });
+        }
+    }
+
+    fn disarm_deadline(&mut self) {
+        if let Some(timer) = self.inference.as_mut().and_then(|i| i.deadline.take()) {
+            self.out.push(Effect::CancelTimer { timer });
+        }
     }
 
     /// Restart the idle timer of the current, open stream.
@@ -1835,8 +1967,25 @@ impl Runtime {
         let Some(partial) = self.view.view().partial.clone() else {
             return self.fault(FaultCause::Internal("response_without_partial"));
         };
-        let Some(content) = content(&partial, recorded.eligible) else {
+        let native = &self.inference.as_ref().expect("current inference").native;
+        let Some(content) = content(&partial, recorded.eligible, native) else {
             return self.fault(FaultCause::Internal("eligible_call_unparseable"));
+        };
+        let mut artifacts: Vec<Vec<u8>> = native.values().cloned().collect();
+        let continuation = match end {
+            End::Finished {
+                continuation: Some(native),
+                ..
+            } if recorded.outcome == ResponseOutcome::Completed => {
+                artifacts.push(native.payload.clone());
+                Some(ProviderContinuation {
+                    owner: partial.model.clone(),
+                    schema: native.schema.clone(),
+                    artifact: artifact(&native.payload),
+                    input_fingerprint: fingerprint.clone(),
+                })
+            }
+            _ => None,
         };
         let entries = chain(
             snapshot,
@@ -1849,7 +1998,7 @@ impl Runtime {
                     finish_reason: recorded.finish_reason,
                     content,
                     usage: partial.usage,
-                    continuation: None,
+                    continuation,
                     error: recorded.error,
                     projection_fingerprint: Some(fingerprint),
                 }),
@@ -1876,6 +2025,7 @@ impl Runtime {
             InFlight {
                 finished,
                 ends_inference: true,
+                artifacts,
                 ..idle_flight()
             },
             None,
@@ -2084,6 +2234,24 @@ impl Recorded {
                 TurnOutcome::Failed,
                 Some("provider_stalled"),
             ),
+            End::Deadline => Self::partial(
+                ResponseOutcome::Interrupted,
+                TurnOutcome::Failed,
+                Some("inference_deadline"),
+            ),
+            End::NativeTooLarge => Self {
+                error: Some(ModelError {
+                    code: ModelErrorCode::LimitExceeded,
+                    message: "native_state_limit".into(),
+                    provider_code: None,
+                    retry_after_ms: None,
+                }),
+                ..Self::partial(
+                    ResponseOutcome::Failed,
+                    TurnOutcome::Failed,
+                    Some("limit_exceeded"),
+                )
+            },
             End::TooLarge => Self::partial(
                 ResponseOutcome::Interrupted,
                 TurnOutcome::Failed,
@@ -2298,10 +2466,19 @@ fn interrupted(turn: &TurnId) -> TurnFinished {
 
 /// Persisted content of a partial response. Tool calls appear only in an
 /// eligible response, where every call is ready; partial calls are dropped.
-fn content(partial: &PartialResponse, eligible: bool) -> Option<Vec<ContentBlock>> {
+fn content(
+    partial: &PartialResponse,
+    eligible: bool,
+    native: &BTreeMap<u32, Vec<u8>>,
+) -> Option<Vec<ContentBlock>> {
     let mut content = Vec::with_capacity(partial.blocks.len());
-    for block in partial.blocks.values() {
+    for (index, block) in &partial.blocks {
         content.push(match block {
+            PartialBlock::ProviderState { schema, .. } => ContentBlock::ProviderState {
+                owner: partial.model.clone(),
+                schema: schema.clone(),
+                artifact: artifact(native.get(index)?),
+            },
             PartialBlock::Text(text) => ContentBlock::Text { text: text.clone() },
             PartialBlock::ReasoningSummary(text) => {
                 ContentBlock::ReasoningSummary { text: text.clone() }
@@ -2360,5 +2537,12 @@ fn error_code(code: ModelErrorCode) -> &'static str {
         ModelErrorCode::MalformedStream => "malformed_stream",
         ModelErrorCode::LimitExceeded => "limit_exceeded",
         ModelErrorCode::ContextOverflow => "context_overflow",
+    }
+}
+
+fn artifact(bytes: &[u8]) -> ArtifactRef {
+    ArtifactRef {
+        sha256: Digest::of(bytes),
+        bytes: bytes.len() as u64,
     }
 }

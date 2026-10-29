@@ -11,15 +11,21 @@
 
 use std::pin::Pin;
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
 use futures_core::Stream;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     context::ContextItem,
-    session::{FinishReason, ModelError, ModelRef, ResponseId, Usage},
+    session::{FinishReason, ModelError, ModelRef, ProviderContinuation, ResponseId, Usage},
+    tools::ToolDefinition,
 };
 
+mod artifacts;
 pub mod scripted;
+pub use artifacts::{ArtifactReadError, ArtifactSource};
 
 /// An owned event stream. It does not borrow its provider and starts work only
 /// when polled. Dropping it must cancel and release everything it started.
@@ -39,17 +45,58 @@ pub struct ModelRequest {
     pub response_id: ResponseId,
     /// What to infer from.
     pub input: ModelInput,
+    /// Verified, bounded reads of artifacts referenced by this input only.
+    pub artifacts: ArtifactSource,
 }
 
 /// The logical model input: the context builder's projection. Adapters
-/// translate it to a provider's wire format. Tool definitions and inference
-/// options are not projected yet.
+/// translate it to a provider's wire format, preserving the supplied definitions
+/// and options or reporting unsupported required capabilities.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelInput {
     /// Provider instance and model.
     pub model: ModelRef,
     /// Instructions, dialogue, tool results and summaries, in order.
     pub items: Vec<ContextItem>,
+    /// Enabled, available definitions, in registry order.
+    pub tools: Vec<ToolDefinition>,
+    /// Validated configuration; provider namespaces are validated by the adapter.
+    pub options: InferenceOptions,
+    /// Native continuation proven valid for the current logical prefix.
+    pub continuation: Option<ProviderContinuation>,
+}
+
+/// Required output budget and configured provider controls.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InferenceOptions {
+    /// Equal to the context builder's configured output reserve.
+    pub max_output_tokens: u32,
+    /// Optional provider reasoning control.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Namespaced options. Adapters must reject unsupported required values.
+    pub provider_options: Map<String, Value>,
+}
+
+/// Portable reasoning-effort levels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Low effort.
+    Low,
+    /// Medium effort.
+    Medium,
+    /// High effort.
+    High,
+}
+
+/// Complete native continuation payload. Identity and owner are core-owned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeContinuation {
+    /// Provider-defined replay schema.
+    pub schema: String,
+    /// Opaque sensitive bytes; never rendered as text.
+    pub payload: Vec<u8>,
 }
 
 /// Caller-owned controls for one stream.
@@ -60,6 +107,8 @@ pub struct OperationControl {
     /// keeps polling for that confirmation until its grace period ends, then
     /// drops the stream. Dropping also cancels this token.
     pub cancel: CancellationToken,
+    /// Absolute per-inference deadline, also enforced by the core.
+    pub deadline: Option<tokio::time::Instant>,
 }
 
 /// Terminal outcome reported by a provider's `Finished` event.
@@ -76,6 +125,16 @@ pub enum ProviderOutcome {
 /// Normalized provider stream events (Contract 1). Blocks are identified by a
 /// response-local `block_index`; the core issues each tool call's `CallId`
 /// when it sees `ToolCallStarted`, so a provider cannot choose journal IDs.
+/// Native state cannot claim another owner: the event has no owner field.
+///
+/// ```compile_fail
+/// use harness_core::model::ProviderEvent;
+/// use harness_core::session::ModelRef;
+/// let forged = ProviderEvent::ProviderState {
+///     block_index: 0, schema: "native.v1".into(), payload: vec![],
+///     owner: ModelRef { provider_instance: "other".into(), model: "other".into() },
+/// };
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
     /// The response opened. At most once, before any content.
@@ -115,6 +174,15 @@ pub enum ProviderEvent {
         /// Response-local tool-call block.
         block_index: u32,
     },
+    /// Introduce one complete native block at a fresh index.
+    ProviderState {
+        /// Response-local block, not previously used by any block kind.
+        block_index: u32,
+        /// Provider-defined replay schema.
+        schema: String,
+        /// Opaque sensitive bytes; the core publishes their artifact.
+        payload: Vec<u8>,
+    },
     /// Cumulative usage so far. Replaces, never adds to, earlier figures.
     UsageUpdated {
         /// Usage snapshot.
@@ -128,5 +196,7 @@ pub enum ProviderEvent {
         finish_reason: Option<FinishReason>,
         /// Required exactly when the outcome is `Failed`.
         error: Option<ModelError>,
+        /// Native continuation, permitted only on a completed response.
+        continuation: Option<NativeContinuation>,
     },
 }

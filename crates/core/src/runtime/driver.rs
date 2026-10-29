@@ -14,7 +14,10 @@ use super::{
 };
 use crate::{
     context::ContextReport,
-    model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl},
+    model::{
+        ArtifactReadError, ArtifactSource, ModelEventStream, ModelProvider, ModelRequest,
+        OperationControl,
+    },
     session::{ArtifactRef, DataRoot, Digest, EntryId, ModelRef, SessionHeader, SessionId},
 };
 
@@ -881,16 +884,38 @@ impl<E: Env + Send + 'static> Driver<E> {
                     inference,
                     input,
                     response_id,
-                    tools: _definitions,
                     ..
                 } => {
                     #[cfg(test)]
                     self.offered
-                        .push(_definitions.into_iter().map(|d| d.name).collect());
+                        .push(input.tools.iter().map(|d| d.name.clone()).collect());
                     let cancel = CancellationToken::new();
-                    let request = ModelRequest { response_id, input };
+                    let root = self.root.clone();
+                    let artifacts = ArtifactSource::new(&input, move |reference| {
+                        let root = root.clone();
+                        Box::pin(async move {
+                            tokio::task::spawn_blocking(move || {
+                                let limit = usize::try_from(reference.bytes)
+                                    .map_err(|_| ArtifactReadError::Unavailable)?;
+                                root.read_artifact(&reference, limit)
+                                    .map_err(|_| ArtifactReadError::Unavailable)
+                            })
+                            .await
+                            .map_err(|_| ArtifactReadError::Unavailable)?
+                        })
+                    });
+                    let request = ModelRequest {
+                        response_id,
+                        input,
+                        artifacts,
+                    };
                     let control = OperationControl {
                         cancel: cancel.clone(),
+                        deadline: self
+                            .config
+                            .runtime
+                            .inference_deadline
+                            .map(|duration| tokio::time::Instant::now() + duration),
                     };
                     self.inference = Some(Live {
                         id: inference,

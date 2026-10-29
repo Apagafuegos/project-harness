@@ -17,7 +17,10 @@ Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
 [0007](decisions/0007-startup-recovery.md) record the design; the builder itself
-is described in [context](context.md).
+is described in [context](context.md). Milestone 4 step 01a completes logical
+model requests, owner-scoped native artifact publication/replay, read-only
+request artifact access and core-enforced per-inference deadlines
+([decision 0014](decisions/0014-model-seam.md)).
 
 ## Shape
 
@@ -71,7 +74,8 @@ journaled.
 
 Provider events follow Contract 1: `Started`, `TextDelta`,
 `ReasoningSummaryDelta`, `ToolCallStarted`, `ToolArgumentsDelta`,
-`ToolCallReady`, `UsageUpdated` and `Finished { outcome, finish_reason, error }`.
+`ToolCallReady`, `ProviderState { block_index, schema, payload }`, `UsageUpdated`
+and `Finished { outcome, finish_reason, error, continuation }`.
 Blocks are named by a response-local `block_index`. The core issues each call's
 `CallId` when it sees `ToolCallStarted`, so a provider cannot choose journal
 identities. `ToolCallReady` carries no value; the core parses the concatenated
@@ -83,7 +87,7 @@ fragments itself.
 | --- | --- | --- |
 | `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, artifacts, `at` | Publish artifacts, bind command, append, answer |
-| `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, tools, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
+| `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
 | `PlanCall` | `PlanToken`, call, tool, validated operation | Plan against the trusted workspace and current policy |
 | `Execute` | `ExecutionToken`, `AuthorizedOperation` | Run after intent acknowledgement |
 | `CancelExecution` | `ExecutionToken` | Request cancellation; still await the executor answer |
@@ -109,8 +113,37 @@ the core.
 
 `RuntimeConfig` has `max_inferences_per_turn` (32), `max_partial_bytes`
 (4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s),
-`provider_idle_timeout` (300 s) and `context`, the builder's `ContextConfig`
+`provider_idle_timeout` (300 s), `inference_deadline` (`None`) and `context`, the builder's `ContextConfig`
 (model catalog, budget deductions, compaction trigger, estimator).
+
+### Complete requests and native replay
+
+`ModelInput` carries the exact enabled/available tools and configured options
+used in its fingerprint, plus at most one validated owner-scoped continuation.
+The output-token limit equals the context output reserve. The session's optional
+`inference` object is parsed on configuration load; see [context](context.md).
+The driver adds a request-scoped `ArtifactSource`, providing bounded asynchronous
+verified reads of referenced state, continuation and media artifacts only. It
+never exposes the data root or writes to providers.
+
+`ProviderState` opens one complete block at a fresh index; reuse is
+`malformed_stream/duplicate_block`. Text/reasoning deltas targeting it are
+`block_kind_mismatch`. Only schema/length enter the live view through
+`PartialBlock::ProviderState`; private payload bytes are never rendered. The core
+publishes exact payloads through the response's `Persist.artifacts`, assigning
+request-model ownership and the continuation's producing input fingerprint.
+A continuation is accepted only on `Completed`; empty schemas are malformed.
+Each payload is bounded to 256 KiB and total native state (including continuation)
+to 4 MiB. Payload bytes do not consume `max_partial_bytes`; native journal
+schema/envelope overhead does. Overflow makes all calls ineligible.
+
+A configured inference deadline starts with the stream, including setup. The
+driver exposes the matching monotonic `OperationControl.deadline`; independently,
+the core arms its timer through `SetTimer`. Unlike the idle timeout, events do
+not restart it. Expiry requests cancellation and waits up to `cancel_grace`,
+then releases once, preserving interrupted partial output and failing with
+`inference_deadline`, even if the adapter ignores cancellation. `None` preserves
+the existing behavior. Terminal paths and faults cancel outstanding timers.
 
 ## Durability
 
@@ -162,6 +195,8 @@ Other stream endings record the response and finish the turn in one commit:
 | `cancelled` by the provider | `cancelled` | `turn_finished(cancelled, provider_cancelled)` |
 | EOF without `Finished` | `interrupted` | `turn_finished(failed, provider_eof)` |
 | No event within `provider_idle_timeout` | `interrupted` | `turn_finished(failed, provider_stalled)` |
+| Inference deadline, after cancellation confirmation or grace | `interrupted` | `turn_finished(failed, inference_deadline)` |
+| Native payload/state bound exceeded | `failed`, `limit_exceeded` error, no eligible calls | `turn_finished(failed, limit_exceeded)` |
 | over `max_partial_bytes` | `interrupted` | `turn_finished(failed, response_too_large)` |
 | protocol violation | `failed`, `malformed_stream` error | `turn_finished(failed, malformed_stream)` |
 

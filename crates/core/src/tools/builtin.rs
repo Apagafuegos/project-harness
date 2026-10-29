@@ -9,7 +9,7 @@ use crate::session::{CallRef, EffectClass, EffectSet, ExecutionBackend, ResultCo
 pub(super) const MIB: u64 = 1024 * 1024;
 
 /// Provider-facing description of a compiled-in capability.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolDefinition {
     /// Reserved tool name.
     pub name: String,
