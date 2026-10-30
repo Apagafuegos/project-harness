@@ -349,6 +349,15 @@ fn transport_terminal(profile: Profile, error: TransportError) -> ProviderEvent 
 /// Authentication, 429 and explicit context-length statuses keep the transport's
 /// precedence; otherwise the body's error code decides the category.
 fn refine_http(profile: Profile, mut model: ModelError, body: &[u8]) -> ModelError {
+    // Local transport/parser/bound errors carry no HTTP status or response
+    // body. Refining those with an empty provider error hides their diagnosis.
+    let has_http_status = model
+        .provider_code
+        .as_deref()
+        .is_some_and(|code| code.starts_with("http_"));
+    if !has_http_status && body.is_empty() {
+        return model;
+    }
     let parsed = serde_json::from_slice::<serde_json::Value>(body).ok();
     let code = parsed
         .as_ref()

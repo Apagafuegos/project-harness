@@ -45,6 +45,10 @@ HTTP/1 only and no idle connection pooling make response release observable as
 TCP close, rather than retaining a pooled idle connection. HTTP/2 optimization
 is deferred. Reqwest diagnostics/URLs are never forwarded to persisted errors.
 
+## Amendment (m4-03)
+
+The ChatGPT Codex backend serves HTTP 200 SSE without `Content-Type`: accept a missing header on 2xx, still reject an explicit non-event-stream type as `malformed_stream`, and let the bounded SSE parser validate framing.
+
 ## SSE and lifetime
 
 Defaults: **256 KiB per framed event**, **4 MiB total response bytes**,

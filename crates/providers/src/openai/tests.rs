@@ -1342,6 +1342,160 @@ async fn expired_deadline_wins_before_ready_work_is_polled() {
     }
 }
 
+#[tokio::test]
+async fn missing_content_type_streams_successfully() {
+    let mut reply = parse_fixture(fixture_text("text"));
+    reply.headers.clear();
+    let server = Server::start(reply);
+    let adapter = adapter(Profile::ChatGptCodex, server.url.clone());
+    let mut stream = adapter.stream(
+        case(CaseKind::Text, Profile::ChatGptCodex).request,
+        Default::default(),
+    );
+    let mut text = String::new();
+    let mut completed = false;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
+            match event {
+                harness_core::model::ProviderEvent::TextDelta { text: delta, .. } => {
+                    text.push_str(&delta)
+                }
+                harness_core::model::ProviderEvent::Finished {
+                    outcome,
+                    finish_reason,
+                    ..
+                } => {
+                    assert_eq!(outcome, harness_core::model::ProviderOutcome::Completed);
+                    assert_eq!(finish_reason, Some(FinishReason::Stop));
+                    completed = true;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("stream completed");
+    assert!(completed);
+    assert_eq!(text, "Hello world");
+    assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn explicit_wrong_content_type_reaches_finished_as_malformed_stream() {
+    for content_type in ["application/json", "text/html"] {
+        let mut reply = parse_fixture(fixture_text("text"));
+        reply.headers = vec![("content-type".into(), content_type.into())];
+        let server = Server::start(reply);
+        let adapter = adapter(Profile::ChatGptCodex, server.url.clone());
+        let mut stream = adapter.stream(
+            case(CaseKind::Text, Profile::ChatGptCodex).request,
+            Default::default(),
+        );
+        let event = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            futures_util::StreamExt::next(&mut stream),
+        )
+        .await
+        .expect("terminal event")
+        .expect("event");
+        let harness_core::model::ProviderEvent::Finished {
+            outcome,
+            error: Some(error),
+            ..
+        } = event
+        else {
+            panic!("expected terminal error");
+        };
+        assert_eq!(outcome, harness_core::model::ProviderOutcome::Failed);
+        assert_eq!(error.code, ModelErrorCode::MalformedStream);
+        assert_eq!(error.message, "expected text/event-stream");
+        assert_eq!(error.provider_code, None);
+        assert!(futures_util::StreamExt::next(&mut stream).await.is_none());
+    }
+}
+
+#[test]
+fn non_http_transport_errors_keep_their_original_code_and_message() {
+    for profile in [Profile::Platform, Profile::ChatGptCodex] {
+        for (code, message) in [
+            (ModelErrorCode::MalformedStream, "truncated SSE event"),
+            (ModelErrorCode::LimitExceeded, "SSE byte limit exceeded"),
+            (ModelErrorCode::Transport, "HTTP transport failed"),
+        ] {
+            let transport_error = crate::error::TransportError::new(code, message);
+            let original = transport_error.model_error();
+            let event = super::transport_terminal(profile, transport_error);
+            let harness_core::model::ProviderEvent::Finished {
+                outcome,
+                error: Some(error),
+                ..
+            } = event
+            else {
+                panic!("expected terminal error");
+            };
+            assert_eq!(outcome, harness_core::model::ProviderOutcome::Failed);
+            assert_eq!(error, original);
+        }
+    }
+}
+
+#[test]
+fn sanitized_recorded_codex_stream_maps_to_completed_text_and_usage() {
+    use harness_core::model::{ProviderEvent, ProviderOutcome};
+    let fixture = include_str!("../../fixtures/openai/recorded-codex-text.sse");
+    assert!(fixture.starts_with("# RECORDED:"));
+    let reply = parse_fixture(fixture);
+    let body = std::str::from_utf8(&reply.body).expect("fixture UTF-8");
+    let (mut mapper, _) = new_mapper(Profile::ChatGptCodex);
+    let mut emitted = Vec::new();
+    for frame in body.split("\n\n").filter(|frame| !frame.is_empty()) {
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("native event data");
+        emitted.extend(
+            mapper
+                .push(&SseEvent {
+                    data: data.into(),
+                    ..Default::default()
+                })
+                .expect("recorded event maps"),
+        );
+    }
+    assert!(mapper.finished());
+    assert!(
+        mapper
+            .finish_eof()
+            .expect("native terminal event")
+            .is_empty()
+    );
+    assert_eq!(
+        emitted,
+        vec![
+            ProviderEvent::Started,
+            ProviderEvent::TextDelta {
+                block_index: 0,
+                text: "[recorded text]".into()
+            },
+            // Synthetic counts in the sanitized fixture preserve only availability.
+            ProviderEvent::UsageUpdated {
+                usage: Usage {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                }
+            },
+            ProviderEvent::Finished {
+                outcome: ProviderOutcome::Completed,
+                finish_reason: Some(FinishReason::Stop),
+                error: None,
+                continuation: None,
+            },
+        ]
+    );
+}
+
 // --------------------------------------------------------- test-only helpers
 
 /// Helpers used by the tests above; kept here so the module stays self-contained.

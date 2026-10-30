@@ -69,7 +69,10 @@ a proxy or loopback fixtures.
   another provider's namespace is `unsupported_capability`.
 - Errors keep ADR 0016's classification plus the provider's own error code, with
   fixed diagnostics: provider text is never echoed. `ChatGptCodex` adds the
-  `run codex login` hint. There is no automatic retry.
+  `run codex login` hint. Refinement is limited to HTTP-status/body errors;
+  non-HTTP transport errors retain their original code and message. A missing
+  `Content-Type` on 2xx is allowed (the Codex backend omits it); explicit
+  non-event-stream types are still rejected. There is no automatic retry.
 - `scripts/live-check.sh openai [--auth codex|api-key]` is the opt-in real turn
   check. It is never part of `check.sh` or CI, and prints no secrets or IDs. Set
   `HARNESS_LIVE_OPENAI_MODEL` to override the default `gpt-6.1-sol`, sourced from
@@ -79,8 +82,10 @@ a proxy or loopback fixtures.
   metadata retains `gpt-5.5`; use a platform model override for `--auth api-key`.
 - Set `HARNESS_LIVE_OPENAI_RECORDING` to a new path to retain the first completed
   text stream as a labeled fixture. The opt-in recorder replaces IDs, prose and
-  encrypted payloads **before** writing. No raw capture is ever saved. The latest
-  live run did not complete a stream, so no recording is claimed (ADR 0017).
+  encrypted payloads **before** writing. No raw capture is ever saved. The round-3
+  live check passed all five cases; `fixtures/openai/recorded-codex-text.sse`
+  (under `crates/providers`) is its sanitized stream, replayed by a mapper test
+  (ADR 0017).
 
 ADR 0017 holds the request mapping, the full event-mapping table, the profile
 differences with their Codex sources, the catalog sources and the live check.

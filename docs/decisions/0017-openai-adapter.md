@@ -206,7 +206,10 @@ Reasoning is carried as `ProviderState` instead:
 
 Transport classification from ADR 0016 is preserved. The adapter refines it with
 the bounded `TransportError::body()` (never logged) and with the `error`/
-`response.error` objects:
+`response.error` objects. Only errors with the transport's `http_*` provider
+code or a non-empty HTTP body are refined. Non-HTTP `malformed_stream`,
+`limit_exceeded` and `transport` errors keep their original code **and message**;
+classifying an empty body must not hide the transport diagnosis:
 
 | Evidence | Category |
 | --- | --- |
@@ -286,11 +289,30 @@ cancellation: fail (outcome=Failed finish=None error=ProviderFailure/"-")
 summary: fail (4 case(s))
 ```
 
-No retry was made. The no-code failures do **not** establish a specific backend
-contract violation or demonstrate successful streaming; that remains unverified.
+No retry was made in that round. Review subsequently established that these
+failures were client bugs, not a backend rejection: the successful SSE response
+omitted `Content-Type`, which the transport rejected as `malformed_stream`, and
+unconditional HTTP refinement then hid that diagnosis as `provider_failure`.
+Both bugs are corrected in round 3 (see ADR 0016's m4-03 amendment).
 The earlier round's two invocations with `gpt-5.5` had failed (one explicitly
 reported `model_not_found`); those are historical evidence only, not current
 model-catalog authority.
+
+### Round-3 live observation (2026-10-30)
+
+One authorized invocation after the header/refinement fixes, with default auth
+and model and sanitized recording enabled, passed all five cases without retry:
+
+```text
+live openai: auth=codex model=gpt-6.1-sol context=500000 max_output=unknown
+text streaming: pass (4 chars)
+usage: pass (input=31 output=5 cached=0 reasoning=0)
+tool round trip: pass
+invalid model: pass (InvalidRequest)
+cancellation: pass
+elapsed: 8s
+summary: pass
+```
 
 ### Sanitized recording tooling
 
@@ -303,9 +325,18 @@ metadata, and substitutes synthetic usage counts. Files are labeled `RECORDED`
 and never overwritten. The sentinel test verifies removal before writing.
 Ordinary tests never read credentials, cached account metadata, or the network.
 
-The round-2 invocation enabled this recorder, but no stream completed, so no
-recorded fixture was saved. Item 8 remains unfulfilled; no hand-written fixture
-is mislabeled as a recording.
+Round 2 saved no completed stream. The successful round-3 invocation saved
+`crates/providers/fixtures/openai/recorded-codex-text.sse`, explicitly labeled
+`RECORDED`. It retains the actual native event order (created, in-progress,
+message added, text delta, message done, completed) with only synthetic item
+identities, placeholder prose and synthetic usage counts; the fixture's HTTP
+wrapper is synthetic, not captured headers. No original ID, credential, account
+data, live token count or encrypted payload was written. The test
+`sanitized_recorded_codex_stream_maps_to_completed_text_and_usage` feeds its
+native events through `Mapper` and checks exactly one start, text, nullable
+usage, completed/stop and no continuation. The separate sentinel recorder test
+checks pre-write redaction of encrypted payloads even though this captured
+text-only turn did not produce a reasoning item.
 
 ## Evidence and scope
 
@@ -330,7 +361,10 @@ Echo deadline race: creating `sleep_until(now())` can be initially pending while
 an immediately-ready operation wins. The shared transport now checks expired
 deadlines before polling work; `expired_deadline_wins_before_ready_work_is_polled`
 pins this without editing the protected Echo test file. No test reads the real
-`~/.codex/auth.json` or opens a network connection outside loopback.
+`~/.codex/auth.json` or opens a network connection outside loopback. Round 3
+also tests successful headerless SSE, explicit JSON/HTML content-type rejection,
+and preservation of all three non-HTTP transport error categories and messages.
+The original m4-02 `wrong_content_type_and_interrupted_echo` test still passes.
 
 Out of scope for this step: hosted tools (`web_search`, `file_search`, image
 generation), audio/file inputs, `strict` tool schemas, WebSocket transport,

@@ -1,0 +1,22 @@
+# RECORDED: ChatGptCodex live stream, 2026-10-30; IDs, content and encrypted payloads replaced before writing.
+status: 200
+header: content-type: text/event-stream
+---
+event: response.created
+data: {"response":{},"type":"response.created"}
+
+event: response.in_progress
+data: {"response":{},"type":"response.in_progress"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"recorded-item-0","role":"assistant","type":"message"},"output_index":0,"type":"response.output_item.added"}
+
+event: response.output_text.delta
+data: {"delta":"[recorded text]","item_id":"recorded-item-0","output_index":0,"type":"response.output_text.delta"}
+
+event: response.output_item.done
+data: {"item":{"content":[],"id":"recorded-item-0","role":"assistant","type":"message"},"output_index":0,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":1,"output_tokens":1}},"type":"response.completed"}
+

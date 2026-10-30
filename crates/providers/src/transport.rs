@@ -120,13 +120,15 @@ impl Transport {
             .await?;
             return Err(TransportError::http(status.as_u16(), &headers, body));
         }
-        if !headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                v.split(';')
+        // The ChatGPT Codex backend can omit Content-Type on a valid SSE
+        // response. Missing is permitted; an explicit incompatible (or invalid)
+        // value is still rejected. The bounded SSE parser validates the body.
+        if let Some(content_type) = headers.get("content-type")
+            && !content_type.to_str().ok().is_some_and(|value| {
+                value
+                    .split(';')
                     .next()
-                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
             })
         {
             return Err(TransportError::new(
