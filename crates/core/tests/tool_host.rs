@@ -21,6 +21,8 @@ use std::{
 
 #[path = "sandbox/assertions.rs"]
 mod assertions;
+#[path = "../../../tests/support/loopback.rs"]
+mod loopback;
 
 fn assert_status(result: &ToolResult, expected: ToolStatus) {
     assertions::assert_status(
@@ -356,19 +358,29 @@ async fn s02_bash_protected_and_git_writes_fail_unchanged() {
 #[tokio::test]
 #[ignore = "S02 real Linux sandbox"]
 async fn s02_bash_network_is_denied() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let f = Fixture::new(&[]);
-    let (handle, view) = f
-        .run(
-            "bash",
-            json!({"command":format!("echo leak > /dev/tcp/127.0.0.1/{port}")}),
-        )
-        .await;
-    assert_status(results(&view)[0], ToolStatus::Failed);
-    assert!(listener.accept().is_err());
-    handle.shutdown().await;
+    for address in ["127.0.0.1", "127.0.0.2"] {
+        let listener = std::net::TcpListener::bind((address, 0)).unwrap();
+        let side_probe = loopback::SideProbe::register(listener.local_addr().unwrap());
+        let port = listener.local_addr().unwrap().port();
+        let nonce = format!("leak-{}", loopback::nonce());
+        let f = Fixture::new(&[]);
+        let (handle, view) = f
+            .run(
+                "bash",
+                json!({"command":format!("echo {nonce} > /dev/tcp/{address}/{port}")}),
+            )
+            .await;
+        drop(side_probe);
+        // Check the traffic independently, before checking the tool's result.
+        loopback::assert_no_nonce(&listener, &nonce);
+        assert_status(results(&view)[0], ToolStatus::Failed);
+        let output = text(results(&view)[0]);
+        assert!(
+            output.contains("Connection refused") || output.contains("Network is unreachable"),
+            "expected connect error: {output}"
+        );
+        handle.shutdown().await;
+    }
 }
 
 #[tokio::test]

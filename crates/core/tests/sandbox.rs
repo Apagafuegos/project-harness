@@ -22,6 +22,8 @@ use std::{
 
 #[path = "sandbox/assertions.rs"]
 mod assertions;
+#[path = "../../../tests/support/loopback.rs"]
+mod loopback;
 
 fn backend() -> &'static Sandbox {
     static BACKEND: OnceLock<Sandbox> = OnceLock::new();
@@ -197,17 +199,26 @@ fn payload() {
             )
             .unwrap_err();
             assert_eq!(error.raw_os_error(), Some(101), "external TCP: {error}"); // ENETUNREACH
-            let port = fs::read_to_string("/workspace/port").unwrap();
-            let error = TcpStream::connect_timeout(
-                &format!("127.0.0.1:{port}").parse().unwrap(),
-                Duration::from_millis(250),
-            )
-            .unwrap_err();
-            assert_eq!(
-                error.kind(),
-                io::ErrorKind::ConnectionRefused,
-                "host loopback: {error}"
-            );
+            let targets = fs::read_to_string("/workspace/loopback-targets").unwrap();
+            let nonce = fs::read_to_string("/workspace/loopback-nonce").unwrap();
+            for target in targets.lines() {
+                let error = match TcpStream::connect_timeout(
+                    &target.parse().unwrap(),
+                    Duration::from_millis(250),
+                ) {
+                    Ok(mut socket) => {
+                        use std::io::Write;
+                        socket.write_all(nonce.as_bytes()).unwrap();
+                        panic!("host loopback connected: {target}");
+                    }
+                    Err(error) => error,
+                };
+                assert_eq!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused,
+                    "host loopback: {error}"
+                );
+            }
             let mut interfaces: Vec<_> = fs::read_dir("/sys/class/net")
                 .into_iter()
                 .flatten()
@@ -333,13 +344,31 @@ fn s02_probe_required() {
 #[ignore = "S02 real Linux sandbox"]
 fn s02_network_dns_external_tcp_host_loopback_and_only_lo() {
     let f = Fixture::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listeners: Vec<_> = ["127.0.0.1:0", "127.0.0.2:0"]
+        .into_iter()
+        .map(|address| TcpListener::bind(address).unwrap())
+        .collect();
+    let probes: Vec<_> = listeners
+        .iter()
+        .map(|listener| loopback::SideProbe::register(listener.local_addr().unwrap()))
+        .collect();
+    let nonce = loopback::nonce();
+    fs::write(f.root().join("loopback-nonce"), &nonce).unwrap();
     fs::write(
-        f.root().join("port"),
-        listener.local_addr().unwrap().port().to_string(),
+        f.root().join("loopback-targets"),
+        listeners
+            .iter()
+            .map(|listener| listener.local_addr().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
     .unwrap();
-    succeeded(&f.payload("network", &[], false));
+    let result = f.payload("network", &[], false);
+    drop(probes);
+    for listener in &listeners {
+        loopback::assert_no_nonce(listener, &nonce);
+    }
+    succeeded(&result);
 }
 #[test]
 #[ignore = "S02 real Linux sandbox"]

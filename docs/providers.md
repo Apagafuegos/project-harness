@@ -54,3 +54,23 @@ core conformance cases. No real `~/.codex/auth.json` is opened. Native tool,
 usage, replay and unsupported-option conformance belongs to the real adapters.
 The workspace gate is `CARGO_NET_OFFLINE=true ./scripts/check.sh`, after a
 one-time `cargo fetch`, using the pinned Rust 1.99.1 toolchain.
+
+Loopback listeners must attribute requests: host services can probe newly opened
+ports. Fakes require the exact POST path (random per listener) and a random
+run-specific `x-harness-test` header set by the test client. Only matching
+requests affect request counts, submitted bodies and connection-close probes;
+other peers are counted, logged and closed with bounded reads in independent
+tasks. The run header is shared across redirect endpoints deliberately: a
+redirected POST must still be counted at its target. Connection-refusal tests
+hold a bound **non-listening** socket, reserving the port until HTTP and HTTPS
+attempts finish. The HTTP peer-close test also requires a matching request;
+TLS setup failure uses reserved refusal rather than an unattributable accept.
+
+Run `./scripts/test-loopback-probes.sh` for 20 repetitions each of providers and
+S02 tool-host tests, plus the S02 sandbox tests. This explicitly sets
+`HARNESS_TEST_LOOPBACK_PROBE=1`: each listener registers its address with a
+test-only background probe worker, which connects repeatedly with empty and junk
+requests (including `GET / HTTP/1.1`), without scanning ports. Initial probes are
+queued before the client starts. Workers stop and join when their registrations
+are dropped. Logs are retained in the printed temporary directory. This stress
+check is opt-in and is not added to `check.sh` or default CI.

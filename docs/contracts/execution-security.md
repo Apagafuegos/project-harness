@@ -43,3 +43,13 @@ separate enforcement backend before exceptions can work; approval alone cannot
 create it. Conformance S01–S02 must use real Linux isolation tests before `bash`
 is enabled. Kernel compromise and hostile same-user host processes are outside
 the stated v0.1 threat model.
+
+S02 loopback checks attribute connections using a fresh random nonce for each
+run, on both 127.0.0.1 and 127.0.0.2. Host services may probe new listeners, so
+an accept alone is not evidence of sandbox egress. After execution, tests drain
+pending connections with bounded reads, reject any received nonce, and count/log
+unrelated traffic. Tool-host checks also require a failed tool result with a
+connect-style error; the in-sandbox Rust payload still requires connection
+refusal and checks DNS, external TCP and the loopback-only interface list.
+`./scripts/test-loopback-probes.sh` explicitly enables repeated registry-driven
+side probes; it is not part of the default gate (see `docs/providers.md`).

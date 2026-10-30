@@ -30,9 +30,20 @@ use tokio::{
 };
 use transport::{Transport, TransportConfig};
 
+#[allow(dead_code)]
+#[path = "../../../tests/support/loopback.rs"]
+mod loopback;
+
+fn client_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(loopback::nonce)
+}
+
 const SECRET: &str = "SENTINEL-DO-NOT-DISCLOSE-987654321";
 fn credential() -> Credential {
-    Credential::bearer(SECRET.into(), HeaderMap::new(), None).unwrap()
+    let mut headers = HeaderMap::new();
+    headers.insert("x-harness-test", client_nonce().parse().unwrap());
+    Credential::bearer(SECRET.into(), headers, None).unwrap()
 }
 fn transport() -> Transport {
     Transport::new(TransportConfig {
@@ -62,8 +73,54 @@ fn request() -> ModelRequest {
         artifacts: ArtifactSource::default(),
     }
 }
+// A random run header identifies our client; each listener also has its own
+// random path. The header is shared so redirected POSTs remain attributable at
+// the target (a target-specific header would hide a redirect regression).
+async fn matching_request(socket: &mut tokio::net::TcpStream, path: &str, probe: &Probe) -> bool {
+    let mut input = vec![];
+    let mut buf = [0; 4096];
+    loop {
+        let n = socket.read(&mut buf).await.unwrap_or(0);
+        if n == 0 || input.len() + n > 1024 * 1024 {
+            return false;
+        }
+        input.extend_from_slice(&buf[..n]);
+        let Some(end) = input.windows(4).position(|v| v == b"\r\n\r\n") else {
+            continue;
+        };
+        let raw_header = String::from_utf8_lossy(&input[..end]);
+        let header = raw_header.to_ascii_lowercase();
+        if raw_header.lines().next() != Some(format!("POST {path} HTTP/1.1").as_str())
+            || !header
+                .lines()
+                .any(|line| line == format!("x-harness-test: {}", client_nonce()))
+        {
+            return false;
+        }
+        let length: usize = header
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: ")?.parse().ok())
+            .unwrap_or(0);
+        if length > 1024 * 1024 {
+            return false;
+        }
+        if input.len() < end + 4 + length {
+            continue;
+        }
+        probe.headers_ok.store(
+            header.contains("authorization: bearer sentinel-do-not-disclose-987654321")
+                && header.contains("user-agent: harness/0.1.0"),
+            Ordering::SeqCst,
+        );
+        *probe.submitted.lock().unwrap() =
+            serde_json::from_slice(&input[end + 4..end + 4 + length]).ok();
+        return true;
+    }
+}
+
 #[derive(Default)]
 struct Probe {
+    ignored: AtomicUsize,
     active: AtomicUsize,
     accepted: AtomicUsize,
     closed: AtomicBool,
@@ -74,6 +131,7 @@ struct Fake {
     endpoint: String,
     probe: Arc<Probe>,
     task: tokio::task::JoinHandle<()>,
+    _side_probe: loopback::SideProbe,
 }
 impl Drop for Fake {
     fn drop(&mut self) {
@@ -82,46 +140,63 @@ impl Drop for Fake {
 }
 impl Fake {
     async fn new(status: u16, headers: &str, body: Vec<u8>, hold: bool, setup: bool) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/echo", listener.local_addr().unwrap());
+        Self::at(
+            "127.0.0.1:0",
+            status,
+            headers,
+            body,
+            hold,
+            setup,
+            "text/event-stream",
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn at(
+        address: &str,
+        status: u16,
+        headers: &str,
+        body: Vec<u8>,
+        hold: bool,
+        setup: bool,
+        content_type: &str,
+    ) -> Self {
+        let listener = TcpListener::bind(address).await.unwrap();
+        let side_probe = loopback::SideProbe::register(listener.local_addr().unwrap());
+        let path = format!("/echo/{}", loopback::nonce());
+        let endpoint = format!("http://{}{path}", listener.local_addr().unwrap());
+        let content_type = content_type.to_owned();
         let probe = Arc::new(Probe::default());
         let p = probe.clone();
         let headers = headers.to_string();
         let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = tokio::select! {
+                    accepted = listener.accept() => accepted.unwrap(),
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        result.unwrap();
+                        continue;
+                    }
+                };
+                let p = p.clone();
+                let path = path.clone();
+                let headers = headers.clone();
+                let body = body.clone();
+                let content_type = content_type.clone();
+                connections.spawn(async move {
+                let mut buf = [0; 4096];
+                let matched = tokio::time::timeout(Duration::from_secs(1), matching_request(&mut socket, &path, &p)).await.unwrap_or(false);
+                if !matched {
+                    let ignored = p.ignored.fetch_add(1, Ordering::SeqCst) + 1;
+                    eprintln!("fake: ignored unrelated connection #{ignored}");
+                    return;
+                }
                 p.accepted.fetch_add(1, Ordering::SeqCst);
                 p.active.fetch_add(1, Ordering::SeqCst);
-                let mut input = vec![];
-                let mut buf = [0; 4096];
-                loop {
-                    let n = socket.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    input.extend_from_slice(&buf[..n]);
-                    if let Some(end) = input.windows(4).position(|v| v == b"\r\n\r\n") {
-                        let header = String::from_utf8_lossy(&input[..end]).to_ascii_lowercase();
-                        let length: usize = header
-                            .lines()
-                            .find_map(|line| line.strip_prefix("content-length: ")?.parse().ok())
-                            .unwrap_or(0);
-                        if input.len() >= end + 4 + length {
-                            p.headers_ok.store(
-                                header.contains(
-                                    "authorization: bearer sentinel-do-not-disclose-987654321",
-                                ) && header.contains("user-agent: harness/0.1.0"),
-                                Ordering::SeqCst,
-                            );
-                            *p.submitted.lock().unwrap() =
-                                serde_json::from_slice(&input[end + 4..end + 4 + length]).ok();
-                            break;
-                        }
-                    }
-                }
-                if !setup {
+                if !setup && status != 0 {
                     let response = format!(
-                        "HTTP/1.1 {status} Fake\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{headers}\r\n"
+                        "HTTP/1.1 {status} Fake\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{headers}\r\n"
                     );
                     let _ = socket.write_all(response.as_bytes()).await;
                     if !body.is_empty() {
@@ -145,12 +220,14 @@ impl Fake {
                 drop(socket);
                 p.active.fetch_sub(1, Ordering::SeqCst);
                 p.closed.store(true, Ordering::SeqCst);
+                });
             }
         });
         Self {
             endpoint,
             probe,
             task,
+            _side_probe: side_probe,
         }
     }
     async fn sse(body: &str) -> Self {
@@ -250,6 +327,54 @@ async fn code(fake: &Fake) -> error::TransportError {
         .expect("expected HTTP failure")
 }
 #[tokio::test]
+async fn unrelated_connections_do_not_touch_client_probes() {
+    let fake = Fake::sse("data: yes\n\n").await;
+    let url = reqwest::Url::parse(&fake.endpoint).unwrap();
+    let address = format!("{}:{}", url.host_str().unwrap(), url.port().unwrap());
+    // Isolate each part of the matcher, plus a silent connection. None may
+    // set accepted, active, closed, submitted, or headers_ok.
+    let mut idle = tokio::net::TcpStream::connect(&address).await.unwrap();
+    for (method, path, marker) in [
+        ("GET", url.path(), client_nonce()),
+        ("POST", "/", client_nonce()),
+        ("POST", url.path(), "wrong"),
+    ] {
+        let mut socket = tokio::net::TcpStream::connect(&address).await.unwrap();
+        socket.write_all(format!("{method} {path} HTTP/1.1\r\nx-harness-test: {marker}\r\nContent-Length: 2\r\n\r\n{{}}").as_bytes()).await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.probe.active.load(Ordering::SeqCst), 0);
+    assert!(!fake.probe.closed.load(Ordering::SeqCst));
+    assert!(!fake.probe.headers_ok.load(Ordering::SeqCst));
+    assert!(fake.probe.submitted.lock().unwrap().is_none());
+    assert!(fake.probe.ignored.load(Ordering::SeqCst) >= 3);
+    // The idle peer must not block a real request, and is bounded itself.
+    let mut stream = transport()
+        .post(&fake.endpoint, &json!({}), credential(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap(), b"data: yes\n\n");
+    fake.closed().await;
+    assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 1);
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), idle.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn invalid_bounds_never_open_transport() {
     let fake = Fake::sse("data: unused\n\n").await;
     for config in [
@@ -285,21 +410,23 @@ async fn invalid_bounds_never_open_transport() {
 }
 #[tokio::test]
 async fn wrong_content_type_and_interrupted_echo() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = [0; 4096];
-        let _ = socket.read(&mut buffer).await.unwrap();
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
-    });
+    let fake = Fake::at(
+        "127.0.0.1:0",
+        200,
+        "",
+        b"{}".to_vec(),
+        false,
+        false,
+        "application/json",
+    )
+    .await;
     let error = transport()
-        .post(&endpoint, &json!({}), credential(), Default::default())
+        .post(&fake.endpoint, &json!({}), credential(), Default::default())
         .await
         .err()
         .unwrap();
     assert_eq!(error.model_error().code, ModelErrorCode::MalformedStream);
-    task.await.unwrap();
+    fake.closed().await;
     let fake = Fake::sse("event: start\ndata: yes\n\nevent: text\ndata: partial\n\n").await;
     let events: Vec<_> = echo(&fake)
         .stream(request(), Default::default())
@@ -698,24 +825,12 @@ async fn url_policy_and_connection_failures() {
             .code,
         ModelErrorCode::InvalidRequest
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
-    let e = transport()
-        .post(&endpoint, &json!({}), credential(), Default::default())
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(e.model_error().code, ModelErrorCode::Transport);
-    no_secret(e);
-    // Reset during both HTTP and TLS setup, entirely on loopback.
+    // Keep the port reserved by a bound, non-listening socket. No other
+    // process can acquire it between bind and connect (HTTP or TLS).
+    let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+    reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     for scheme in ["http", "https"] {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("{scheme}://{}", listener.local_addr().unwrap());
-        let task = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            drop(socket);
-        });
+        let endpoint = format!("{scheme}://{}", reserved.local_addr().unwrap());
         let e = transport()
             .post(&endpoint, &json!({}), credential(), Default::default())
             .await
@@ -723,26 +838,36 @@ async fn url_policy_and_connection_failures() {
             .unwrap();
         assert!(!e.is_stopped());
         assert_eq!(e.model_error().code, ModelErrorCode::Transport);
-        task.await.unwrap();
+        no_secret(e);
     }
+    // A matching HTTP request whose peer closes without any response is
+    // also transport failure. TLS setup uses the reserved refusal above:
+    // an encrypted connection cannot be attributed by an HTTP header.
+    let reset = Fake::new(0, "", vec![], false, false).await;
+    let e = code(&reset).await;
+    assert!(!e.is_stopped());
+    assert_eq!(e.model_error().code, ModelErrorCode::Transport);
+    reset.closed().await;
 }
 
 #[tokio::test]
 async fn ipv6_loopback_opt_in() {
-    let listener = TcpListener::bind("[::1]:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let task = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut buffer = [0; 4096];
-        let _ = socket.read(&mut buffer).await.unwrap();
-        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 11\r\nConnection: close\r\n\r\ndata: yes\n\n").await.unwrap();
-    });
+    let fake = Fake::at(
+        "[::1]:0",
+        200,
+        "",
+        b"data: yes\n\n".to_vec(),
+        false,
+        false,
+        "text/event-stream",
+    )
+    .await;
     let mut bytes = transport()
-        .post(&endpoint, &json!({}), credential(), Default::default())
+        .post(&fake.endpoint, &json!({}), credential(), Default::default())
         .await
         .unwrap();
     assert_eq!(bytes.next().await.unwrap().unwrap(), b"data: yes\n\n");
-    task.await.unwrap();
+    fake.closed().await;
 }
 fn login_fixture(path: &std::path::Path, expiry: u64) -> String {
     let token = format!(
