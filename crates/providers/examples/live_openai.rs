@@ -260,8 +260,11 @@ async fn run(adapter: &OpenAiResponses, model: &str) -> usize {
         }
     }
 
-    // 4. One error case: an invalid model name.
+    // 4. One error case: an invalid model name. No reasoning control is asked
+    // for, so the request reaches the backend instead of failing locally on an
+    // uncatalogued model's capabilities.
     let mut input = base_input("harness-live-invalid-model");
+    input.options.reasoning_effort = None;
     input.items.push(user("This request must fail."));
     match collect(adapter, request(input), false).await {
         Ok(events) => match terminal(&events) {
@@ -399,7 +402,13 @@ fn describe_terminal(event: Option<&ProviderEvent>) -> String {
         }) => {
             let code = error
                 .as_ref()
-                .map(|error| format!("{:?}", error.code))
+                .map(|error| {
+                    format!(
+                        "{:?}/{:?}",
+                        error.code,
+                        error.provider_code.as_deref().unwrap_or("-")
+                    )
+                })
                 .unwrap_or_else(|| "-".into());
             format!("outcome={outcome:?} finish={finish_reason:?} error={code}")
         }

@@ -58,6 +58,9 @@ a proxy or loopback fixtures.
   `include: ["reasoning.encrypted_content"]`. Encrypted reasoning returns as
   owner-scoped `ProviderState` and is replayed only to the same owner. No
   `NativeContinuation` is ever emitted.
+- `ChatGptCodex` follows the Codex client's request shape: instructions as a
+  leading `developer` item, `tool_choice`/`parallel_tool_calls` always present,
+  and **no** `max_output_tokens` (that backend selects the output budget).
 - `openai::catalog(profile, instance)` supplies sourced limits for the context
   builder; capabilities for both profiles live in one table. Unknown models are
   text-plus-tools with no reasoning control.
@@ -68,7 +71,9 @@ a proxy or loopback fixtures.
   fixed diagnostics: provider text is never echoed. `ChatGptCodex` adds the
   `run codex login` hint. There is no automatic retry.
 - `scripts/live-check.sh openai [--auth codex|api-key]` is the opt-in real turn
-  check. It is never part of `check.sh` or CI, and prints no secrets or IDs.
+  check. It is never part of `check.sh` or CI, and prints no secrets or IDs. Set
+  `HARNESS_LIVE_OPENAI_MODEL` to a model your ChatGPT plan serves; the default is
+  the Codex catalog's top-priority listed model.
 
 ADR 0017 holds the request mapping, the full event-mapping table, the profile
 differences with their Codex sources, the catalog sources and the live check.

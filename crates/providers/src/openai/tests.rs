@@ -602,6 +602,12 @@ fn case(kind: CaseKind, profile: Profile) -> Case {
             "unsupported_option"
         }
     };
+    if profile == Profile::ChatGptCodex {
+        // `ChatGptCodex` sends no `max_output_tokens`, so the decoded evidence
+        // reports 0; the row carries that value so the round-trip check stays
+        // meaningful for every field the profile does serialize.
+        request.input.options.max_output_tokens = 0;
+    }
     Case {
         kind,
         fixture: fixture.into(),
@@ -803,7 +809,11 @@ fn platform_request_is_one_correct_stateless_body() {
 fn chatgpt_request_moves_instructions_into_input() {
     let input = full_input();
     let body = request::build(&input, Profile::ChatGptCodex, &Reads::default()).expect("build");
-    assert_eq!(body["max_output_tokens"], json!(512));
+    // The Codex client has no output-budget field; it always sends tool_choice
+    // and parallel_tool_calls instead.
+    assert!(body.get("max_output_tokens").is_none());
+    assert_eq!(body["tool_choice"], json!("auto"));
+    assert_eq!(body["parallel_tool_calls"], json!(true));
     assert!(body.get("instructions").is_none());
     assert_eq!(body["input"][0]["role"], json!("developer"));
     assert_eq!(

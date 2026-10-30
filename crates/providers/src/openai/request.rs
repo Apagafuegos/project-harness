@@ -147,12 +147,14 @@ pub(crate) fn build(
         "include".into(),
         json!(["reasoning.encrypted_content".to_string()]),
     );
-    // The core seam makes the output budget required, so both profiles send it.
-    // The Codex CLI happens not to set one; nothing documents a rejection.
-    body.insert(
-        "max_output_tokens".into(),
-        json!(input.options.max_output_tokens),
-    );
+    // The subscription backend selects the output budget: the Codex client has
+    // no such request field, so only the platform profile sends one.
+    if profile.sends_max_output_tokens() {
+        body.insert(
+            "max_output_tokens".into(),
+            json!(input.options.max_output_tokens),
+        );
+    }
     if let Some(text) = instructions
         && !profile.instructions_as_input()
     {
@@ -163,7 +165,14 @@ pub(crate) fn build(
             "tools".into(),
             Value::Array(input.tools.iter().map(function_tool).collect()),
         );
+    }
+    if profile.always_sends_tool_choice() || !input.tools.is_empty() {
         body.insert("tool_choice".into(), json!("auto"));
+    }
+    if profile.sends_parallel_tool_calls() {
+        // The harness executes calls sequentially, but the model may propose
+        // several in one response; the core handles interleaved calls.
+        body.insert("parallel_tool_calls".into(), json!(true));
     }
     if capabilities.reasoning_effort
         && (input.options.reasoning_effort.is_some() || options.summary.is_some())

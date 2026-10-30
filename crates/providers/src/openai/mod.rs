@@ -59,6 +59,28 @@ impl Profile {
         }
     }
 
+    /// Whether the request carries `max_output_tokens`.
+    ///
+    /// The platform API documents the field. The Codex client's
+    /// `ResponsesApiRequest` has no such member and the backend rejected a
+    /// request carrying it, so `ChatGptCodex` omits it: the subscription
+    /// backend chooses the output budget.
+    pub fn sends_max_output_tokens(self) -> bool {
+        matches!(self, Self::Platform)
+    }
+
+    /// Whether `tool_choice` is sent even when no tools are defined. The Codex
+    /// client's request struct makes it mandatory.
+    pub fn always_sends_tool_choice(self) -> bool {
+        matches!(self, Self::ChatGptCodex)
+    }
+
+    /// Whether `parallel_tool_calls` is sent. The Codex client always sets it;
+    /// the platform default is already `true`, so `Platform` omits it.
+    pub fn sends_parallel_tool_calls(self) -> bool {
+        matches!(self, Self::ChatGptCodex)
+    }
+
     /// Whether instructions travel as a leading `developer` input item instead
     /// of the top-level `instructions` field. The Codex client does the former.
     pub fn instructions_as_input(self) -> bool {

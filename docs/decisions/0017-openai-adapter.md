@@ -41,26 +41,22 @@ Sources for the profile facts below, all read at
 | Extra headers | `Accept: text/event-stream` | `Accept: text/event-stream`, `originator: codex_cli_rs` |
 | Account header | none | `chatgpt-account-id`, supplied by `CodexLogin` |
 | Instructions | top-level `instructions` string | leading `developer` input item, as the Codex client does |
-| `max_output_tokens` | sent | sent (see below) |
+| `max_output_tokens` | sent from `InferenceOptions` | **omitted**: the Codex request struct has no such field |
+| `tool_choice` | only when tools are present | always `"auto"` (the field is mandatory in the Codex struct) |
+| `parallel_tool_calls` | omitted (platform default is `true`) | always `true`, as the Codex client sets it |
 | `store`, `stream`, `include` | `false`, `true`, `["reasoning.encrypted_content"]` | identical |
 | Tools | `function` definitions | identical |
 | 401 diagnostic | `provider authentication failed` | same, plus `run \`codex login\`` |
 
 Two differences are deliberately **not** modelled, with reasons:
 
-- **`max_output_tokens`.** The Codex client never sends it: the
-  `ResponsesApiRequest` field list has no such member and `core/src/client.rs`
-  never sets one. That is a client budget policy, not a documented rejection,
-  and the seam makes the output budget required
-  (`InferenceOptions.max_output_tokens` equals the context builder's reserve).
-  Silently dropping a required control would make the harness's own budget
-  unenforceable, so both profiles send it. The opt-in live check is the gate
-  that will show a rejection if the backend has one; the check runs once and
-  its result is reported rather than retried.
 - **Session and thread headers.** `session-id`, `thread-id` and
   `x-client-request-id` are Codex-CLI bookkeeping for its own conversation
   store. Stateless harness requests have no equivalent identity to send, and the
   adapter must not invent one.
+- **`text` and `client_metadata`.** Both are optional in the Codex request
+  struct and carry CLI-specific controls (verbosity, internal telemetry) that
+  belong to a client, not to this seam.
 
 Instructions are the one structural difference taken from the source: Codex puts
 its base instructions in the input as a `developer` message
@@ -90,7 +86,7 @@ credential.
 | `ContextItem::ToolResult` | `{"type":"function_call_output","call_id":<native id>,"output":<text>}` |
 | `ContextItem::Summary` | user message `Summary of earlier conversation:\n\n…` |
 | `tools` | `{"type":"function","name","description","parameters"}` per definition |
-| `options.max_output_tokens` | `max_output_tokens` |
+| `options.max_output_tokens` | `max_output_tokens` (**`Platform` only**) |
 | `options.reasoning_effort` | `reasoning.effort` (`low`/`medium`/`high`), only for models whose sourced capabilities allow it |
 | `openai.reasoning_summary` | `reasoning.summary` (`auto`/`concise`/`detailed`) |
 | `openai.prompt_cache_key` | `prompt_cache_key` |
@@ -98,7 +94,18 @@ credential.
 
 Fixed fields: `store: false`, `stream: true`,
 `include: ["reasoning.encrypted_content"]`, and `tool_choice: "auto"` whenever
-tools are present.
+tools are present. `ChatGptCodex` additionally always sends `tool_choice` and
+`parallel_tool_calls: true`, and never sends `max_output_tokens`.
+
+**The output budget on the subscription profile.** `InferenceOptions`
+`.max_output_tokens` is required by the seam, but the ChatGPT Codex backend's
+request vocabulary has no output-budget field: `ResponsesApiRequest` in
+`codex-rs/codex-api/src/common.rs` has no such member and
+`codex-rs/core/src/client.rs` never sets one. Following the source for this
+profile therefore means the field is not transmitted, and the subscription
+backend selects the output budget. The context builder still uses the same
+reserve for planning and budget accounting; it is simply not a wire control on
+this endpoint. `Platform` sends it, as the official reference documents.
 
 **`strict` is omitted.** OpenAI's strict mode requires every property to be
 required and `additionalProperties: false`, which the harness's own schemas do
@@ -236,9 +243,9 @@ adapter never offers a control it cannot verify.
 
 The ChatGPT-side output limit is left **unknown, not invented**: the Codex model
 catalog carries no `max_output_tokens` for this model, and the backend's client
-sends no output-token field. Unknown is the honest value; `ModelLimits` treats
-`None` as unknown rather than zero, and the context builder still refuses to
-infer when a *context* window is unknown (here it is known). Applications must
+sends no output-budget field at all. Unknown is the honest value; `ModelLimits`
+treats `None` as unknown rather than zero, and the context builder still refuses
+to infer when a *context* window is unknown (here it is known). Applications must
 use `openai::catalog` for the provider instance so the builder and the adapter
 agree; a different context window on the two profiles for the same model name is
 the reason the catalog is profile-aware.
@@ -249,22 +256,43 @@ the reason the catalog is profile-aware.
 `examples/live_openai.rs` through the real adapter. It is never part of
 `check.sh` or CI. Default auth is `codex` (the subscription login); `--auth
 api-key` uses `OPENAI_API_KEY`. The model is `HARNESS_LIVE_OPENAI_MODEL`,
-defaulting to `gpt-5.5`, which the Codex catalog lists. It covers streaming text,
+defaulting to `gpt-5.5`, the highest-priority list-visible model in the Codex
+catalog and available to every plan the catalog names. It covers streaming text,
 one tool-call round trip with a scripted approval, usage, an invalid model name
 and a cancellation mid-stream, prints a pass/fail summary only, and never prints
 tokens, account IDs or response IDs.
+
+Observed on 2026-10-30, twice (once before and once after aligning the profile
+with the Codex request field set), on this machine's ChatGPT login:
+
+- `CodexLogin`, the endpoint, the `originator` header and the request shape all
+  work: the backend returns normalized JSON errors that the adapter maps, rather
+  than transport or authentication failures.
+- Both runs ended `invalid_request`; the second showed
+  `provider_code: model_not_found` for `gpt-5.5`, so this account's subscription
+  does not serve that model even though the shipped catalog lists it for every
+  plan. The text, tool and cancellation cases therefore did not complete.
+- The invalid-model case passed in both runs, exercising real error mapping.
+
+This is a model-availability fact, not a request-shape defect: with the
+source-conformant body the backend reaches model resolution and reports the
+model, which it could not do for a body it rejected outright. The default stays
+as sourced; users point `HARNESS_LIVE_OPENAI_MODEL` at a model their plan
+serves, and the check is not retried in a loop.
 
 ## Evidence and scope
 
 `crates/providers/src/openai/tests.rs` runs the **complete 17-case public
 conformance manifest on both profiles** over hand-written fixtures, through the
 real adapter and a loopback fake server (`request_preservation` decodes the
-actual submitted JSON). Unit tests cover the golden Platform and ChatGptCodex
-request bodies, capability and provider-option refusal, owner-scoped state
-replay, unknown/ignored event counters, malformed-stream detection, error
-classification, the Codex login hint, no-retry behaviour and secret redaction.
-No test reads the real `~/.codex/auth.json` or opens a network connection outside
-loopback.
+actual submitted JSON). Because `ChatGptCodex` serializes no output budget, its
+rows carry `max_output_tokens: 0`, the value the decoded wire request yields;
+every field the profile does serialize still has to round-trip exactly. Unit
+tests cover the golden Platform and ChatGptCodex request bodies, capability and
+provider-option refusal, owner-scoped state replay, unknown/ignored event
+counters, malformed-stream detection, error classification, the Codex login
+hint, no-retry behaviour and secret redaction. No test reads the real
+`~/.codex/auth.json` or opens a network connection outside loopback.
 
 Out of scope for this step: hosted tools (`web_search`, `file_search`, image
 generation), audio/file inputs, `strict` tool schemas, WebSocket transport,
