@@ -576,6 +576,10 @@ async fn continuation_switch_is_rejected_by_default_with_the_portability_report(
     );
     // The report never carries the payload.
     assert!(!err.contains("state!!"), "{err}");
+    // Keep the transcript visible in the test log: it is the user-facing output.
+    for line in err.lines().filter(|line| line.starts_with("switch: ")) {
+        println!("{line}");
+    }
     assert_eq!(provider.streams().len(), 0, "no inference was opened");
     assert_eq!(
         f.snapshot(&err).sequence(),
@@ -614,6 +618,9 @@ async fn continuation_switch_omits_with_an_explicit_policy_and_runs_the_turn() {
         "{err}"
     );
     let request = &provider.streams()[0].request;
+    for line in err.lines().filter(|line| line.starts_with("switch: ")) {
+        println!("{line}");
+    }
     assert_eq!(request.input.model.provider_instance, "other");
     assert!(request.input.continuation.is_none());
     assert!(request.input.items.iter().all(|item| {
