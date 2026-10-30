@@ -1047,6 +1047,280 @@ fn thinking_and_redacted_blocks_replay_verbatim_in_order() {
     );
 }
 
+// ----------------------------------------------- foreign native call ids
+
+/// One tool call and its result, with the native id the stored turn carries.
+fn tool_exchange(provider_call_id: Option<&str>) -> (ModelInput, String) {
+    let call_id = CallId::new();
+    let harness = call_id.as_str().to_owned();
+    let input = ModelInput {
+        model: model(),
+        items: vec![
+            user("Read notes.txt"),
+            ContextItem::Assistant {
+                entry_id: EntryId::new(),
+                outcome: harness_core::session::ResponseOutcome::Completed,
+                content: vec![ContentBlock::ToolCall {
+                    call_id: call_id.clone(),
+                    name: "read".into(),
+                    arguments: serde_json::from_value(json!({"path": "notes.txt"})).expect("args"),
+                    provider_call_id: provider_call_id.map(str::to_owned),
+                }],
+            },
+            ContextItem::ToolResult {
+                entry_id: EntryId::new(),
+                provenance: Provenance::Executor,
+                result: ToolResult {
+                    call: CallRef {
+                        response_entry_id: EntryId::new(),
+                        call_id,
+                    },
+                    invocation_id: None,
+                    status: ToolStatus::Succeeded,
+                    content: vec![ContentBlock::Text {
+                        text: "file contents".into(),
+                    }],
+                    metadata: ToolMetadata {
+                        exit_code: Some(0),
+                        duration_ms: Some(3),
+                        output_truncated: false,
+                        provenance: Provenance::Executor,
+                        artifacts: Vec::new(),
+                        code: None,
+                    },
+                },
+            },
+        ],
+        tools: tools(),
+        options: options(64),
+        continuation: None,
+    };
+    (input, harness)
+}
+
+/// A tool call issued by the *other* provider: its id is the stored identity, so
+/// it is replayed verbatim when Anthropic can take it, and replaced by one
+/// deterministic, plain identifier when it cannot. Either way the `tool_use` and
+/// its `tool_result` name the same id, on this request and on every later one,
+/// which is what keeps a call paired across a switch without editing the
+/// preserved-thinking prefix.
+#[test]
+fn a_foreign_call_id_stays_paired_across_a_provider_switch() {
+    let (input, _) = tool_exchange(Some("call_fixture_1"));
+    let body = request::build(&input, &Reads::default()).expect("foreign id");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "call_fixture_1");
+    assert_eq!(
+        body["messages"][2]["content"][0]["tool_use_id"],
+        "call_fixture_1"
+    );
+    let (input, _) = tool_exchange(Some("toolu_fixture_1"));
+    let body = request::build(&input, &Reads::default()).expect("own id");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "toolu_fixture_1");
+
+    for foreign in [
+        "call.1",
+        "call:1",
+        "",
+        "id with space",
+        "call/naïve",
+        "x".repeat(65).as_str(),
+    ] {
+        let (input, harness) = tool_exchange(Some(foreign));
+        let body = request::build(&input, &Reads::default()).expect("substituted id");
+        let id = body["messages"][1]["content"][0]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        assert!(
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "unusable id {id:?} from {foreign:?}"
+        );
+        assert_eq!(
+            body["messages"][2]["content"][0]["tool_use_id"],
+            Value::String(id.clone())
+        );
+        // Derived from the harness call id, not from a counter or the request.
+        assert_eq!(id, harness);
+        assert_eq!(
+            request::build(&input, &Reads::default()).expect("replay"),
+            body
+        );
+    }
+}
+
+// --------------------------------------------------- preserved thinking
+
+fn drop_block() -> Value {
+    json!({"prefix_mismatch_behavior": "drop_block"})
+}
+
+/// Situation one: an untouched, append-only history replays one signed block.
+/// Nothing has been edited, so the block passes the prefix check; the control
+/// is still requested, because the same body must stay safe once the prefix
+/// does change (the alternative is a 400 on enforcing accounts).
+#[test]
+fn preserved_thinking_is_requested_on_an_untouched_replayed_history() {
+    let payload = br#"{"type":"thinking","thinking":"step one","signature":"sig_fixture_replay"}"#;
+    let (input, reads) = state_input(payload, None);
+    let body = request::build(&input, &reads).expect("replay");
+    assert_eq!(
+        body,
+        json!({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 256,
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "step one", "signature": "sig_fixture_replay"},
+                        {"type": "text", "text": "answer"},
+                    ],
+                },
+            ],
+            "thinking": {"type": "adaptive", "block_binding": drop_block()},
+        })
+    );
+    assert!(request::replays_thinking(&body));
+}
+
+/// Situation two: a projection the harness already compacted and switched
+/// through. The summary replaced the turns before the retained assistant turn,
+/// so that turn's signed block can never pass the prefix check; a foreign
+/// (switched-away) state block earlier in the projection is omitted as always.
+#[test]
+fn preserved_thinking_is_requested_behind_a_summary_and_a_switch() {
+    let payload =
+        br#"{"type":"thinking","thinking":"kept reasoning","signature":"sig_after_summary"}"#;
+    let (mut input, reads) = state_input(payload, None);
+    let foreign = br#"{"type":"thinking","thinking":"other account","signature":"sig_foreign"}"#;
+    let foreign_ref = ArtifactRef {
+        sha256: Digest::of(foreign),
+        bytes: foreign.len() as u64,
+    };
+    input.items = vec![
+        ContextItem::Instructions {
+            instructions: vec![Instruction {
+                level: InstructionLevel::System,
+                text: "You are the harness.".into(),
+            }],
+        },
+        // Compaction replaced every earlier turn with this summary.
+        ContextItem::Summary {
+            entry_id: EntryId::new(),
+            summary: "Turns one to three.".into(),
+        },
+        user("Keep going"),
+        // A turn produced before a provider switch; its state belongs to the
+        // other provider instance and is never replayed here.
+        ContextItem::Assistant {
+            entry_id: EntryId::new(),
+            outcome: harness_core::session::ResponseOutcome::Completed,
+            content: vec![
+                ContentBlock::ProviderState {
+                    owner: ModelRef {
+                        provider_instance: "openai-codex".into(),
+                        model: "gpt-6.1-sol".into(),
+                    },
+                    schema: STATE_SCHEMA.into(),
+                    artifact: foreign_ref,
+                },
+                ContentBlock::Text {
+                    text: "from the other provider".into(),
+                },
+            ],
+        },
+        user("And now?"),
+        ContextItem::Assistant {
+            entry_id: EntryId::new(),
+            outcome: harness_core::session::ResponseOutcome::Completed,
+            content: vec![
+                ContentBlock::ProviderState {
+                    owner: model(),
+                    schema: STATE_SCHEMA.into(),
+                    artifact: ArtifactRef {
+                        sha256: Digest::of(payload),
+                        bytes: payload.len() as u64,
+                    },
+                },
+                ContentBlock::Text {
+                    text: "pong".into(),
+                },
+            ],
+        },
+    ];
+    let body = request::build(&input, &reads).expect("replay");
+    assert_eq!(
+        body,
+        json!({
+            "model": "claude-sonnet-5-5",
+            "max_tokens": 256,
+            "stream": true,
+            "system": "You are the harness.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Summary of earlier conversation:\n\nTurns one to three."},
+                        {"type": "text", "text": "Keep going"},
+                    ],
+                },
+                // The foreign block is gone; the provider's own text stays.
+                {"role": "assistant", "content": [{"type": "text", "text": "from the other provider"}]},
+                {"role": "user", "content": [{"type": "text", "text": "And now?"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "kept reasoning", "signature": "sig_after_summary"},
+                        {"type": "text", "text": "pong"},
+                    ],
+                },
+            ],
+            "thinking": {"type": "adaptive", "block_binding": drop_block()},
+        })
+    );
+    assert!(request::replays_thinking(&body));
+}
+
+/// The beta header and the body control are chosen by one predicate, so a
+/// request can never carry `block_binding` without the beta that permits it
+/// (and vice versa).
+#[test]
+fn preserved_thinking_beta_header_follows_the_body_predicate() {
+    let beta = AnthropicMessages::headers(true);
+    assert_eq!(
+        beta.get("anthropic-beta")
+            .map(|value| value.to_str().unwrap()),
+        Some(super::preserved::BETA)
+    );
+    assert_eq!(
+        super::preserved::BETA,
+        "thinking-binding-controls-2026-08-01"
+    );
+    let plain = AnthropicMessages::headers(false);
+    assert!(plain.get("anthropic-beta").is_none());
+    for headers in [&beta, &plain] {
+        assert_eq!(
+            headers.get("anthropic-version").unwrap().to_str().unwrap(),
+            "2026-10-21"
+        );
+        assert_eq!(
+            headers.get("accept").unwrap().to_str().unwrap(),
+            "text/event-stream"
+        );
+    }
+    // A body with no replayed block sends neither, which keeps the golden
+    // request above (`request_body_is_one_correct_messages_body`) unchanged.
+    let body = request::build(&full_input(), &Reads::default()).expect("build");
+    assert!(!request::replays_thinking(&body));
+    assert!(body.get("thinking").unwrap().get("block_binding").is_none());
+}
+
 #[test]
 fn a_modified_thinking_payload_is_not_replayable() {
     for payload in [

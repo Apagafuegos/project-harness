@@ -1,7 +1,7 @@
 //! Offline end-to-end client tests: real journals/tools, injected scripted inference and I/O.
 use harness::ask::{self, Io, Options, Terminal};
 use harness_core::{
-    context::ModelLimits,
+    context::{ContextItem, ModelCapabilities, ModelInfo, ModelLimits},
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -47,6 +47,9 @@ impl Fixture {
                 session: None,
                 model,
                 explicit_model: false,
+                explicit_provider: false,
+                switch_policy: Portability::Reject,
+                known_instances: Vec::new(),
                 summary_model: None,
                 prompt: "hello".into(),
                 approve_read_only: false,
@@ -485,18 +488,258 @@ async fn argument_summary_is_bounded_single_line_and_terminal_errors_deny() {
     assert_eq!(result_status(&f.snapshot(&err)), ToolStatus::Denied);
 }
 
+/// One completed response carrying owner-scoped native state, so a later
+/// switch has something optional to lose.
+fn native_reply(text: &str) -> Script {
+    Script::new([
+        Step::Event(ProviderEvent::Started),
+        Step::text(0, text),
+        Step::provider_state(1, "mock.state.v1", b"state!!".to_vec()),
+        Step::completed(FinishReason::Stop),
+    ])
+}
+
+/// Catalog the switch targets, and tell the client which instances exist.
+fn switching_fixture(policy: Portability) -> Fixture {
+    let mut f = Fixture::new();
+    let other = ModelRef {
+        provider_instance: "other".into(),
+        model: "cheap".into(),
+    };
+    let text_only = ModelRef {
+        provider_instance: "other".into(),
+        model: "text-only".into(),
+    };
+    for (model, capabilities) in [
+        (other.clone(), ModelCapabilities::default()),
+        (
+            text_only,
+            ModelCapabilities {
+                tools: true,
+                ..Default::default()
+            },
+        ),
+    ] {
+        f.options.driver.runtime.context.catalog.insert(
+            model,
+            ModelInfo {
+                limits: ModelLimits {
+                    context_tokens: Some(128_000),
+                    max_output_tokens: None,
+                },
+                capabilities,
+            },
+        );
+    }
+    f.options.known_instances = vec!["test-codex".into(), "other".into()];
+    f.options.switch_policy = policy;
+    f
+}
+
+/// `--switch-policy reject` (the default) refuses a continuation that names
+/// another provider when native state would be lost: the report goes to stderr,
+/// the exit code is 2, and nothing is written.
 #[tokio::test]
-async fn continuation_refuses_auth_owner_or_summary_policy_change() {
+async fn continuation_switch_is_rejected_by_default_with_the_portability_report() {
+    let mut f = switching_fixture(Portability::Reject);
+    let (code, out, err) = f
+        .run(
+            Arc::new(ScriptedProvider::new([native_reply("first")])),
+            None,
+        )
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"first");
+    let before = f.snapshot(&err);
+    f.options.session = Some(before.session_id().clone());
+    f.options.model = ModelRef {
+        provider_instance: "other".into(),
+        model: "cheap".into(),
+    };
+    f.options.explicit_provider = true;
+    let provider = Arc::new(ScriptedProvider::new([]));
+    let (code, out, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "a refused switch runs no turn");
+    assert!(err.contains("error: portability_loss"), "{err}");
+    assert!(
+        err.contains("switch: refused from test-codex/scripted to other/cheap"),
+        "{err}"
+    );
+    assert!(
+        err.contains("switch: omits entry=") && err.contains("part=block[1]"),
+        "{err}"
+    );
+    assert!(
+        err.contains("owner=test-codex/scripted schema=mock.state.v1 bytes=7"),
+        "{err}"
+    );
+    // The report never carries the payload.
+    assert!(!err.contains("state!!"), "{err}");
+    assert_eq!(provider.streams().len(), 0, "no inference was opened");
+    assert_eq!(
+        f.snapshot(&err).sequence(),
+        before.sequence(),
+        "a refusal writes nothing"
+    );
+}
+
+/// `--switch-policy omit-optional` prints the same report and then runs the
+/// turn on the target model.
+#[tokio::test]
+async fn continuation_switch_omits_with_an_explicit_policy_and_runs_the_turn() {
+    let mut f = switching_fixture(Portability::OmitOptional);
+    let (_, _, err) = f
+        .run(
+            Arc::new(ScriptedProvider::new([native_reply("first")])),
+            None,
+        )
+        .await;
+    f.options.session = Some(f.snapshot(&err).session_id().clone());
+    f.options.model = ModelRef {
+        provider_instance: "other".into(),
+        model: "cheap".into(),
+    };
+    f.options.explicit_model = true;
+    let provider = Arc::new(ScriptedProvider::new([reply("second")]));
+    let (code, out, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"second");
+    assert!(
+        err.contains("switch: switched from test-codex/scripted to other/cheap"),
+        "{err}"
+    );
+    assert!(
+        err.contains("owner=test-codex/scripted schema=mock.state.v1 bytes=7"),
+        "{err}"
+    );
+    let request = &provider.streams()[0].request;
+    assert_eq!(request.input.model.provider_instance, "other");
+    assert!(request.input.continuation.is_none());
+    assert!(request.input.items.iter().all(|item| {
+        match item {
+            ContextItem::Assistant { content, .. } => !content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ProviderState { .. })),
+            _ => true,
+        }
+    }));
+}
+
+/// Without an override a continuation keeps the branch's model: choosing a
+/// different default provider must not silently switch.
+#[tokio::test]
+async fn continuation_without_an_override_keeps_the_saved_model() {
+    let mut f = switching_fixture(Portability::Reject);
+    let (_, _, err) = f
+        .run(
+            Arc::new(ScriptedProvider::new([native_reply("first")])),
+            None,
+        )
+        .await;
+    f.options.session = Some(f.snapshot(&err).session_id().clone());
+    f.options.model = ModelRef {
+        provider_instance: "other".into(),
+        model: "cheap".into(),
+    };
+    let provider = Arc::new(ScriptedProvider::new([reply("second")]));
+    let (code, out, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, b"second");
+    assert!(!err.contains("switch:"), "{err}");
+    assert_eq!(
+        provider.streams()[0].request.input.model,
+        ModelRef {
+            provider_instance: "test-codex".into(),
+            model: "scripted".into()
+        }
+    );
+}
+
+/// A required incompatibility cannot be omitted under either policy. The
+/// history holds a tool call and its result, so a target without tool support is
+/// refused even with `omit-optional`.
+#[tokio::test]
+async fn a_required_incompatibility_is_refused_under_both_policies() {
+    for policy in [Portability::Reject, Portability::OmitOptional] {
+        let mut f = switching_fixture(policy);
+        let no_tools = ModelRef {
+            provider_instance: "other".into(),
+            model: "no-tools".into(),
+        };
+        f.options.driver.runtime.context.catalog.insert(
+            no_tools.clone(),
+            ModelInfo {
+                limits: ModelLimits {
+                    context_tokens: Some(128_000),
+                    max_output_tokens: None,
+                },
+                capabilities: ModelCapabilities {
+                    tools: false,
+                    ..Default::default()
+                },
+            },
+        );
+        let (code, _, err) = f
+            .run(
+                Arc::new(ScriptedProvider::new([
+                    proposal("read", json!({"path": "note"})),
+                    reply("denied"),
+                ])),
+                None,
+            )
+            .await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(result_status(&f.snapshot(&err)), ToolStatus::Denied);
+        f.options.session = Some(f.snapshot(&err).session_id().clone());
+        f.options.model = no_tools;
+        f.options.explicit_provider = true;
+        let (code, out, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
+        assert_eq!(code, 2, "{err}");
+        assert!(out.is_empty());
+        assert!(err.contains("error: portability_loss"), "{err}");
+        assert!(
+            err.contains("switch: refused from test-codex/scripted to other/no-tools"),
+            "{err}"
+        );
+        assert!(
+            err.contains("switch: requires entry=") && err.contains("capability=tools"),
+            "{err}"
+        );
+    }
+}
+
+/// A target instance the process cannot serve is a configuration error before
+/// anything is opened, not a failed inference.
+#[tokio::test]
+async fn an_unregistered_target_instance_is_refused_before_opening() {
+    let mut f = switching_fixture(Portability::Reject);
+    let (_, _, err) = f
+        .run(
+            Arc::new(ScriptedProvider::new([native_reply("first")])),
+            None,
+        )
+        .await;
+    f.options.session = Some(f.snapshot(&err).session_id().clone());
+    f.options.known_instances = vec!["test-codex".into()];
+    f.options.model = ModelRef {
+        provider_instance: "missing".into(),
+        model: "cheap".into(),
+    };
+    f.options.explicit_provider = true;
+    let (code, out, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("provider_not_configured"), "{err}");
+}
+
+#[tokio::test]
+async fn continuation_refuses_a_summary_policy_change() {
     let mut f = Fixture::new();
     let (_, _, err) = f
         .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
         .await;
     f.options.session = Some(f.snapshot(&err).session_id().clone());
-    f.options.model.provider_instance = "other".into();
-    let (code, _, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
-    assert_eq!(code, 2);
-    assert!(err.contains("session_model_mismatch"));
-    f.options.model.provider_instance = "test-codex".into();
     f.options.summary_model = Some(f.options.model.clone());
     let (code, _, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
     assert_eq!(code, 2);

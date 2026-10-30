@@ -4,6 +4,7 @@
 #   scripts/live-check.sh openai [--auth codex|api-key]
 #   scripts/live-check.sh anthropic
 #   scripts/live-check.sh ask
+#   scripts/live-check.sh switch [--auth codex|api-key]
 #
 # For OpenAI, default auth is `codex`, the user's ChatGPT subscription through
 # the read-only Codex CLI login. `--auth api-key` uses OPENAI_API_KEY instead.
@@ -15,10 +16,47 @@
 # can tell "skipped" from "passed" (0) and "failed" (1). The model comes from
 # HARNESS_LIVE_ANTHROPIC_MODEL, defaulting to claude-haiku-5-5.
 #
+# `switch` proves mid-session switching in one durable session. With
+# ANTHROPIC_API_KEY it runs OpenAI -> Anthropic -> OpenAI with a tool round trip;
+# without it (the case on this machine) it runs the same-provider variant,
+# openai::LIVE_CHECK_MODEL -> another model the account serves -> back, and
+# reports the cross-provider part as skipped. Auth defaults to `codex`; override
+# with HARNESS_LIVE_SWITCH_AUTH=api-key. It emits only pass/fail lines, model
+# names and stable turn codes.
+#
 # This spends real quota, so it is only ever run on request.
 set -euo pipefail
 
 provider="${1:-}"
+if [ "$provider" = "switch" ]; then
+  shift
+  auth="${HARNESS_LIVE_SWITCH_AUTH:-codex}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+    --auth)
+      [ "$#" -ge 2 ] || {
+        echo "--auth needs a value" >&2
+        exit 2
+      }
+      auth="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+    esac
+  done
+  case "$auth" in
+  codex | api-key) ;;
+  *)
+    echo "unknown auth: $auth (use codex or api-key)" >&2
+    exit 2
+    ;;
+  esac
+  cd "$(dirname "$0")/.."
+  exec cargo run --locked --quiet -p harness-providers --example live_switch -- "$auth"
+fi
 if [ "$provider" = "ask" ]; then
   [ "$#" -eq 1 ] || {
     echo "usage: scripts/live-check.sh ask" >&2
@@ -54,6 +92,7 @@ if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ]; then
   echo "usage: scripts/live-check.sh openai [--auth codex|api-key]" >&2
   echo "       scripts/live-check.sh anthropic" >&2
   echo "       scripts/live-check.sh ask" >&2
+  echo "       scripts/live-check.sh switch [--auth codex|api-key]" >&2
   exit 2
 fi
 shift

@@ -874,6 +874,119 @@ fn platform_request_is_one_correct_stateless_body() {
     assert_eq!(body, expected);
 }
 
+/// One tool call and its result, with the native id the stored turn carries.
+fn tool_exchange(provider_call_id: Option<&str>) -> (ModelInput, String) {
+    let call_id = CallId::new();
+    let harness = call_id.as_str().to_owned();
+    let input = ModelInput {
+        model: model(),
+        items: vec![
+            user("Read notes.txt"),
+            ContextItem::Assistant {
+                entry_id: EntryId::new(),
+                outcome: harness_core::session::ResponseOutcome::Completed,
+                content: vec![ContentBlock::ToolCall {
+                    call_id: call_id.clone(),
+                    name: "read".into(),
+                    arguments: serde_json::from_value(json!({"path": "notes.txt"})).expect("args"),
+                    provider_call_id: provider_call_id.map(str::to_owned),
+                }],
+            },
+            ContextItem::ToolResult {
+                entry_id: EntryId::new(),
+                provenance: Provenance::Executor,
+                result: ToolResult {
+                    call: CallRef {
+                        response_entry_id: EntryId::new(),
+                        call_id,
+                    },
+                    invocation_id: None,
+                    status: ToolStatus::Succeeded,
+                    content: vec![ContentBlock::Text {
+                        text: "file contents".into(),
+                    }],
+                    metadata: ToolMetadata {
+                        exit_code: Some(0),
+                        duration_ms: Some(3),
+                        output_truncated: false,
+                        provenance: Provenance::Executor,
+                        artifacts: Vec::new(),
+                        code: None,
+                    },
+                },
+            },
+        ],
+        tools: tools(),
+        options: options(64),
+        continuation: None,
+    };
+    (input, harness)
+}
+
+/// The mirror image of the Anthropic case: a `toolu_…` id from the other
+/// adapter travels verbatim, and anything OpenAI cannot take is replaced by one
+/// deterministic identifier used by both the call and its output, unchanged on
+/// every later request.
+#[test]
+fn a_foreign_call_id_stays_paired_across_a_provider_switch() {
+    let (input, _) = tool_exchange(Some("toolu_fixture_1"));
+    let body = request::build(&input, Profile::Platform, &Reads::default()).expect("foreign id");
+    let call = body["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .expect("call");
+    assert_eq!(call["call_id"], "toolu_fixture_1");
+    let output = body["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .expect("output");
+    assert_eq!(output["call_id"], "toolu_fixture_1");
+
+    for foreign in [
+        "call.1",
+        "call:1",
+        "",
+        "id with space",
+        "call/naïve",
+        "x".repeat(65).as_str(),
+    ] {
+        let (input, harness) = tool_exchange(Some(foreign));
+        let body =
+            request::build(&input, Profile::Platform, &Reads::default()).expect("substituted id");
+        let call = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "function_call")
+            .expect("call");
+        let id = call["call_id"].as_str().expect("call_id").to_owned();
+        assert!(
+            !id.is_empty()
+                && id.len() <= 64
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "unusable id {id:?} from {foreign:?}"
+        );
+        let output = body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("output");
+        assert_eq!(output["call_id"], call["call_id"], "result must pair");
+        assert_eq!(id, harness);
+        assert_eq!(
+            request::build(&input, Profile::Platform, &Reads::default()).expect("replay"),
+            body
+        );
+    }
+}
+
 #[test]
 fn chatgpt_request_moves_instructions_into_input() {
     let mut input = full_input();

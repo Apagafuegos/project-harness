@@ -9,6 +9,7 @@ use std::{
 };
 
 use harness_core::{
+    context::{Part, PreviewReport, RequiredCapability},
     model::ModelProvider,
     runtime::*,
     session::*,
@@ -30,6 +31,14 @@ pub struct Options {
     pub model: ModelRef,
     /// Whether the user supplied a model override.
     pub explicit_model: bool,
+    /// Whether the user supplied a provider override.
+    pub explicit_provider: bool,
+    /// Explicit policy for a mid-session switch, applied only when the requested
+    /// provider or model differs from the branch's current one.
+    pub switch_policy: Portability,
+    /// Provider instances the injected provider can actually serve, for an
+    /// early refusal instead of a failed inference. Empty disables validation.
+    pub known_instances: Vec<String>,
     /// Independent summary model, enabling automatic compaction only when set.
     pub summary_model: Option<ModelRef>,
     /// Literal prompt, or `-` to read bounded UTF-8 from the supplied stdin.
@@ -215,18 +224,22 @@ async fn execute(
                 return Err(configuration("session_policy_mismatch"));
             }
         }
-        let model = snapshot
+        let head_model = snapshot
             .model_at(snapshot.head())
-            .map_err(|_| configuration("unknown_head"))?;
-        if model.provider_instance != o.model.provider_instance
-            || (o.explicit_model && model != &o.model)
-        {
-            return Err(configuration("session_model_mismatch"));
-        }
-        SessionHandle::open_with_tools(root, session.clone(), provider, o.driver, &host)
+            .map_err(|_| configuration("unknown_head"))?
+            .clone();
+        // A continuation keeps the branch's model unless the user asked for
+        // another provider or model. Asking for one is an explicit switch, never
+        // an implicit rewrite: the policy decides whether optional native state
+        // may be dropped, and a refusal writes nothing.
+        let switch =
+            (o.explicit_provider || o.explicit_model).then(|| (o.model.clone(), o.switch_policy));
+        known(&o, switch.as_ref().map_or(&head_model, |(model, _)| model))?;
+        SessionHandle::open_with_tools(root, session.clone(), provider, o.driver.clone(), &host)
             .await
             .map_err(storage)?
     } else {
+        known(&o, &o.model)?;
         let bytes = serde_json::to_vec(&policy_json(o.summary_model.as_ref()))
             .map_err(|_| configuration("invalid_configuration"))?;
         let header = SessionHeader {
@@ -235,28 +248,122 @@ async fn execute(
                 .to_str()
                 .ok_or_else(|| configuration("workspace_not_utf8"))?
                 .into(),
-            initial_model: o.model,
+            initial_model: o.model.clone(),
             policy_revision: "ask-v1".into(),
             configuration: root
                 .put_artifact(&bytes)
                 .map_err(|_| configuration("configuration_publish_failed"))?,
         };
-        SessionHandle::create_with_tools(root, session.clone(), header, provider, o.driver, &host)
-            .await
-            .map_err(storage)?
+        SessionHandle::create_with_tools(
+            root,
+            session.clone(),
+            header,
+            provider,
+            o.driver.clone(),
+            &host,
+        )
+        .await
+        .map_err(storage)?
     };
     // Always drain and release the journal, including output and command errors.
-    let result = drive(
-        &handle,
-        &session,
-        &o.prompt,
-        o.approve_read_only,
-        o.codex,
-        io,
-    )
-    .await;
+    let result = drive(&handle, &session, &o, io).await;
     handle.shutdown().await;
     result
+}
+
+/// Refuse a model whose provider instance the injected provider cannot serve,
+/// before anything is opened or written. An empty registry is not validated.
+fn known(o: &Options, model: &ModelRef) -> Result<(), Failure> {
+    if o.known_instances.is_empty()
+        || o.known_instances
+            .iter()
+            .any(|instance| instance == &model.provider_instance)
+    {
+        return Ok(());
+    }
+    if let Some(summary) = &o.summary_model
+        && !o
+            .known_instances
+            .iter()
+            .any(|instance| instance == &summary.provider_instance)
+    {
+        return Err(configuration("provider_not_configured"));
+    }
+    Err(configuration("provider_not_configured"))
+}
+
+/// The switch a continuation asks for, if the user named a provider or model.
+///
+/// Without an override the branch keeps its model. With one, the requested
+/// model is applied through `SwitchModel`, whose policy decides whether
+/// optional native state may be dropped. An identical request is not a switch.
+fn continuation_switch(o: &Options) -> Option<(ModelRef, Portability)> {
+    if o.session.is_none() || !(o.explicit_provider || o.explicit_model) {
+        return None;
+    }
+    Some((o.model.clone(), o.switch_policy))
+}
+
+/// Print the portability report on stderr: every affected entry and part, the
+/// owner that would lose it, its schema and byte count, and every required
+/// incompatibility. Native payloads are never printed — the journal keeps them,
+/// and a report only classifies them.
+fn switch_report(
+    io: &mut Io<'_, '_>,
+    verdict: &str,
+    preview: &PreviewReport,
+) -> Result<(), Failure> {
+    writeln!(
+        io.stderr,
+        "switch: {verdict} from {} to {}",
+        model(&preview.model_at_head),
+        model(&preview.preview_model)
+    )
+    .map_err(|_| infrastructure())?;
+    for loss in &preview.would_stop_being_portable {
+        writeln!(
+            io.stderr,
+            "switch: omits entry={} part={} owner={} schema={} bytes={}",
+            loss.entry_id,
+            part(&loss.part),
+            model(&loss.owner),
+            line(&loss.schema),
+            loss.bytes
+        )
+        .map_err(|_| infrastructure())?;
+    }
+    for required in &preview.required_incompatibilities {
+        writeln!(
+            io.stderr,
+            "switch: requires entry={} part={} capability={}",
+            required.entry_id,
+            part(&required.part),
+            capability(required.capability)
+        )
+        .map_err(|_| infrastructure())?;
+    }
+    Ok(())
+}
+
+fn model(model: &ModelRef) -> String {
+    format!("{}/{}", line(&model.provider_instance), line(&model.model))
+}
+
+fn part(part: &Part) -> String {
+    match part {
+        Part::Entry => "entry".into(),
+        Part::Block { index } => format!("block[{index}]"),
+        Part::Continuation => "continuation".into(),
+    }
+}
+
+fn capability(capability: RequiredCapability) -> &'static str {
+    match capability {
+        RequiredCapability::Image => "image",
+        RequiredCapability::Audio => "audio",
+        RequiredCapability::File => "file",
+        RequiredCapability::Tools => "tools",
+    }
 }
 
 fn policy_json(summary: Option<&ModelRef>) -> Value {
@@ -278,11 +385,11 @@ fn rejection(error: Rejection) -> Failure {
 async fn drive(
     handle: &SessionHandle,
     session: &SessionId,
-    prompt: &str,
-    auto_read: bool,
-    codex: bool,
+    o: &Options,
     io: &mut Io<'_, '_>,
 ) -> Result<u8, Failure> {
+    let auto_read = o.approve_read_only;
+    let codex = o.codex;
     writeln!(io.stderr, "session: {session}").map_err(|_| infrastructure())?;
     if let Some(availability) = handle.tool_availability() {
         for (name, backend) in [
@@ -313,11 +420,33 @@ async fn drive(
     if client.view().phase != Phase::Durable(RuntimeState::Idle) {
         return Err(configuration("session_requires_resolution"));
     }
+    // A continuation that names another provider or model switches explicitly,
+    // while idle and before the turn opens. The report is printed either way; a
+    // refusal exits 2 having written nothing.
+    if let Some(switch) = continuation_switch(o) {
+        match handle
+            .command(Command::SwitchModel {
+                model: switch.0,
+                policy: switch.1,
+            })
+            .await
+        {
+            Ok(Accepted::ModelSwitched { preview, .. }) => {
+                switch_report(io, "switched", &preview)?;
+            }
+            Err(Rejection::PortabilityLoss(preview)) => {
+                switch_report(io, "refused", &preview)?;
+                return Err(configuration("portability_loss"));
+            }
+            Err(e) => return Err(rejection(e)),
+            Ok(other) => return Err((1, format!("unexpected_switch_reply: {other:?}"))),
+        }
+    }
     let baseline = client.view().snapshot.sequence();
     let start = handle.command(Command::StartTurn {
         command_id: CommandId::new(),
         content: vec![ContentBlock::Text {
-            text: prompt.into(),
+            text: o.prompt.clone(),
         }],
     });
     tokio::pin!(start);

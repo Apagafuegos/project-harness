@@ -29,11 +29,12 @@ use crate::{
 
 mod events;
 pub mod models;
+mod preserved;
 mod request;
 #[cfg(test)]
 mod tests;
 
-pub use models::{LIVE_CHECK_MODEL, capabilities, catalog, info};
+pub use models::{LIVE_CHECK_MODEL, capabilities, catalog, extend_catalog, info};
 
 /// Native state schema for one replayed thinking block.
 pub const STATE_SCHEMA: &str = "anthropic.messages.thinking.v1";
@@ -124,13 +125,21 @@ impl AnthropicMessages {
     }
 
     /// Headers every request carries, beyond the credential.
-    fn headers() -> HeaderMap {
+    ///
+    /// `replays_thinking` adds the preserved-thinking beta header, which is only
+    /// legal together with the `thinking.block_binding` control that `build`
+    /// puts in the body for exactly that case.
+    fn headers(replays_thinking: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
         headers.insert("anthropic-version", HeaderValue::from_static(API_VERSION));
-        // No beta header: adaptive thinking, `output_config.effort`,
-        // `service_tier` and tool use are all part of the current stable API
-        // version. See ADR 0018.
+        // No other beta header: adaptive thinking, `output_config.effort`,
+        // `service_tier` and tool use are part of the current stable API
+        // version. The preserved-thinking control is the one exception, and
+        // only on a request that replays signed thinking blocks.
+        if replays_thinking {
+            headers.insert("anthropic-beta", HeaderValue::from_static(preserved::BETA));
+        }
         headers
     }
 }
@@ -145,7 +154,7 @@ impl ModelProvider for AnthropicMessages {
         Box::pin(async_stream::stream! {
             // Setup failures are terminal events, never early errors.
             let credential = match credential_source.credential() {
-                Ok(credential) => credential.with_extra_headers(Self::headers()),
+                Ok(credential) => credential,
                 Err(error) => {
                     yield events::failed(error);
                     return;
@@ -165,6 +174,11 @@ impl ModelProvider for AnthropicMessages {
                     return;
                 }
             };
+            // The header follows the body: both are chosen by one predicate, so
+            // `block_binding` can never travel without the beta that allows it.
+            let credential = credential.with_extra_headers(Self::headers(
+                request::replays_thinking(&body),
+            ));
             let setup = {
                 let transport = transport.clone();
                 let endpoint = endpoint.clone();

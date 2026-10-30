@@ -14,7 +14,8 @@ use harness_core::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{STATE_SCHEMA, models};
+use super::{STATE_SCHEMA, models, preserved};
+use crate::native_id::native_call_id;
 
 /// Artifact bytes permitted for this request, keyed by exact reference.
 #[derive(Default)]
@@ -196,7 +197,56 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
     if let Some(tier) = options.service_tier {
         body.insert("service_tier".into(), json!(tier));
     }
-    Ok(Value::Object(body))
+    let mut body = Value::Object(body);
+    if replays_thinking(&body) {
+        // Preserved thinking binds a block to the exact prefix that produced it
+        // (system, tools, and every earlier message). Compaction replaces
+        // earlier turns with a summary and the kept turns keep their thinking,
+        // so replaying those blocks unchanged is a 400 for accounts the API
+        // enforces this on. Ask the documented control to drop a failing block
+        // instead. `block_binding` rides inside `thinking`, so an adaptive
+        // configuration is sent with it; the beta header `preserved::BETA` must
+        // travel with this body, and `mod.rs` adds it from the same predicate.
+        let Some(object) = body.as_object_mut() else {
+            return Ok(body);
+        };
+        let mut thinking = object
+            .get("thinking")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut thinking = Map::new();
+                thinking.insert("type".into(), json!("adaptive"));
+                thinking
+            });
+        thinking.insert("block_binding".into(), preserved::drop_block());
+        object.insert("thinking".into(), Value::Object(thinking));
+    }
+    Ok(body)
+}
+
+/// Whether this body sends a thinking block back to the API.
+///
+/// One predicate chooses both the `block_binding` control in the body and the
+/// beta header that makes it legal, so the two can never disagree.
+pub(crate) fn replays_thinking(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            matches!(
+                                block.get("type").and_then(Value::as_str),
+                                Some("thinking" | "redacted_thinking")
+                            )
+                        })
+                    })
+            })
+        })
 }
 
 /// Validated `anthropic.*` provider options.
@@ -320,9 +370,10 @@ fn assistant_blocks(
                 arguments,
                 provider_call_id,
             } => {
-                let native = provider_call_id
-                    .clone()
-                    .unwrap_or_else(|| call_id.as_str().to_owned());
+                // A native id from another provider is sent verbatim when it is
+                // a plain identifier, otherwise replaced deterministically; see
+                // `native_id`. The same id is looked up for the result below.
+                let native = native_call_id(provider_call_id.as_deref(), call_id.as_str());
                 calls.push((call_id.as_str().to_owned(), native.clone()));
                 blocks.push(json!({
                     "type": "tool_use",

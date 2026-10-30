@@ -386,3 +386,101 @@ reverted before the complete passing suite.
 
 None added. The adapter uses the existing transport, SSE reader, credentials,
 `serde_json` and `base64` (already a provider dependency for images).
+
+## Amendment (m4-07): preserved thinking
+
+Date: 2026-10-30
+
+The replay rules above are unchanged: state is replayed verbatim, in order, only
+to its owner. What the adapter now also sends is the documented control that
+keeps a replayed block from becoming a 400 after the harness edits history.
+
+**The API behavior.** Preserved thinking binds a `thinking` or
+`redacted_thinking` block to the exact prefix that produced it: the top-level
+`system` prompt, the `tools` set, and every `message` before the block. A
+replayed block whose prefix changed fails the check. On accounts the API
+enforces this for, a request that leaves
+`thinking.block_binding.prefix_mismatch_behavior` unset is rejected with a
+`400 invalid_request_error` naming the first failing block. Clients that compact
+on their own are the documented trigger: a keep-tail summary replaces the turns
+before the retained turn, whose signed block was produced while the original
+history was still there.
+
+**The policy.** When a request replays at least one thinking block, the adapter
+sends the `thinking-binding-controls-2026-08-01` beta header and
+
+```json
+"thinking": {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+```
+
+A failing block, and every thinking block after it, is then dropped by the API
+and reported in `input_transformations`; the request succeeds instead of
+failing. A block that still passes is untouched, so the control is safe on an
+untouched history too. `block_binding` lives inside `thinking`, so an adaptive
+configuration travels with it; that is also the only form Sonnet 5.5 and Haiku
+5.5 accept it with. Both the control and the header are chosen from one
+predicate over the built body (`request::replays_thinking`), so the two can
+never disagree — a body carrying `block_binding` without the beta is a 400 as
+well (`block_binding: Extra inputs are not permitted`).
+
+Requests that replay nothing are byte-identical to before this amendment: no
+`thinking` object when no effort is configured, and no beta header. That keeps
+the existing request golden valid and keeps the extra header off every first
+turn.
+
+**Why `drop_block` and not stripping.** The reference's own alternative is to
+remove the `thinking` blocks from the retained turns when building a compacted
+history. That loses the reasoning permanently, including when the same history
+is later sent to a model that could have read it (the API never edits your
+messages, so a block that stays in the journal becomes readable again). Dropping
+at the boundary costs output tokens only when something actually fails, once per
+compaction, which is the trade the reference documents. The adapter therefore
+keeps the harness's append-only history intact and lets the API classify what it
+dropped. It does not parse `input_transformations`: dropping is not an error,
+and the turn is answered either way.
+
+The adapter still never retries (M4 decision 8) and never invents a fallback: a
+tampered or unreadable signature, a rejected beta, or any other provider error
+is classified by the existing table.
+
+**Sources**, all read on 2026-10-30:
+`platform.claude.com/docs/en/build-with-claude/preserved-thinking` sections
+"Who the prefix check affects", "Keeping the prefix unchanged", "What the API
+does with an invalid block", "When `prefix_mismatch_behavior` is unset" (the
+2026-08-31 account cutoff), "Set the mismatch behavior and read
+`input_transformations`", "What counts as an edit", and "Compact on the
+client → Keep-tail compaction"; and `platform.claude.com/docs/en/api/beta-headers`
+for the `anthropic-beta` header form. The brief calls this "the binding of
+thinking blocks to their conversation prefix"; the current reference calls it
+preserved thinking, and the control is `thinking.block_binding` (the API
+reference's name for the check is the conversation check). No contradiction with
+the brief's intent; the field and header names follow the API.
+
+**Goldens.** `preserved_thinking_is_requested_on_an_untouched_replayed_history`
+compares the whole body for an append-only history that replays one signed
+block. `preserved_thinking_is_requested_behind_a_summary_and_a_switch` compares
+the whole body for a projection where a compaction summary replaces the earlier
+turns and a foreign (switched-away) state block sits mid-history: the summary is
+one plain `user` text block, the foreign block is gone, the retained signed block
+is replayed verbatim, and `block_binding` is requested.
+`preserved_thinking_beta_header_follows_the_body_predicate` pins the header to
+the predicate, and `request_body_is_one_correct_messages_body` remains the
+"nothing replayed, nothing added" case. The end-to-end switch test in
+`crates/providers/tests/switch.rs` observes the header on the wire on the
+post-compaction request and its absence on the earlier one.
+
+**Foreign tool-call ids.** A tool call stored while the session was on the other
+provider carries that provider's native id. The adapter sends it verbatim when
+it is a plain ASCII identifier (letters, digits, `_`, `-`) of at most 64 bytes —
+every id either provider issues here is — and otherwise substitutes a
+deterministic id derived from the harness `CallId`, used for both the `tool_use`
+block and its `tool_result`. See `crates/providers/src/native_id.rs` and
+`a_foreign_call_id_stays_paired_across_a_provider_switch`. The rule is an
+adapter policy, not a quoted API pattern: neither reference states one this
+crate could cite, so the adapter stays inside the alphabet both providers issue
+rather than guessing.
+
+**Out of scope**, unchanged: `redacted_thinking` produced under an account the
+current request is not linked to is dropped by the API itself
+(`organization_binding_mismatch`), and this adapter neither reads nor reports
+`input_transformations`.

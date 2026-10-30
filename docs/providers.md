@@ -1,11 +1,12 @@
-# Provider transport, OpenAI and Anthropic adapters (M4 steps 02–04)
+# Provider transport, adapters and the router (M4 steps 02–04, 07)
 
 `harness-providers` is the shared HTTP/SSE and credential boundary for adapters.
 It depends on `harness-core`; core does not depend on it. Both native adapters
 are implemented: the OpenAI Responses adapter
 ([ADR 0016](decisions/0016-provider-transport.md),
 [ADR 0017](decisions/0017-openai-adapter.md)) and the Anthropic Messages adapter
-([ADR 0018](decisions/0018-anthropic-adapter.md)).
+([ADR 0018](decisions/0018-anthropic-adapter.md)), plus the router that selects
+between them per request.
 
 ## Adapter use
 
@@ -54,6 +55,68 @@ Never put credentials in `ModelRequest`, events, journals or logs.
 CredentialScheme::ApiKeyHeader)` send `x-api-key`; the scheme is always explicit. Both schemes keep the ADR 0016 guarantees: `[redacted]`
 `Debug`/`Display`, sensitive header values, reserved names refused as extra
 headers, and no secret in errors, events or logs. OpenAI behavior is unchanged.
+
+## Router: one provider seam, several instances
+
+```rust,ignore
+let provider: Arc<dyn ModelProvider> = Arc::new(
+    Router::new()
+        .with("openai-codex", Arc::new(openai))
+        .with("anthropic", Arc::new(anthropic)),
+);
+let mut catalog = ModelCatalog::new();
+openai::extend_catalog(&mut catalog, Profile::ChatGptCodex, "openai-codex");
+anthropic::extend_catalog(&mut catalog, "anthropic");
+```
+
+`harness_providers::Router` implements `ModelProvider` by dispatching each
+request to the adapter registered under
+`request.input.model.provider_instance`. The runtime driver holds one
+`Arc<dyn ModelProvider>`, and a session's `ModelRef` may name any instance, so
+the router is what lets a session switch provider mid-flight without a core
+change (`ModelRef` already names the instance; core already scopes native state
+to its owner).
+
+- `register(instance, Arc<dyn ModelProvider>)` / `with(..)` add or replace an
+  instance; `contains` and `instances()` let a client validate a switch target
+  before using it. Empty names are refused: no `ModelRef` may name one.
+- An unregistered instance yields exactly one `Finished { Failed }` with
+  `invalid_request` and a fixed diagnostic, and no adapter is called, so no
+  network work starts. Nothing about the request (model, URL, headers, body) is
+  echoed.
+- A registered instance gets the request and the caller's `OperationControl`
+  unchanged, and the router returns the adapter's own stream: no wrapper task,
+  no queue, no retry, so cancellation, deadlines, backpressure and drop-release
+  behave exactly as they do without it.
+- Dispatch is never by model name, adapter type or request content. Two
+  instances can serve the same model name with different accounts, and mixing
+  them would replay one account's native state under another's identity.
+- One catalog covers every registered instance: `openai::extend_catalog` and
+  `anthropic::extend_catalog` add each adapter's sourced rows to a single
+  `ModelCatalog`, because a session that may switch needs limits for every
+  instance it can reach. Core's `ModelCatalog` is not iterable, so the adapters
+  add their own rows instead of the router merging catalogs.
+- The public 17-case conformance suite runs through the router
+  (`conformance_cases_pass_through_the_router`), so dispatch is proven not to
+  change any observed behavior, and the end-to-end switching tests
+  (`crates/providers/tests/switch.rs`) run a real session with both adapters
+  against loopback fixtures.
+
+Native call ids travel with the stored turn. Each adapter sends the id the
+provider issued when it is a plain ASCII identifier of at most 64 bytes, and
+otherwise a deterministic substitute derived from the harness `CallId`, used for
+both the call and its result — see `native_id` and the ADR 0018 amendment. After
+a switch, an id from the other provider therefore reaches the API verbatim
+(`call_…` to Anthropic, `toolu_…` to OpenAI) or is replaced consistently, never
+in a form that breaks the pairing or edits the preserved-thinking prefix.
+
+`scripts/live-check.sh switch [--auth codex|api-key]` is the opt-in real check:
+one durable session, OpenAI → Anthropic → OpenAI with one short turn each and a
+tool round trip. Without `ANTHROPIC_API_KEY` it runs the same-provider variant
+(the live-check model → another served model → back) and reports the
+cross-provider part as `skipped (no ANTHROPIC_API_KEY)`. It prints pass/fail
+lines, model names and stable turn codes only, and is never part of `check.sh`
+or CI.
 
 ## OpenAI Responses adapter
 
@@ -114,6 +177,15 @@ this mapping uses.
   `ProviderState` (`anthropic.messages.thinking.v1`, ≤256 KiB) and are replayed
   verbatim, in order, only to the same owner. Raw thinking text is never shown:
   `thinking_delta` is retained for the signed block and counted as ignored.
+- **Preserved thinking.** The API binds each replayed block to the prefix that
+  produced it (`system`, `tools`, and every earlier message), and a changed
+  prefix is a 400 on accounts it enforces this for. Compaction is exactly such an
+  edit. So any request that replays a thinking block is sent with the
+  `thinking-binding-controls-2026-08-01` beta header and
+  `thinking: {"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}}`;
+  the API then drops a failing block instead of rejecting the request. Requests
+  that replay nothing are unchanged (no beta header, no `thinking` object unless
+  an effort is configured). See the ADR 0018 amendment.
 - Messages strictly alternate: adjacent same-role items merge into one turn, as
   the API itself does. Instructions become the single `system` string (join
   order preserved, levels collapsed). Tool results carry `is_error` and the same

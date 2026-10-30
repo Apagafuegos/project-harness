@@ -134,3 +134,67 @@ exit 0 and stdout, and prints only a sanitized pass/fail summary. It is absent
 from `check.sh` and CI. The step's handoff records the one live run and the four
 reverted mutation checks (no-terminal allow, stdout status, ignored cancellation,
 credential disclosure on authentication failure).
+
+## Amendment (m4-07): switching across providers
+
+Date: 2026-10-30
+
+`harness ask` gains `--provider openai|anthropic` (default `openai`) and
+`--switch-policy reject|omit-optional` (default `reject`). The client loop, the
+storage rules, the approval contract and the exit codes are unchanged; only the
+wiring and the continuation decision grew.
+
+**Wiring.** The binary now builds `harness_providers::Router` and hands it to
+`ask::run` as the one injected provider. Every instance whose credential exists
+is registered — `openai-codex` (read-only Codex login), `openai-api-key`
+(`OPENAI_API_KEY`) and `anthropic` (`ANTHROPIC_API_KEY`) — so one process can
+serve a session that switches between them. Only the selected instance is
+required: `--provider anthropic` without a key exits 3 with
+`error: authentication`, and a failing unselected source is skipped silently.
+`--auth` describes the OpenAI profile only; passing it explicitly with
+`--provider anthropic` exits 2 with `auth_not_applicable`. The runtime catalog
+is the union of `openai::extend_catalog`/`anthropic::extend_catalog` for the
+registered instances, so a switched-to model has sourced limits instead of
+`context_budget_unknown`. New-session defaults: `gpt-6.1-sol` (codex),
+`gpt-5.5` (api-key), `claude-sonnet-5-5` (anthropic). `--summary-model` is taken
+on the same instance as `--model`, and continuing a session still requires the
+same summary choice (otherwise `session_policy_mismatch`).
+
+**Continuation and the switch.** `--session` keeps the branch's saved model
+unless the user passes `--provider` or `--model`. A default alone is never
+applied silently. When either is passed, the client performs an explicit
+`Command::SwitchModel { model, policy }` while the session is idle and before the
+turn opens. The target instance is checked against the registered ones first, so
+an unservable instance is `provider_not_configured` (exit 2) before anything is
+opened. The previous "refuse any other provider instance" rule is gone: choosing
+another provider is the feature, and the policy decides what may be lost.
+
+The portability report is printed on stderr in both outcomes, one line per
+affected entry, never a payload:
+
+```text
+switch: refused from openai-codex/gpt-6.1-sol to anthropic/claude-sonnet-5-5
+switch: omits entry=019a… part=block[1] owner=openai-codex/gpt-6.1-sol schema=openai.responses.reasoning.v1 bytes=36
+switch: requires entry=019a… part=block[1] capability=tools
+```
+
+A refusal prints it and exits 2 (`error: portability_loss`) having written
+nothing; an accepted switch prints the same report and then runs the turn.
+
+**Live check.** `scripts/live-check.sh switch [--auth codex|api-key]` runs
+`examples/live_switch.rs` once: OpenAI → Anthropic → OpenAI with one short turn
+each and a tool round trip, or, without `ANTHROPIC_API_KEY`, the same-provider
+variant (the live-check model → another model from the account's
+`~/.codex/models_cache.json` → back) with the cross-provider part reported as
+`skipped (no ANTHROPIC_API_KEY)`. It prints pass/fail lines, model names and
+stable turn codes only. It is absent from `check.sh` and CI.
+
+**Verification.** `crates/cli/tests/ask.rs` covers, offline with the scripted
+provider: rejection by default with the report and no inference opened or
+written, the same switch under `omit-optional` (the turn runs on the target and
+the next request carries no state and no continuation), a continuation with no
+override keeping the saved model, a required tool incompatibility refused under
+both policies, and an unregistered target refused before opening.
+`crates/cli/tests/ask_cli.rs` covers the new flags, the help text, the provider
+choices, and the Anthropic authentication path without a key (no secret in
+either stream, nothing opened).

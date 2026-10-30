@@ -38,7 +38,7 @@ mod request;
 #[cfg(test)]
 mod tests;
 
-pub use models::{LIVE_CHECK_MODEL, capabilities, catalog, info};
+pub use models::{LIVE_CHECK_MODEL, capabilities, catalog, extend_catalog, info};
 
 /// Native state schema for one replayed encrypted reasoning item.
 pub const STATE_SCHEMA: &str = "openai.responses.reasoning.v1";

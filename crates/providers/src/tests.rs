@@ -13,6 +13,7 @@ use harness_core::{
     session::{FinishReason, ModelErrorCode, ModelRef, ResponseId},
 };
 use reqwest::header::HeaderMap;
+use router::Router;
 use serde_json::{Value, json};
 use sse::SseConfig;
 use std::{
@@ -494,6 +495,171 @@ fn no_secret(value: impl std::fmt::Debug) {
         !captured.contains(SECRET),
         "secret leaked in captured diagnostics"
     );
+}
+
+// ------------------------------------------------------------------- router
+
+fn routed(request: ModelRequest) -> ModelRequest {
+    request
+}
+
+/// Dispatch is by `provider_instance`, never by the model name or by which
+/// adapter happens to be first: the same model string reaches two different
+/// servers, and a model name that equals another instance's name does not
+/// change where the request goes.
+#[tokio::test]
+async fn router_dispatches_by_provider_instance_not_model_name() {
+    let first = Fake::sse(
+        "event: start\ndata: yes\n\nevent: text\ndata: one\n\nevent: finish\ndata: stop\n\n",
+    )
+    .await;
+    let second = Fake::sse(
+        "event: start\ndata: yes\n\nevent: text\ndata: two\n\nevent: finish\ndata: stop\n\n",
+    )
+    .await;
+    let router = Router::new()
+        .with("echo", Arc::new(echo(&first)))
+        .with("other", Arc::new(echo(&second)));
+    assert!(router.contains("echo") && router.contains("other"));
+    assert!(!router.contains("missing"));
+    assert_eq!(router.instances().collect::<Vec<_>>(), ["echo", "other"]);
+
+    let mut to_first = routed(request());
+    to_first.input.model.model = "other".into();
+    let text: Vec<_> = router
+        .stream(to_first, OperationControl::default())
+        .filter_map(|event| async move {
+            match event {
+                ProviderEvent::TextDelta { text, .. } => Some(text),
+                _ => None,
+            }
+        })
+        .collect()
+        .await;
+    assert_eq!(text, ["one"]);
+    assert_eq!(first.probe.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(second.probe.accepted.load(Ordering::SeqCst), 0);
+
+    let mut to_second = routed(request());
+    to_second.input.model.provider_instance = "other".into();
+    to_second.input.model.model = "echo".into();
+    let text: Vec<_> = router
+        .stream(to_second, OperationControl::default())
+        .filter_map(|event| async move {
+            match event {
+                ProviderEvent::TextDelta { text, .. } => Some(text),
+                _ => None,
+            }
+        })
+        .collect()
+        .await;
+    assert_eq!(text, ["two"]);
+    assert_eq!(first.probe.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(second.probe.accepted.load(Ordering::SeqCst), 1);
+    first.closed().await;
+    second.closed().await;
+}
+
+/// An unregistered instance ends in one terminal `invalid_request` event and
+/// never reaches any registered adapter's transport.
+#[tokio::test]
+async fn router_unknown_instance_fails_without_a_network_call() {
+    let fake = Fake::sse("event: start\ndata: yes\n\nevent: finish\ndata: stop\n\n").await;
+    let router = Router::new().with("echo", Arc::new(echo(&fake)));
+    let mut input = routed(request());
+    input.input.model.provider_instance = "missing-instance".into();
+    let events: Vec<_> = router
+        .stream(input, OperationControl::default())
+        .collect()
+        .await;
+    assert_eq!(events.len(), 1, "one terminal event, no start");
+    let ProviderEvent::Finished {
+        outcome,
+        finish_reason,
+        error: Some(error),
+        continuation,
+    } = &events[0]
+    else {
+        panic!("expected one terminal failure")
+    };
+    assert_eq!(*outcome, ProviderOutcome::Failed);
+    assert_eq!(*finish_reason, None);
+    assert_eq!(continuation, &None);
+    assert_eq!(error.code, ModelErrorCode::InvalidRequest);
+    assert!(
+        !error.message.contains("missing-instance"),
+        "the diagnostic names no request detail"
+    );
+    assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 0);
+    assert_eq!(fake.probe.ignored.load(Ordering::SeqCst), 0);
+    // An empty instance name can never be registered or reached.
+    let router = Router::new().with("", Arc::new(echo(&fake)));
+    assert!(!router.contains(""));
+    assert_eq!(router.instances().count(), 0);
+}
+
+/// Cancellation, deadlines and drop reach the delegate unchanged: the router
+/// adds no wrapper task that could outlive the adapter's own stream.
+#[tokio::test]
+async fn router_passes_cancel_deadline_and_drop_through_unchanged() {
+    for mode in ["cancel", "deadline", "drop"] {
+        let fake = Fake::new(
+            200,
+            "",
+            b"event: start\ndata: yes\n\nevent: text\ndata: x\n\n".to_vec(),
+            true,
+            false,
+        )
+        .await;
+        let router = Router::new().with("echo", Arc::new(echo(&fake)));
+        let control = OperationControl {
+            deadline: (mode == "deadline")
+                .then(|| tokio::time::Instant::now() + Duration::from_millis(40)),
+            ..Default::default()
+        };
+        let mut stream = router.stream(request(), control.clone());
+        assert_eq!(stream.next().await, Some(ProviderEvent::Started));
+        if mode == "cancel" {
+            control.cancel.cancel();
+            let terminal = loop {
+                match stream.next().await {
+                    Some(event) => {
+                        if matches!(event, ProviderEvent::Finished { .. }) {
+                            break event;
+                        }
+                    }
+                    None => panic!("stream ended without a terminal event"),
+                }
+            };
+            assert!(matches!(
+                terminal,
+                ProviderEvent::Finished {
+                    outcome: ProviderOutcome::Cancelled,
+                    ..
+                }
+            ));
+        }
+        if mode == "deadline" {
+            let terminal = loop {
+                match stream.next().await {
+                    Some(event) if matches!(event, ProviderEvent::Finished { .. }) => break event,
+                    Some(_) => {}
+                    None => panic!("no terminal event"),
+                }
+            };
+            assert!(matches!(
+                terminal,
+                ProviderEvent::Finished {
+                    outcome: ProviderOutcome::Cancelled,
+                    ..
+                }
+            ));
+        }
+        // Both the cooperative paths and drop must close the connection: the
+        // router returned the adapter's own stream, so its release is intact.
+        drop(stream);
+        fake.closed().await;
+    }
 }
 
 #[tokio::test]
@@ -1054,11 +1220,19 @@ async fn proxy_environment_ignored() {
 }
 #[tokio::test]
 async fn echo_conformance() {
-    use harness_core::{
-        model::ReasoningEffort,
-        session::{EffectClass, EffectSet, ExecutionBackend},
-        tools::ToolDefinition,
-    };
+    echo_cases_conform(|provider| provider).await;
+}
+
+/// The same public conformance cases with the fixture adapter only reachable
+/// through the router. Dispatch by `provider_instance` is the only difference:
+/// every other observation (submitted request, release, terminal outcome) must
+/// be unchanged.
+#[tokio::test]
+async fn conformance_cases_pass_through_the_router() {
+    echo_cases_conform(|provider| Arc::new(Router::new().with("echo", provider))).await;
+}
+
+async fn echo_cases_conform(wrap: fn(Arc<dyn ModelProvider>) -> Arc<dyn ModelProvider>) {
     for kind in [
         CaseKind::Text,
         CaseKind::Refusal,
@@ -1072,114 +1246,134 @@ async fn echo_conformance() {
         CaseKind::Deadline,
         CaseKind::Request,
     ] {
-        let (status, body, hold, setup) = match kind {
-            CaseKind::ProviderError => (503, "error", false, false),
-            CaseKind::RateLimit => (429, "error", false, false),
-            CaseKind::SetupFailure => (401, "error", false, false),
-            CaseKind::CancelSetup | CaseKind::Drop => (200, "", true, true),
-            CaseKind::CancelStreaming => (200, "event: start\ndata: yes\n\n", true, false),
-            CaseKind::Refusal => (
-                200,
-                "event: start\ndata: yes\n\nevent: finish\ndata: refusal\n\n",
-                false,
-                false,
-            ),
-            CaseKind::OutputLimit => (
-                200,
-                "event: start\ndata: yes\n\nevent: finish\ndata: output_limit\n\n",
-                false,
-                false,
-            ),
-            _ => (
-                200,
-                "event: start\ndata: yes\n\nevent: text\ndata: hello\n\nevent: finish\ndata: stop\n\n",
-                false,
-                false,
-            ),
-        };
-        let fake = Fake::new(
-            status,
-            "retry-after-ms: 75\r\n",
-            body.as_bytes().to_vec(),
-            hold,
-            setup,
-        )
-        .await;
-        let mut expected = Expected::default();
-        match kind {
-            CaseKind::Text | CaseKind::Request => {
-                expected.text = BTreeMap::from([(0, "hello".into())]);
-            }
-            CaseKind::Refusal => expected.finish_reason = Some(FinishReason::Refusal),
-            CaseKind::OutputLimit => expected.finish_reason = Some(FinishReason::OutputLimit),
-            CaseKind::ProviderError | CaseKind::RateLimit | CaseKind::SetupFailure => {
-                expected.outcome = ProviderOutcome::Failed;
-                expected.finish_reason = None;
-                expected.error = Some(harness_core::session::ModelError {
-                    code: match kind {
-                        CaseKind::ProviderError => ModelErrorCode::ProviderFailure,
-                        CaseKind::RateLimit => ModelErrorCode::RateLimit,
-                        _ => ModelErrorCode::Authentication,
-                    },
-                    message: "provider HTTP request failed".into(),
-                    provider_code: Some(format!("http_{status}")),
-                    retry_after_ms: Some(75),
-                });
-            }
-            _ => {}
-        }
-        let mut input = request();
-        if kind == CaseKind::Request {
-            input.input.tools = ["read", "other"]
-                .into_iter()
-                .map(|name| ToolDefinition {
-                    name: name.into(),
-                    description: format!("definition {name}"),
-                    input_schema: json!({"type":"object"}),
-                    effects: EffectSet::new([EffectClass::Read]).unwrap(),
-                    backend: ExecutionBackend::TrustedFs,
-                })
-                .collect();
-            input.input.options.reasoning_effort = Some(ReasoningEffort::High);
-            input.input.options.provider_options =
-                serde_json::from_value(json!({"echo":{"strict":true}})).unwrap();
-        }
-        let case = Case {
-            kind,
-            fixture: format!("{kind:?}"),
-            request: input,
-            expected,
-            unsupported_option: None,
-        };
+        let fake = echo_fake(kind).await;
+        let case = echo_case(kind);
         let factory = |_: &str| {
             let p = fake.probe.clone();
             Fixture {
-                provider: Arc::new(echo(&fake)),
-                observe: Arc::new(move || {
-                    let submitted = p.submitted.lock().unwrap().as_ref().and_then(|body| {
-                        let options = serde_json::from_value(body.get("options")?.clone()).ok()?;
-                        let tools = body
-                            .get("tools")?
-                            .as_array()?
-                            .iter()
-                            .map(|t| {
-                                Some(SubmittedTool {
-                                    name: t.get("name")?.as_str()?.into(),
-                                    description: t.get("description")?.as_str()?.into(),
-                                    input_schema: t.get("input_schema")?.clone(),
-                                })
-                            })
-                            .collect::<Option<Vec<_>>>()?;
-                        Some(SubmittedRequest { tools, options })
-                    });
-                    Observation {
-                        submitted,
-                        released: p.active.load(Ordering::SeqCst) == 0,
-                    }
+                provider: wrap(Arc::new(echo(&fake))),
+                observe: Arc::new(move || Observation {
+                    submitted: submitted(&p),
+                    released: p.active.load(Ordering::SeqCst) == 0,
                 }),
             }
         };
         conformance::run_case(&factory, &case).await.unwrap();
+    }
+}
+
+async fn echo_fake(kind: CaseKind) -> Fake {
+    let (status, body, hold, setup) = match kind {
+        CaseKind::ProviderError => (503, "error", false, false),
+        CaseKind::RateLimit => (429, "error", false, false),
+        CaseKind::SetupFailure => (401, "error", false, false),
+        CaseKind::CancelSetup | CaseKind::Drop => (200, "", true, true),
+        CaseKind::CancelStreaming => (200, "event: start\ndata: yes\n\n", true, false),
+        CaseKind::Refusal => (
+            200,
+            "event: start\ndata: yes\n\nevent: finish\ndata: refusal\n\n",
+            false,
+            false,
+        ),
+        CaseKind::OutputLimit => (
+            200,
+            "event: start\ndata: yes\n\nevent: finish\ndata: output_limit\n\n",
+            false,
+            false,
+        ),
+        _ => (
+            200,
+            "event: start\ndata: yes\n\nevent: text\ndata: hello\n\nevent: finish\ndata: stop\n\n",
+            false,
+            false,
+        ),
+    };
+    Fake::new(
+        status,
+        "retry-after-ms: 75\r\n",
+        body.as_bytes().to_vec(),
+        hold,
+        setup,
+    )
+    .await
+}
+
+fn submitted(probe: &Probe) -> Option<SubmittedRequest> {
+    let body = probe.submitted.lock().unwrap();
+    let body = body.as_ref()?;
+    let options = serde_json::from_value(body.get("options")?.clone()).ok()?;
+    let tools = body
+        .get("tools")?
+        .as_array()?
+        .iter()
+        .map(|t| {
+            Some(SubmittedTool {
+                name: t.get("name")?.as_str()?.into(),
+                description: t.get("description")?.as_str()?.into(),
+                input_schema: t.get("input_schema")?.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(SubmittedRequest { tools, options })
+}
+
+fn echo_case(kind: CaseKind) -> Case {
+    use harness_core::{
+        model::ReasoningEffort,
+        session::{EffectClass, EffectSet, ExecutionBackend},
+        tools::ToolDefinition,
+    };
+    let status = match kind {
+        CaseKind::ProviderError => 503,
+        CaseKind::RateLimit => 429,
+        CaseKind::SetupFailure => 401,
+        _ => 200,
+    };
+    let mut expected = Expected::default();
+    match kind {
+        CaseKind::Text | CaseKind::Request => {
+            expected.text = BTreeMap::from([(0, "hello".into())]);
+        }
+        CaseKind::Refusal => expected.finish_reason = Some(FinishReason::Refusal),
+        CaseKind::OutputLimit => expected.finish_reason = Some(FinishReason::OutputLimit),
+        CaseKind::ProviderError | CaseKind::RateLimit | CaseKind::SetupFailure => {
+            expected.outcome = ProviderOutcome::Failed;
+            expected.finish_reason = None;
+            expected.error = Some(harness_core::session::ModelError {
+                code: match kind {
+                    CaseKind::ProviderError => ModelErrorCode::ProviderFailure,
+                    CaseKind::RateLimit => ModelErrorCode::RateLimit,
+                    _ => ModelErrorCode::Authentication,
+                },
+                message: "provider HTTP request failed".into(),
+                provider_code: Some(format!("http_{status}")),
+                retry_after_ms: Some(75),
+            });
+        }
+        _ => {}
+    }
+    let mut input = request();
+    if kind == CaseKind::Request {
+        input.input.tools = ["read", "other"]
+            .into_iter()
+            .map(|name| ToolDefinition {
+                name: name.into(),
+                description: format!("definition {name}"),
+                input_schema: json!({"type":"object"}),
+                effects: EffectSet::new([EffectClass::Read]).unwrap(),
+                backend: ExecutionBackend::TrustedFs,
+            })
+            .collect();
+        input.input.options.reasoning_effort = Some(ReasoningEffort::High);
+        input.input.options.provider_options =
+            serde_json::from_value(json!({"echo":{"strict":true}})).unwrap();
+    }
+    Case {
+        kind,
+        fixture: format!("{kind:?}"),
+        request: input,
+        expected,
+        unsupported_option: None,
     }
 }
 

@@ -16,6 +16,7 @@ use harness_core::{
 use serde_json::{Map, Value, json};
 
 use super::{Profile, STATE_SCHEMA, models};
+use crate::native_id::native_call_id;
 
 /// Artifact bytes permitted for this request, keyed by exact reference.
 #[derive(Default)]
@@ -333,7 +334,10 @@ fn assistant_items(
                 provider_call_id,
             } => {
                 flush_text(&mut text, items);
-                let call_id = provider_call_id.as_deref().unwrap_or(call_id.as_str());
+                // A native id from another provider is sent verbatim when it is
+                // a plain identifier, otherwise replaced deterministically; see
+                // `native_id`. The result below looks up the same value.
+                let call_id = native_call_id(provider_call_id.as_deref(), call_id.as_str());
                 items.push(json!({
                     "type": "function_call",
                     "call_id": call_id,
@@ -397,9 +401,7 @@ fn provider_call_ids(input: &ModelInput) -> Vec<(String, String)> {
                     ..
                 } = block
                 {
-                    let native = provider_call_id
-                        .clone()
-                        .unwrap_or_else(|| call_id.as_str().to_owned());
+                    let native = native_call_id(provider_call_id.as_deref(), call_id.as_str());
                     calls.push((call_id.as_str().to_owned(), native));
                 }
             }

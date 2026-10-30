@@ -90,6 +90,16 @@ pub fn info(model: &str) -> Option<ModelInfo> {
 /// provider instance name.
 pub fn catalog(provider_instance: &str) -> ModelCatalog {
     let mut catalog = ModelCatalog::new();
+    extend_catalog(&mut catalog, provider_instance);
+    catalog
+}
+
+/// Add every sourced row to an existing catalog, under `provider_instance`.
+///
+/// A session may use several provider instances (and switch between them), so
+/// the runtime needs one catalog holding each registered instance's rows. The
+/// core's `ModelCatalog` has no merge, so each adapter adds its own rows.
+pub fn extend_catalog(catalog: &mut ModelCatalog, provider_instance: &str) {
     for entry in ENTRIES {
         let Some(metadata) = info(entry.model) else {
             continue;
@@ -102,5 +112,4 @@ pub fn catalog(provider_instance: &str) -> ModelCatalog {
             metadata,
         );
     }
-    catalog
 }

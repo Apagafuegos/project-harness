@@ -109,6 +109,16 @@ pub fn info(profile: Profile, model: &str) -> Option<ModelInfo> {
 /// `ContextConfig` so the context builder and the adapter agree.
 pub fn catalog(profile: Profile, provider_instance: &str) -> ModelCatalog {
     let mut catalog = ModelCatalog::new();
+    extend_catalog(&mut catalog, profile, provider_instance);
+    catalog
+}
+
+/// Add every sourced row for `profile` to an existing catalog.
+///
+/// A session may use several provider instances (and switch between them), so
+/// the runtime needs one catalog holding each registered instance's rows. The
+/// core's `ModelCatalog` has no merge, so each adapter adds its own rows.
+pub fn extend_catalog(catalog: &mut ModelCatalog, profile: Profile, provider_instance: &str) {
     for entry in entries(profile) {
         let Some(metadata) = info(profile, entry.model) else {
             continue;
@@ -121,5 +131,4 @@ pub fn catalog(profile: Profile, provider_instance: &str) -> ModelCatalog {
             metadata,
         );
     }
-    catalog
 }
