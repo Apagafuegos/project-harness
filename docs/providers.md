@@ -50,8 +50,8 @@ Never put credentials in `ModelRequest`, events, journals or logs.
 
 `CredentialScheme` selects the authentication header. `Credential::bearer` and
 `EnvApiKey::new("OPENAI_API_KEY")` keep `Authorization: Bearer`;
-`Credential::api_key` and `EnvApiKey::new("ANTHROPIC_API_KEY")` send
-`x-api-key`. Both schemes keep the ADR 0016 guarantees: `[redacted]`
+`Credential::api_key` and `EnvApiKey::with_scheme("ANTHROPIC_API_KEY",
+CredentialScheme::ApiKeyHeader)` send `x-api-key`; the scheme is always explicit. Both schemes keep the ADR 0016 guarantees: `[redacted]`
 `Debug`/`Display`, sensitive header values, reserved names refused as extra
 headers, and no secret in errors, events or logs. OpenAI behavior is unchanged.
 

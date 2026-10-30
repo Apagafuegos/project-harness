@@ -126,8 +126,14 @@ pub struct EnvApiKey {
     credential: Credential,
 }
 impl EnvApiKey {
-    /// Read a named variable once; errors name the variable, never its value.
+    /// Read a named variable once as a bearer key; errors name the variable,
+    /// never its value.
     pub fn new(variable: &str) -> Result<Self, ModelError> {
+        Self::with_scheme(variable, CredentialScheme::Bearer)
+    }
+
+    /// Read a named variable once, sent with an explicit authentication scheme.
+    pub fn with_scheme(variable: &str, scheme: CredentialScheme) -> Result<Self, ModelError> {
         // Restrict diagnostics to environment variable identifiers, not arbitrary input.
         if variable.is_empty()
             || !variable
@@ -141,16 +147,7 @@ impl EnvApiKey {
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| auth(&format!("missing or empty credential variable {variable}")))?;
         Ok(Self {
-            credential: Credential::new(
-                value,
-                if variable == "ANTHROPIC_API_KEY" {
-                    CredentialScheme::ApiKeyHeader
-                } else {
-                    CredentialScheme::Bearer
-                },
-                HeaderMap::new(),
-                None,
-            )?,
+            credential: Credential::new(value, scheme, HeaderMap::new(), None)?,
         })
     }
 }

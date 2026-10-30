@@ -42,10 +42,12 @@ pub enum CredentialScheme { Bearer, ApiKeyHeader }
 ```
 
 `Credential::bearer` is unchanged (`Authorization: Bearer <secret>`), and
-`Credential::api_key` selects `x-api-key: <secret>`. `EnvApiKey::new` selects
-`ApiKeyHeader` for the exact variable name `ANTHROPIC_API_KEY` and `Bearer`
-otherwise, so both adapters keep their documented sources. A source that needs a
-different scheme can call the constructor directly.
+`Credential::api_key` selects `x-api-key: <secret>`. `EnvApiKey::new` always
+reads a bearer key; `EnvApiKey::with_scheme` takes the scheme explicitly, and the
+Anthropic adapter's `from_env` uses `with_scheme("ANTHROPIC_API_KEY",
+CredentialScheme::ApiKeyHeader)`. The scheme is never inferred from a variable
+name. Current Anthropic SDKs send API keys as `Authorization: Bearer`; the API
+still accepts `x-api-key`, which this adapter keeps (the brief's acceptance item).
 
 Every m4-02 redaction guarantee is preserved for both schemes:
 

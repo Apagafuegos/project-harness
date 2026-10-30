@@ -21,7 +21,7 @@ use harness_core::{
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
 
 use crate::{
-    credentials::{CredentialSource, EnvApiKey},
+    credentials::{CredentialScheme, CredentialSource, EnvApiKey},
     error::TransportError,
     sse::{self, SseConfig},
     transport::{Transport, TransportConfig},
@@ -105,7 +105,10 @@ impl AnthropicMessages {
 
     /// Read `ANTHROPIC_API_KEY` now, sent as `x-api-key`.
     pub fn from_env() -> Result<Self, ModelError> {
-        Self::new(Arc::new(EnvApiKey::new("ANTHROPIC_API_KEY")?))
+        Self::new(Arc::new(EnvApiKey::with_scheme(
+            "ANTHROPIC_API_KEY",
+            CredentialScheme::ApiKeyHeader,
+        )?))
     }
 
     /// Replace the endpoint. Intended for loopback fixtures, never for routine

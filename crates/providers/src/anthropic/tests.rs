@@ -1432,10 +1432,13 @@ fn catalog_rows_match_the_official_models_overview() {
 #[test]
 fn env_anthropic_key_selects_the_api_key_header() {
     if std::env::var_os("HARNESS_ANTHROPIC_ENV_CHILD").is_some() {
-        let credential = crate::credentials::EnvApiKey::new("ANTHROPIC_API_KEY")
-            .expect("env key")
-            .credential()
-            .expect("credential");
+        let credential = crate::credentials::EnvApiKey::with_scheme(
+            "ANTHROPIC_API_KEY",
+            crate::credentials::CredentialScheme::ApiKeyHeader,
+        )
+        .expect("env key")
+        .credential()
+        .expect("credential");
         let headers = credential.request_headers();
         assert_eq!(headers["x-api-key"], SENTINEL_SECRET);
         assert!(headers.get("authorization").is_none());
