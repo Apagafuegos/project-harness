@@ -212,6 +212,9 @@ fn configuration_defaults_and_invalid_shapes() {
         &CompactionConfig::default()
     );
     assert_eq!(parse(POLICY).unwrap().compaction().max_summary_tokens, 2048);
+    assert!(!parse(b"{}").unwrap().compaction().automatic());
+    assert!(parse(POLICY).unwrap().compaction().automatic());
+    assert!(!parse(br#"{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"automatic":false}}"#).unwrap().compaction().automatic());
     for bytes in [
         r#"{"compaction":null}"#,
         r#"{"compaction":[]}"#,
@@ -220,6 +223,8 @@ fn configuration_defaults_and_invalid_shapes() {
         r#"{"compaction":{"max_summary_tokens":0}}"#,
         r#"{"compaction":{"max_summary_tokens":"lots"}}"#,
         r#"{"compaction":{"unknown":true}}"#,
+        r#"{"compaction":{"automatic":true}}"#,
+        r#"{"compaction":{"automatic":"yes"}}"#,
         r#"{"compaction":{"summary_model":{}}}"#,
         r#"{"compaction":{"summary_model":{"provider_instance":"","model":"m"}}}"#,
     ] {
@@ -845,6 +850,15 @@ async fn golden_preview_reports_and_storage_acceptance() {
         .unwrap();
     golden("compaction-preview-before", &proposed.before);
     golden("compaction-preview-after", &proposed.after);
+    let path = golden_path("compaction-preview-diff");
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&proposed.diff).unwrap()
+    );
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), actual);
     commit_preview(&mut store, &fixture.root, &proposed).unwrap();
     assert_eq!(
         store.snapshot().entry(&proposed.entry.id).unwrap().entry,

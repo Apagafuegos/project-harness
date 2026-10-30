@@ -223,6 +223,57 @@ pub struct PreviewBinding {
     pub policy_fingerprint: Digest,
 }
 
+/// Inspection-only changes computed from the two projections.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompactionDiff {
+    /// Entries newly replaced by summary text, in report order.
+    pub newly_covered: Vec<EntryId>,
+    /// Summaries newly superseded, in report order.
+    pub superseded: Vec<EntryId>,
+    /// Estimates by category before replacement.
+    pub before: Totals,
+    /// Estimates by category after replacement.
+    pub after: Totals,
+    /// True only for a known budget without overflow.
+    pub fits_budget: bool,
+}
+impl CompactionDiff {
+    /// Pure report comparison; no regeneration or storage access.
+    pub fn between(before: &ContextReport, after: &ContextReport) -> Self {
+        let changed = |reason| {
+            let mut seen = BTreeSet::new();
+            after
+                .excluded
+                .iter()
+                .filter(|e| {
+                    e.reason == reason
+                        && !before
+                            .excluded
+                            .iter()
+                            .any(|b| b.entry_id == e.entry_id && b.reason == reason)
+                        && seen.insert(e.entry_id.clone())
+                })
+                .map(|e| e.entry_id.clone())
+                .collect()
+        };
+        Self {
+            newly_covered: changed(ExclusionReason::CoveredBySummary),
+            superseded: changed(ExclusionReason::SupersededSummary),
+            before: before.totals.clone(),
+            after: after.totals.clone(),
+            fits_budget: !after.flags.budget_unknown && !after.flags.overflow,
+        }
+    }
+}
+
+/// Current strategy/version and effective configuration identity.
+pub fn policy_fingerprint(config: &CompactionConfig) -> Digest {
+    Digest::of(
+        &serde_json::to_vec(&(RollingSummary::NAME, RollingSummary::VERSION, config))
+            .expect("policy serializes"),
+    )
+}
+
 /// Data only: not committed or published. The caller owns artifact publication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionPreview {
@@ -237,6 +288,8 @@ pub struct CompactionPreview {
     pub after: ContextReport,
     /// Immutable input identity for later stale-preview checking.
     pub binding: PreviewBinding,
+    /// Exact changes between the two reports.
+    pub diff: CompactionDiff,
 }
 
 /// Closed, coded generation failures. No failure returns a partial preview.
@@ -449,13 +502,13 @@ impl RollingSummary {
             .with_tools(&input.tools)
             .build(&SessionSnapshot(Arc::new(state)), Some(&entry.id), None)?
             .report;
-        let policy_fingerprint = Digest::of(
-            &serde_json::to_vec(&(Self::NAME, Self::VERSION, config)).expect("policy serializes"),
-        );
+        let policy_fingerprint = policy_fingerprint(config);
+        let diff = CompactionDiff::between(&before, &after);
         let session_model = before.identity.model.clone();
         Ok(CompactionPreview {
             entry,
             manifest_bytes,
+            diff,
             before,
             after,
             binding: PreviewBinding {
@@ -509,6 +562,7 @@ async fn collect_summary(
     let mut ignored_bytes = 0usize;
     let mut started = false;
     loop {
+        tokio::task::consume_budget().await;
         let event = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         match event {
             Some(ProviderEvent::Started) if !started => started = true,

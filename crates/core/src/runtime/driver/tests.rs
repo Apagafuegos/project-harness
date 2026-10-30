@@ -1,5 +1,7 @@
 //! Real worker/channels on a current-thread runtime, with explicit virtual time.
 
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
 #[path = "host_tests.rs"]
 mod host_tests;
 #[path = "model_tests.rs"]
@@ -1511,8 +1513,20 @@ async fn context_overflow_fails_the_turn_before_any_stream_opens() {
             max_output_tokens: None,
         },
     );
-    let flags = refused_before_any_stream(config, "context_overflow").await;
-    assert!(flags.overflow && !flags.budget_unknown && !flags.preview);
+    let (fixture, provider) =
+        Fixture::scripted(config, WorkerOptions::default(), [reply("unused")]).await;
+    let before = fixture.handle.view().await.unwrap().snapshot.sequence();
+    assert_eq!(
+        fixture.handle.command(Fixture::command(1)).await,
+        Err(Rejection::ContextBudgetExceeded {
+            reason: Some(crate::context::compaction::NotEligible::Empty)
+        })
+    );
+    let view = fixture.handle.view().await.unwrap();
+    assert_eq!(view.snapshot.sequence(), before);
+    assert!(finishes(&view).is_empty());
+    assert!(provider.streams().is_empty());
+    fixture.handle.shutdown().await;
 }
 
 /// RFC-001 C01: with no limit for the model, execution refuses to infer.

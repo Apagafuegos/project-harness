@@ -6,9 +6,10 @@ builder, its report and fingerprint, the core's use of it in `Preparing`,
 [Decision 0006](decisions/0006-context-builder.md) records the design.
 Milestone 4 step 01a adds tool definitions, inference options and validated
 native continuation selection ([decision 0014](decisions/0014-model-seam.md)).
-Milestone 4 step 05 adds preview-only rolling summary generation
-([decision 0019](decisions/0019-compaction.md)). Compaction commands, automatic
-triggering and native wire formats remain planned; see [Not implemented](#not-implemented).
+Milestone 4 steps 05–06 add rolling summaries, manual preview/commit/cancel,
+inspection diffs and idle-only automatic triggering
+([decision 0019](decisions/0019-compaction.md)). Native wire formats remain
+planned; see [Not implemented](#not-implemented).
 
 ## Three layers
 
@@ -181,10 +182,15 @@ usable = context_tokens - output_reserve - tool_headroom - safety_margin   (0 if
   Inspection and `harness context` report it; the core refuses to infer with it
   and fails the turn with `context_budget_unknown` (RFC-001 C01).
 - **Overflow:** estimated total `>` usable. `overflow_tokens` says by how much.
-  The core fails the turn with `context_overflow`.
+  Before C1 the core compacts once while idle if configured and eligible, or
+  rejects `StartTurn` with `context_budget_exceeded` and its `NotEligible`
+  reason. No user entry or turn is written on rejection. A later tool-loop
+  overflow fails the active turn with `context_budget_exceeded`, without
+  compaction inside the turn.
 - **Compaction recommended:** estimated total `>=`
-  `ceil(usable * compaction_trigger_permille / 1000)`. Nothing acts on it until
-  summaries are generated in Milestone 4.
+  `ceil(usable * compaction_trigger_permille / 1000)`. With automatic compaction
+  configured, a terminal turn acknowledgement checks this flag while idle and
+  makes at most one generation/commit attempt. No retry loop follows a failure.
 
 **Estimates.** `TokenEstimator` returns `Estimate { tokens, method }`; the
 builder refuses mixed methods. `HeuristicEstimator` (method `heuristic`,
@@ -269,7 +275,7 @@ cancel or the inference limit is handled first.
 1. It emits `ContextBuilt { turn_id, head, fingerprint, totals, flags }`.
 2. With an unknown budget it commits `turn_finished(failed,
    context_budget_unknown)` from `Preparing`; on overflow,
-   `turn_finished(failed, context_overflow)`. Either way there is no C2 and no
+   `turn_finished(failed, context_budget_exceeded)`. Either way there is no C2 and no
    provider call.
 3. Otherwise it keeps the projection and commits C2. After C2's ack it emits
    `StartInference { head, input, fingerprint, ... }`. C2 adds no entries, so
@@ -311,14 +317,17 @@ policy. Pins are not implemented and have no exclusion policy yet.
 The optional session configuration object is independently shape-checked:
 
 ```json
-{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2}}
+{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2,"automatic":true}}
 ```
 
 Without `summary_model`, selection still works but generation returns
 `summary_model_unconfigured`; the session model is never used by default.
 `max_summary_tokens` defaults to 2048 and must be positive; retention defaults
 to 2 and cannot be lower. Malformed compaction configuration fails loading as
-`invalid_compaction`.
+`invalid_compaction`. `automatic` defaults to true when `summary_model` is
+configured and false otherwise; explicitly enabling it without a summary model
+is invalid. `automatic: false` keeps manual preview/commit available, but refuses
+overflowing starts rather than silently generating a summary.
 
 `RollingSummary::new(Arc<dyn ModelProvider>)` implements `CompactionStrategy`.
 `propose(CompactionInput, OperationControl)` uses the existing builder's source
@@ -336,11 +345,41 @@ builder, not a second summary placement algorithm. Its journal sequence stays
 at the base sequence until a future real commit allocates one. Generating a
 preview publishes nothing and cannot write a journal or run a tool.
 
+### Runtime commitment, inspection diff and recovery (m4-06)
+
+Generation is exclusively `Effect::ProposeCompaction` in the pure runtime and
+`RollingSummary::propose` in the driver, bounded by an independent cancellation
+token and `RuntimeConfig.compaction_deadline` (300 seconds by default). Manual
+`PreviewCompaction` replies with a fresh ephemeral `preview_id` and the preview.
+`CommitCompaction { preview_id }` rebuilds the manifest from the current snapshot
+and rechecks all five bindings before any publication. `stale_preview` names
+the differing field. Success publishes/syncs the manifest before appending the
+exact preview entry, while idle. `CancelCompaction` or an accepted `StartTurn`
+cancels a running generation; late answers cannot restore it.
+
+`CompactionDiff::between(before, after)` reports newly covered entries,
+newly superseded summaries, complete per-category `Totals` before/after, and
+`fits_budget` (false for unknown budgets or overflow). The diff may show a token
+increase: no saving is fabricated. It is included in manual preview replies,
+automatic preview/commit events and `inspect_context_preview(preview_id)` on the
+runtime/handle. These inspection APIs and `prepare` never call the strategy.
+The deterministic m4-05 scenario has a separate
+`context/golden/compaction-preview-diff.json` golden alongside its two reports.
+
+Previews are single-use and memory-only; any session commit, fault or restart
+discards them. A crash during generation leaves no artifacts or journal changes.
+A crash after manifest publication but before append leaves only an unreferenced
+content-addressed artifact. After summary append but before reply, reopen sees
+one summary and is idle; retrying the old preview ID is stale, never another
+append. The ID-only commit command has no durable command receipt, whereas the
+subsequent `StartTurn` retains its normal C1 receipt and retry behavior. Automatic
+generation never runs merely because a session was reopened or inspected.
+
+See [runtime compaction commands](runtime.md#compaction-commands-and-automatic-triggers)
+for pre-C1 budget checking, pending-start deduplication, events and failure codes.
+
 ## Not implemented
 
-- Preview commit commands, stale-preview enforcement, automatic compaction,
-  inspection diffs and full C02 integration (m4-06). The ordinary builder still
-  honors only summaries already present in its supplied snapshot.
 - Native wire formats (Milestone 4) and real tokenizers.
 - Pinning and alternative strategies (Milestone 6).
 

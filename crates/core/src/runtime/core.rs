@@ -5,9 +5,12 @@ use crate::session::{ArtifactRef, ProviderContinuation};
 use serde_json::json;
 use std::collections::BTreeMap;
 
+#[path = "compaction.rs"]
+mod compaction;
 #[path = "pipeline.rs"]
 mod pipeline;
 use crate::tools::{PolicyError, PolicySnapshot, ToolSet};
+use compaction::{Generation, PendingStart};
 use pipeline::Activity;
 
 use crate::context::{
@@ -77,6 +80,9 @@ pub struct Runtime {
     /// The projection built in `Preparing`, sent with the stream that C2's
     /// acknowledgement starts. C2 adds no entries, so it stays valid.
     prepared: Option<Projection>,
+    generation: Option<Generation>,
+    preview: Option<(EntryId, crate::context::compaction::CompactionPreview)>,
+    invalid_preview: Option<(EntryId, &'static str)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +112,7 @@ struct InFlight {
     artifacts: Vec<Vec<u8>>,
     /// New decoded configuration installed only after acknowledgement.
     configuration: Option<SessionConfiguration>,
+    compaction_start: Option<PendingStart>,
 }
 
 #[derive(Debug)]
@@ -122,6 +129,7 @@ enum Waiter {
     HeadSelected,
     ModelSwitched(Box<crate::context::PreviewReport>),
     ApprovalSubmitted(crate::session::ApprovalId),
+    CompactionCommitted(EntryId),
 }
 
 /// A media opening command reserves the same exclusive slot as a commit.
@@ -282,6 +290,9 @@ impl Runtime {
             cancel: None,
             stale_events: 0,
             prepared: None,
+            generation: None,
+            preview: None,
+            invalid_preview: None,
         }
     }
 
@@ -389,6 +400,9 @@ impl Runtime {
                 active_turn: self.snapshot().active_turn().cloned(),
             }),
             Input::Start => self.recover(env),
+            Input::CompactionProposed { token, result } => {
+                self.compaction_proposed(token, result, env)
+            }
             Input::ArtifactsVerified { token, missing } => {
                 self.artifacts_verified(token, missing.is_empty(), env)
             }
@@ -452,6 +466,21 @@ impl Runtime {
 
     fn command(&mut self, request: RequestId, command: Command, env: &mut dyn Env) {
         let result = match command {
+            Command::PreviewCompaction => self.preview_compaction(request, env),
+            Command::CommitCompaction { preview_id } => {
+                self.commit_compaction(Some(request), preview_id, None, env)
+            }
+            Command::CancelCompaction => {
+                if self.mode == Mode::Faulted {
+                    Some(Err(Rejection::Faulted))
+                } else if self.cancel_generation(Rejection::Compaction(
+                    crate::context::compaction::CompactionError::Cancelled,
+                )) {
+                    Some(Ok(Accepted::CompactionCancelled))
+                } else {
+                    Some(Err(Rejection::NotActive))
+                }
+            }
             Command::StartTurn {
                 command_id,
                 content,
@@ -486,7 +515,11 @@ impl Runtime {
             Mode::Ready
                 if self.in_flight.is_some()
                     || self.verifying.is_some()
-                    || self.snapshot().active_turn().is_some() =>
+                    || self.snapshot().active_turn().is_some()
+                    || self
+                        .generation
+                        .as_ref()
+                        .is_some_and(|g| g.start().is_some()) =>
             {
                 Err(Rejection::Busy)
             }
@@ -545,6 +578,27 @@ impl Runtime {
             verifying.waiters.push(request);
             return None;
         }
+        if let Some(start) = self
+            .in_flight
+            .as_mut()
+            .and_then(|f| f.compaction_start.as_mut())
+            && start.command_id == command_id
+        {
+            if start.fingerprint != fingerprint {
+                return Some(Err(Rejection::StaleCommand));
+            }
+            start.waiters.push(request);
+            return None;
+        }
+        if let Some(start) = self.generation.as_mut().and_then(|g| g.start_mut())
+            && start.command_id == command_id
+        {
+            if start.fingerprint != fingerprint {
+                return Some(Err(Rejection::StaleCommand));
+            }
+            start.waiters.push(request);
+            return None;
+        }
         if let Err(rejection) = self.idle_check() {
             return Some(Err(rejection));
         }
@@ -583,6 +637,9 @@ impl Runtime {
         if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
             return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
         }
+        self.cancel_generation(Rejection::Compaction(
+            crate::context::compaction::CompactionError::Cancelled,
+        ));
         let refs: Vec<_> = content
             .iter()
             .filter_map(|block| match block {
@@ -633,6 +690,26 @@ impl Runtime {
     }
 
     fn open_turn(
+        &mut self,
+        command_id: CommandId,
+        content: Vec<ContentBlock>,
+        fingerprint: Digest,
+        waiters: Vec<RequestId>,
+        env: &mut dyn Env,
+    ) {
+        self.budget_start(
+            PendingStart {
+                command_id,
+                content,
+                fingerprint,
+                waiters,
+            },
+            true,
+            env,
+        );
+    }
+
+    fn commit_open_turn(
         &mut self,
         command_id: CommandId,
         content: Vec<ContentBlock>,
@@ -1198,6 +1275,7 @@ impl Runtime {
         for event in in_flight.tool_events {
             self.emit(event);
         }
+        let finished_turn = in_flight.finished.is_some();
         if let Some(finished) = in_flight.finished {
             self.inferences = 0;
             self.emit(EventKind::TurnFinished {
@@ -1241,6 +1319,10 @@ impl Runtime {
                     ack: ack.clone(),
                 },
                 Waiter::HeadSelected => Accepted::HeadSelected { ack: ack.clone() },
+                Waiter::CompactionCommitted(preview_id) => Accepted::CompactionCommitted {
+                    preview_id,
+                    ack: ack.clone(),
+                },
                 Waiter::ModelSwitched(preview) => {
                     self.emit(EventKind::ModelSwitched {
                         preview: preview.clone(),
@@ -1259,7 +1341,14 @@ impl Runtime {
         }
         self.resolve_cancel(&ack);
         if !recovering {
-            self.advance(env);
+            if let Some(start) = in_flight.compaction_start {
+                self.budget_start(start, false, env);
+            } else {
+                self.advance(env);
+                if finished_turn {
+                    self.automatic_compaction(env);
+                }
+            }
         }
     }
 
@@ -1292,6 +1381,9 @@ impl Runtime {
     /// Stop for good: no retries, no further effects except rejections.
     fn fault(&mut self, cause: FaultCause) {
         self.mode = Mode::Faulted;
+        self.cancel_generation(Rejection::Faulted);
+        self.preview = None;
+        self.invalid_preview = None;
         self.prepared = None;
         self.cancel_execution();
         self.clear_tool();
@@ -1320,9 +1412,15 @@ impl Runtime {
         }
         self.emit(EventKind::Fault(cause));
         self.sync_phase();
-        let waiters = self.in_flight.take().map(|f| f.waiters).unwrap_or_default();
-        for (request, _) in waiters {
-            self.reply(request, Err(Rejection::Faulted));
+        if let Some(flight) = self.in_flight.take() {
+            for (request, _) in flight.waiters {
+                self.reply(request, Err(Rejection::Faulted));
+            }
+            if let Some(start) = flight.compaction_start {
+                for request in start.waiters {
+                    self.reply(request, Err(Rejection::Faulted));
+                }
+            }
         }
         for request in self.cancel.take().map(|c| c.waiters).unwrap_or_default() {
             self.reply(request, Err(Rejection::Faulted));
@@ -1846,7 +1944,7 @@ impl Runtime {
         let refusal = if report.flags.budget_unknown {
             Some("context_budget_unknown")
         } else if report.flags.overflow {
-            Some("context_overflow")
+            Some("context_budget_exceeded")
         } else {
             None
         };
@@ -2150,6 +2248,17 @@ impl Runtime {
         if self.in_flight.is_some() {
             return self.fault(FaultCause::Internal("second_commit_in_flight"));
         }
+        self.cancel_generation(Rejection::Compaction(
+            crate::context::compaction::CompactionError::Cancelled,
+        ));
+        if let Some((id, preview)) = self.preview.take() {
+            let field = if preview.binding.head != commit.head.to {
+                "head"
+            } else {
+                "journal_sequence"
+            };
+            self.invalid_preview = Some((id, field));
+        }
         self.next_token += 1;
         let token = CommitToken(self.next_token);
         in_flight.token = token;
@@ -2329,6 +2438,7 @@ fn idle_flight() -> InFlight {
         tool_events: Vec::new(),
         artifacts: Vec::new(),
         configuration: None,
+        compaction_start: None,
     }
 }
 

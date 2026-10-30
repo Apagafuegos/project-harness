@@ -314,6 +314,9 @@ impl ClientView {
             | EventKind::Recovered { .. }
             | EventKind::ContextBuilt { .. }
             | EventKind::ModelSwitched { .. }
+            | EventKind::CompactionPreviewed { .. }
+            | EventKind::CompactionCommitted { .. }
+            | EventKind::CompactionFailed { .. }
             | EventKind::Diagnostic(_) => {}
         }
         ApplyOutcome::Applied

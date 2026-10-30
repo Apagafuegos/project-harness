@@ -2,6 +2,9 @@
 
 use std::{fmt, time::Duration};
 
+use crate::context::compaction::{
+    CompactionError, CompactionInput, CompactionPreview, NotEligible,
+};
 use crate::context::{ContextConfig, ContextError, Flags, PreviewReport, Totals};
 use crate::model::ModelInput;
 use crate::session::{
@@ -43,6 +46,8 @@ local_id!(
     ExecutionToken,
     /// Identifies an advisory inspection; stale replies are ignored.
     HintToken,
+    /// Identifies one compaction generation; driver answers are epoch scoped.
+    CompactionToken,
 );
 
 /// UUIDv7 identity of one runtime incarnation, never journaled.
@@ -96,6 +101,8 @@ pub struct RuntimeConfig {
     /// The default catalog is empty, and a turn whose model has no context
     /// limit fails with `context_budget_unknown`.
     pub context: ContextConfig,
+    /// Absolute elapsed limit for summary generation, independently cancellable.
+    pub compaction_deadline: Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -111,6 +118,7 @@ impl Default for RuntimeConfig {
             provider_idle_timeout: Duration::from_secs(300),
             inference_deadline: None,
             context: ContextConfig::default(),
+            compaction_deadline: Duration::from_secs(300),
         }
     }
 }
@@ -118,6 +126,13 @@ impl Default for RuntimeConfig {
 /// Everything the core reacts to. One input yields one batch of effects.
 #[derive(Clone, Debug)]
 pub enum Input {
+    /// Driver-only summary generation completed; stale tokens are ignored.
+    CompactionProposed {
+        /// Fresh local generation identity.
+        token: CompactionToken,
+        /// Complete preview or coded failure, never partial data.
+        result: Result<Box<CompactionPreview>, CompactionError>,
+    },
     /// Announce the current phase and epoch after attaching a replacement runtime.
     PublishView,
     /// The driver attached this runtime to an opened, created, reopened or
@@ -210,6 +225,15 @@ pub enum Input {
 /// Client commands in scope for Milestone 2.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
+    /// Generate an ephemeral summary preview while idle.
+    PreviewCompaction,
+    /// Commit an unused, still-bound preview exactly as proposed.
+    CommitCompaction {
+        /// Ephemeral identity returned by preview generation.
+        preview_id: EntryId,
+    },
+    /// Cancel the outstanding generation without publishing its result.
+    CancelCompaction,
     /// Start a turn. `command_id` deduplicates retries through the journal.
     StartTurn {
         /// Journal deduplication key; never reused as the turn's identity.
@@ -426,6 +450,18 @@ impl PersistError {
 /// Side effects the driver performs. The core does nothing else.
 #[derive(Clone, Debug)]
 pub enum Effect {
+    /// Generate through RollingSummary in the driver, never in the core.
+    ProposeCompaction {
+        /// Fresh generation identity.
+        token: CompactionToken,
+        /// Immutable source and read-only artifact capability.
+        input: CompactionInput,
+    },
+    /// Cancel and drop an outstanding summary generation.
+    CancelCompaction {
+        /// Generation to dispose of.
+        token: CompactionToken,
+    },
     /// Inspect authorized plan artifacts without delaying recovery commits.
     InspectUncertain {
         /// Fresh advisory job identity.
@@ -531,6 +567,22 @@ pub enum Effect {
 /// A durably accepted command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Accepted {
+    /// The preview is memory-only and grants no write authority.
+    CompactionPreviewed {
+        /// Single-use runtime-local identity (fresh across restarts).
+        preview_id: EntryId,
+        /// Before/after reports and inspection diff.
+        preview: Box<CompactionPreview>,
+    },
+    /// The exact proposed summary entry is durable.
+    CompactionCommitted {
+        /// Consumed preview identity.
+        preview_id: EntryId,
+        /// Storage acknowledgement.
+        ack: CommitAck,
+    },
+    /// The running generation was cancelled; no preview will result.
+    CompactionCancelled,
     /// The opening commit is durable; a deduplicated retry returns the original.
     TurnStarted {
         /// Identity of the turn, distinct from the command ID.
@@ -576,6 +628,19 @@ pub enum Accepted {
 /// Why a command was refused. Refused commands change nothing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Rejection {
+    /// `stale_preview`: no write occurred; names the differing binding.
+    StalePreview {
+        /// head, journal_sequence, session_model, source_fingerprint,
+        /// policy_fingerprint, or preview_id (unknown/consumed).
+        field: &'static str,
+    },
+    /// Compaction refused or failed with its closed code/reason.
+    Compaction(CompactionError),
+    /// `context_budget_exceeded`: compaction cannot make the next request fit.
+    ContextBudgetExceeded {
+        /// Eligibility reason, when no span can help.
+        reason: Option<NotEligible>,
+    },
     /// The bounded command channel is full; submission never waits for room.
     Overloaded,
     /// A turn is active or a commit is in flight. Commands are never queued.
@@ -613,6 +678,27 @@ pub struct RuntimeEvent {
 /// deltas are live observations that are never persisted individually.
 #[derive(Clone, Debug)]
 pub enum EventKind {
+    /// An ephemeral preview, including automatic preparation.
+    CompactionPreviewed {
+        /// Fresh single-use identity.
+        preview_id: EntryId,
+        /// Whether the idle trigger requested it.
+        automatic: bool,
+        /// Reports and exact changes.
+        preview: Box<CompactionPreview>,
+    },
+    /// Compaction became durable, with the original inspection reports.
+    CompactionCommitted {
+        /// Consumed preview identity.
+        preview_id: EntryId,
+        /// Original preview and diff.
+        preview: Box<CompactionPreview>,
+    },
+    /// One trigger attempt failed; no automatic retry is scheduled.
+    CompactionFailed {
+        /// Stable generation or budget failure code.
+        code: &'static str,
+    },
     /// A model switch is durable; never contains opaque payload bytes.
     ModelSwitched {
         /// Classified target preview.

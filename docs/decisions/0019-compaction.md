@@ -1,7 +1,7 @@
-# 0019: Preview-only rolling compaction
+# 0019: Rolling compaction
 
-Status: Implemented for Milestone 4, step 05. Commit commands and automatic
-triggering are not implemented here.
+Status: Implemented for Milestone 4, steps 05–06. The original preview-only
+scope is preserved below; the m4-06 amendment adds runtime commitment and triggers.
 
 Date: 2026-10-29
 
@@ -120,7 +120,7 @@ the real after report, adjusting only the newly allocated sequence. No artifacts
 are published and no head/sequence changes during generation. The preview need
 not save tokens: it reports actual estimates, including increases, honestly.
 
-## Scope of m4-06
+## Original scope of m4-06 (implemented by the amendment)
 
 Explicit preview commitment, stale-preview checks, commands, automatic 85%
 preparation/triggering, inspection diffs and full C02 integration are m4-06.
@@ -129,7 +129,118 @@ An active-turn preview protects the current turn but cannot be committed until
 storage's idle requirement and all preview bindings hold. Navigating to a
 historical head likewise requires selecting that head before a future commit.
 
-## Evidence
+## m4-06 amendment
+
+### Runtime and policy
+
+The pure core emits `ProposeCompaction { token, input }`; only the driver runs
+`RollingSummary::propose`, using the session's supplied provider and the
+independent configured summary model. It owns one generation future, fresh
+cancellation token and absolute deadline (`compaction_deadline`, 300 seconds).
+Generation yields cooperatively even for an always-ready provider. Cancellation,
+shutdown, fault and replacement cancel/drop it. Answers carry runtime epochs and
+fresh local tokens; stale answers are ignored. The builder, `prepare` and both
+inspection APIs remain pure and never generate summaries.
+
+`compaction.automatic` is a resolved boolean, defaulting to true with a summary
+model and false without one. Enabling it without a summary model is invalid.
+Its effective value joins the other defaulted fields in the policy fingerprint.
+`automatic: false` preserves manual generation and commitment, but does not
+silently compact on an overflowing start. No storage rule or journal format changes.
+
+`PreviewCompaction` is idle-only and recovery-blocked. It checks eligibility
+before emitting any provider effect, then returns
+`CompactionPreviewed { preview_id, preview }`. IDs come from `Env`, are fresh
+across runtimes and are never journaled. `CommitCompaction { preview_id }`
+rechecks **head, sequence, session model, source and policy**. Selection and
+manifest construction run again over the current snapshot; cached manifest
+bytes alone cannot authorize a commit. A mismatch is `StalePreview { field }`
+(`stale_preview`), consumes the proposal and publishes nothing. Success passes
+the exact entry and manifest to existing `Persist`, which publishes/syncs the
+artifact before append. Commitment is always idle-only.
+
+Any session commit, fault or restart discards the cached proposal. A bounded
+single tombstone may retain only its ID and invalidating field. Unknown or
+consumed IDs reject as stale. `CancelCompaction` cancels running generation;
+the pending preview/start request receives `cancelled`. `StartTurn` cancels
+manual or post-turn generation before proceeding. Generation failure is an
+ephemeral coded event, not a recovery block and never a retry loop.
+
+After a terminal turn acknowledgement, the idle head projection is compared
+with `compaction_trigger_permille` (850 by default). An eligible span generates
+and commits automatically, with preview and durable commit events containing
+both reports and the diff. A result still over budget fails explicitly instead
+of committing an ineffective post-turn summary. Each trigger gets one attempt;
+neither summary acknowledgement, reopen, inspection nor failure retriggers it.
+
+Before C1, the core projects a private staged opening commit through the same
+builder. If the new message overflows and automatic compaction is eligible, it
+holds the start request, compacts **while idle**, then checks the prospective
+context again before C1. Identical pending-start retries attach during generation
+and summary persistence; changed content is `StaleCommand`, and another start
+is `Busy`. No user entry or turn is written when no span can help or the
+post-compaction projection still exceeds budget. The rejection is
+`ContextBudgetExceeded { reason: Option<NotEligible> }`
+(`context_budget_exceeded`). A later tool-loop overflow fails the already-open
+turn with that code; it never triggers compaction inside the turn. This replaces
+the earlier `context_overflow` execution code in decision 0006.
+
+### Inspection and crash semantics
+
+`CompactionDiff` is computed only from the before/after reports. It lists newly
+covered IDs and superseded summaries in report order, complete category token
+estimates before/after, and whether the known budget fits. It does not fabricate
+a saving. The preview reply and automatic preview/commit events carry it.
+`Runtime::inspect_context_preview(&id)` and the handle's async counterpart
+return that live preview (or stale rejection), without regenerating anything.
+
+A crash during generation leaves no persistent state. After publication but
+before append, only an unreferenced manifest remains, and reopen is idle.
+After append but before reply, the summary appears once on reopen, still idle.
+There is no `command_id` in `CommitCompaction`: its ephemeral single-use preview
+ID is not a durable command identity. Replaying the old ID after restart rejects
+it, so no receipt or second append is needed. The held `StartTurn` uses its
+ordinary C1 receipt once C1 commits; a summary alone does not claim that a turn
+started. Tests cover Lost/Durable/Torn boundaries, with no two in-flight intents.
+
+### C02 evidence
+
+Named tests are in `runtime::tests::compaction` unless qualified otherwise:
+
+| Clause | Evidence |
+| --- | --- |
+| Preview changes neither session nor workspace | `c02_manual_preview_leaves_journal_and_workspace_unchanged` compares journal, all data-root files and workspace bytes |
+| Every stale binding | `c02_stale_head`, `c02_stale_sequence`, `c02_stale_model`, `c02_stale_source_manifest_substitution`, `c02_stale_policy`; matching substituted digest/manifest still cannot pass |
+| Configured recent turns remain | `c02_automatic_retains_configured_recent_turns` uses retention three |
+| Exact source IDs/provenance | `c02_automatic_references_exact_source_ids` compares the stored artifact with a reconstructed manifest |
+| Only ancestor summaries superseded | `c02_automatic_supersedes_only_ancestor_summaries` includes rolling replacement and a sibling branch |
+| Original entries preserved | `c02_original_entries_remain_readable_byte_identical` checks the journal prefix, entry bytes and checksums |
+| Fits or explicit failure | `c02_budget_fits_or_failure_is_explicit`, `oversized_protected_content_rejects_after_one_compaction_attempt`, `mid_turn_overflow_fails_without_compaction_inside_turn` |
+| Pins | `c02_pins_not_applicable_until_pins_exist`; still not applicable until pins exist |
+| No regeneration during projection | `c02_no_summary_regenerated_during_pure_projection_or_prepare`; driver test `driver_shutdown_cancels_generation_and_reopen_has_no_preview_or_summary` records zero streams across full branch inspection |
+
+The m4-05 deterministic fixture additionally has
+`compaction-preview-diff.json`, alongside its unchanged before/after goldens.
+Driver tests exercise actual summary streams, cancellation/start preemption,
+absolute deadline, epoch/token reuse, inspection and post-ack events. The main
+randomized test calls compaction-specific seeded interleavings on **every seed**:
+manual preview, commit, stale commit, automatic generation, cancel/failure and
+Lost/Durable/Torn crashes, all with the storage oracle, replay and resync checks.
+
+### Break-on-purpose results (m4-06)
+
+Each mutation was applied individually, the named test failed (exit 101), then
+the mutation was reverted:
+
+| Mutation | Failing test and observation |
+| --- | --- |
+| Skip sequence validation | `c02_stale_sequence`: the request was not rejected |
+| Trust preview manifest bytes without reconstruction | `c02_stale_source_manifest_substitution`: substituted provenance was not rejected |
+| Start the summary strategy during context inspection | driver `driver_shutdown_cancels_generation_and_reopen_has_no_preview_or_summary`: zero-stream assertion failed |
+| Emit compaction while Preparing on a tool-loop overflow | `mid_turn_overflow_fails_without_compaction_inside_turn`: observed Preparing instead of Idle; independent `storage_idle_rule_rejects_compaction_inside_turn` still rejects with `session_not_idle` |
+| Retry automatic generation after failure | `automatic_single_attempt_per_trigger_and_failure_never_blocks`: another generation was pending |
+
+## Evidence (m4-05)
 
 `context::tests::compaction_tests` exercises every eligibility reason, configured
 retention/current-turn protection, source provenance, real storage acceptance,
@@ -152,4 +263,3 @@ All mutations were applied individually, observed failing, and reverted:
 | Omit rolling `supersedes` | `storage_acceptance_normal_and_rolling`: builder first rejects `overlapping_active_summaries`; independent storage-oracle test rejects the same missing-supersession entry |
 | Leave session native blocks in summary input | `exact_request_has_independent_model_no_tools_or_native_state`: request artifact allowlist assertion fails |
 | Disable heading validation | `generation_errors_are_coded_and_never_produce_previews`: malformed-summary case incorrectly returns a preview |
-

@@ -411,20 +411,23 @@ mod bodies {
         // "use tools" is estimated at three tokens; two are usable.
         let (request, _) = d.start("use tools");
         d.settle();
-        let turn = turn_of(d, request);
-        assert_eq!(shapes(d), [OPEN, "finished(failed, context_overflow)"]);
-        assert_eq!(outcome(d, &turn), Some(TurnOutcome::Failed));
+        assert_eq!(
+            d.rejected(request),
+            Rejection::ContextBudgetExceeded {
+                reason: Some(crate::context::compaction::NotEligible::Empty)
+            }
+        );
+        assert!(shapes(d).is_empty(), "overflowing StartTurn writes nothing");
         let (built, started) = contexts(d);
         assert!(started.is_empty(), "the provider was asked for a stream");
-        assert_eq!(built.len(), 1);
-        assert!(built[0].2);
+        assert!(built.is_empty());
         let report = d.runtime.inspect_context(None, None).unwrap();
         assert!(matches!(
             report.budget,
             Budget::Known {
                 usable_tokens: 2,
-                estimated_tokens: 3,
-                overflow_tokens: 1,
+                estimated_tokens: 0,
+                overflow_tokens: 0,
                 ..
             }
         ));
@@ -446,7 +449,7 @@ mod bodies {
                 INFER,
                 "assistant(completed/toolcalls) inferring>processing",
                 "result(denied) result(denied) processing>continuing continuing>preparing",
-                "finished(failed, context_overflow)",
+                "finished(failed, context_budget_exceeded)",
             ]
         );
         let (built, started) = contexts(d);

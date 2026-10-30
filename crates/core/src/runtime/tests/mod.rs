@@ -1,6 +1,7 @@
 //! Runtime tests against real storage. Every commit the core emits is appended
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
+mod compaction;
 mod model;
 pub(crate) mod pipeline;
 mod random;
@@ -115,6 +116,7 @@ struct Driver {
     planning: Option<(PlanToken, CallRef, String, ValidatedOperation)>,
     executing: Option<(ExecutionToken, AuthorizedOperation, CancelToken)>,
     executor: StubExecutor,
+    compaction: Option<(CompactionToken, crate::context::compaction::CompactionInput)>,
 }
 
 /// The default configuration with a generous limit for both test models, so
@@ -203,6 +205,7 @@ impl Driver {
             planning: None,
             executing: None,
             executor: StubExecutor::default(),
+            compaction: None,
         }
     }
 
@@ -254,6 +257,7 @@ impl Driver {
             planning: None,
             executing: None,
             executor: StubExecutor::default(),
+            compaction: None,
         };
         driver.step(Input::Start);
         driver
@@ -285,6 +289,21 @@ impl Driver {
     fn observe(&mut self, effect: &Effect) {
         match effect {
             Effect::InspectUncertain { .. } => {}
+            Effect::ProposeCompaction { token, input } => {
+                assert!(self.compaction.is_none(), "overlapping compaction");
+                assert_eq!(self.runtime.snapshot().state(), RuntimeState::Idle);
+                assert!(self.runtime.snapshot().active_turn().is_none());
+                self.compaction = Some((*token, input.clone()));
+            }
+            Effect::CancelCompaction { token } => {
+                if self
+                    .compaction
+                    .as_ref()
+                    .is_some_and(|(active, _)| active == token)
+                {
+                    self.compaction = None;
+                }
+            }
             Effect::VerifyArtifacts { token, refs } => {
                 assert!(self.pending.is_none() && self.verification.is_none());
                 self.verification = Some((*token, refs.clone()));
@@ -560,6 +579,7 @@ impl Driver {
             }
         }
         self.verification = None;
+        self.compaction = None;
         self.requests
             .retain(|request| self.replies.contains_key(request));
         drop(self.store.take());
@@ -642,6 +662,7 @@ impl Driver {
         self.timers.clear();
         self.planning = None;
         self.executing = None;
+        self.compaction = None;
     }
 
     /// Reopen the journal and compare it with the core's published snapshot.
@@ -1021,6 +1042,12 @@ fn normalized(finished: &Finished) -> Vec<String> {
                 result: Ok(accepted),
             } => {
                 let accepted = match accepted {
+                    Accepted::CompactionPreviewed { .. } | Accepted::CompactionCancelled => {
+                        format!("{accepted:?}")
+                    }
+                    Accepted::CompactionCommitted { preview_id, ack: a } => {
+                        format!("CompactionCommitted({preview_id}, {})", ack(a))
+                    }
                     Accepted::TurnStarted { turn_id, ack: a } => {
                         format!("TurnStarted({turn_id}, {})", ack(a))
                     }

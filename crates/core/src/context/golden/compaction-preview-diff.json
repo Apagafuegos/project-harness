@@ -1,0 +1,50 @@
+{
+  "newly_covered": [
+    "019a0000-0000-7000-8000-0000000001f5",
+    "019a0000-0000-7000-8000-0000000001f7"
+  ],
+  "superseded": [],
+  "before": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 5,
+    "estimated_user": 22,
+    "estimated_assistant_text": 23,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 0,
+    "estimated_media": 0,
+    "estimated_total": 50,
+    "opaque_provider_state_bytes": 0
+  },
+  "after": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 5,
+    "estimated_user": 14,
+    "estimated_assistant_text": 16,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 41,
+    "estimated_media": 0,
+    "estimated_total": 76,
+    "opaque_provider_state_bytes": 0
+  },
+  "fits_budget": true
+}

@@ -20,7 +20,9 @@ Decisions [0004](decisions/0004-pure-runtime-core.md),
 is described in [context](context.md). Milestone 4 step 01a completes logical
 model requests, owner-scoped native artifact publication/replay, read-only
 request artifact access and core-enforced per-inference deadlines
-([decision 0014](decisions/0014-model-seam.md)).
+([decision 0014](decisions/0014-model-seam.md)). Milestone 4 step 06 adds
+idle-only compaction commands, automatic triggers and full C02 integration
+([decision 0019](decisions/0019-compaction.md#m4-06-amendment)).
 
 ## Shape
 
@@ -64,13 +66,15 @@ active turn, timers, and a requested cancel.
 | `Planned` | `PlanToken`, `Result<Plan, Refusal>` | Driver workspace planning |
 | `ToolFinished` | `ExecutionToken`, `ExecutionOutcome` | Executor, after cleanup |
 | `Hints` | `HintToken`, invocation/hint pairs | Executor-thread advisory inspection |
+| `CompactionProposed` | `CompactionToken`, `Result<Box<CompactionPreview>, CompactionError>` | Driver summary strategy; stale tokens/epochs are dropped |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
 `SelectHead { head }`, `SwitchModel { model, policy }` and
 `ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)), and
 `SubmitApproval { approval_id, plan_digest, decision, remember }`. `RequestId`, `CommitToken`,
-`InferenceId` and `TimerId` are `u64` values local to one runtime and never
-journaled.
+`InferenceId`, `TimerId` and `CompactionToken` are `u64` values local to one runtime and never
+journaled. Compaction commands are `PreviewCompaction`,
+`CommitCompaction { preview_id: EntryId }` and `CancelCompaction`.
 
 Provider events follow Contract 1: `Started`, `TextDelta`,
 `ReasoningSummaryDelta`, `ToolCallStarted`, `ToolArgumentsDelta`,
@@ -85,6 +89,8 @@ fragments itself.
 
 | Effect | Carries | Meaning |
 | --- | --- | --- |
+| `ProposeCompaction` | `CompactionToken`, immutable `CompactionInput` | Driver runs `RollingSummary::propose` using the session provider and independent summary model |
+| `CancelCompaction` | `CompactionToken` | Cancel and drop that generation, independently of normal inference |
 | `VerifyArtifacts` | `CommitToken`, artifact references | Verify before building C1 |
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, artifacts, `at` | Publish artifacts, bind command, append, answer |
 | `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
@@ -107,6 +113,9 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 `ModelSwitched { ack, preview }` or `ApprovalSubmitted { approval_id, ack }` (decision durable).
 `Rejection` is `Busy`, `RecoveryRequired`,
 `ResolutionRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
+Compaction adds `Accepted::{CompactionPreviewed, CompactionCommitted,
+CompactionCancelled}` and `Rejection::{Compaction, StalePreview,
+ContextBudgetExceeded}`; see below.
 The handle can also return `Overloaded` before submission, and the driver
 returns `ShuttingDown` for commands it receives while draining; neither reaches
 the core.
@@ -115,6 +124,69 @@ the core.
 (4 MiB), `max_user_bytes` (1 MiB), `cancel_grace` (2 s),
 `provider_idle_timeout` (300 s), `inference_deadline` (`None`) and `context`, the builder's `ContextConfig`
 (model catalog, budget deductions, compaction trigger, estimator).
+`compaction_deadline` defaults to 300 seconds and bounds summary generation.
+
+### Compaction commands and automatic triggers
+
+`PreviewCompaction` requires idle, healthy storage with no recovery block.
+Eligibility is checked before any provider effect; a `NotEligible` reason
+returns `Rejection::Compaction(CompactionError::NotEligible(reason))` with no
+provider call. Success replies `CompactionPreviewed { preview_id, preview }`.
+The preview contains the exact proposed entry and manifest bytes, before/after
+reports, all bindings and a `CompactionDiff`. Nothing is published or written.
+
+`CommitCompaction { preview_id }` is idle-only. It rechecks head, journal
+sequence, session model, current strategy/configuration fingerprint and source
+fingerprint. It reruns selection and reconstructs the manifest from the current
+snapshot, comparing its bytes, digest, ordered coverage and supersession with
+the proposal. A mismatch returns `StalePreview { field }` (`stale_preview`),
+writing nothing; the failed preview is consumed. A match publishes/syncs the
+manifest through `Persist.artifacts` before appending the exact preview entry.
+`CompactionCommitted { preview_id, ack }` replies only after sync.
+
+Previews use fresh `Env` entry identities, live only in memory and are
+single-use. Any session commit, fault, restart or replacement discards them.
+An old/consumed/restarted ID returns `stale_preview` (`preview_id` when unknown).
+A tombstone may retain an ID and differing field, never the discarded proposal.
+There is no durable command receipt for this ID-only command: after a crash
+before reply, replay rejects the ephemeral ID instead of writing another summary.
+`StartTurn` continues to use ordinary durable command receipts for C1.
+
+`CancelCompaction` cancels a running generation and replies
+`CompactionCancelled`; its pending preview/start request receives `cancelled`
+and no preview is published. A valid `StartTurn` also cancels manual or
+post-turn generation before preparing its own opening. Other session commits
+cancel generation as well. Each generation has a fresh token, runtime epoch,
+independent cancellation token and absolute Tokio deadline. Cancel, shutdown,
+fault and reopen dispose of its future and stream. Only one generation exists.
+
+With `compaction.automatic` enabled, a terminal turn acknowledgement checks the
+head report against the configured threshold (850 permille by default). An
+eligible span generates and commits while idle. Before C1, a private staged
+opening commit is projected through the same builder; it is never written.
+If the new user content would overflow, one eligible compaction runs first,
+while the `StartTurn` reply waits. Its acknowledgement permits a fresh budget
+check and then C1; no turn has started during generation. Retries of that
+pending command attach to it; a different concurrent start is `Busy`. A summary
+acknowledgement or generation failure never retriggers automatic generation.
+
+An ineligible or still-overflowing start returns
+`ContextBudgetExceeded { reason: Option<NotEligible> }`
+(`context_budget_exceeded`), without a user entry or turn. Protected content
+that still overflows after one summary produces the same explicit rejection.
+A later tool-loop projection over budget fails the already-open turn with
+`context_budget_exceeded`: no compaction occurs inside a turn. Post-turn
+summaries that still overflow are reported as failures rather than committed.
+Generation errors/refusals/malformed output/cancellation emit their stable code
+and leave the session usable for a later trigger; there is no retry loop.
+
+`CompactionPreviewed { preview_id, automatic, preview }` is an ephemeral event;
+`CompactionCommitted { preview_id, preview }` follows summary durability.
+Both include the before/after reports and diff. `CompactionFailed { code }`
+reports failed attempts. `Runtime::inspect_context_preview(&preview_id)` and
+`SessionHandle::inspect_context_preview(preview_id).await` return a live preview
+(including the diff), or `StalePreview`; like `inspect_context`, they never call
+a provider. Projection and `prepare` never generate or regenerate summaries.
 
 ### Model switching
 
@@ -180,7 +252,8 @@ These are the commits the tests assert. Entries come first, then events in order
 | C1 open | user message | `turn_started`, `idle>preparing` (carries the command) |
 | C2 infer | — | `preparing>inferring`; `StartInference` follows its ack |
 | Unknown budget, instead of C2 | — | `turn_finished(failed, context_budget_unknown)`; no stream |
-| Overflow, instead of C2 | — | `turn_finished(failed, context_overflow)`; no stream |
+| Mid-turn overflow, instead of C2 | — | `turn_finished(failed, context_budget_exceeded)`; no stream or compaction |
+| Idle compaction, before C1 or after a terminal turn | compaction entry | —; no active turn |
 | C3 stop | assistant `completed/stop` | `inferring>processing`, `turn_finished(completed)` |
 | C3 tool calls | assistant `completed/tool_calls` | `inferring>processing` |
 | C4 answers (no executors) | one runtime result per pending call | `processing>continuing`, `continuing>preparing`, then C2 again |
@@ -190,7 +263,7 @@ Entering `Preparing` (after C1, or after C4's `continuing>preparing`) builds
 the context, unless a cancel is pending or the inference limit is reached. The
 core emits `ContextBuilt` first. If the model has no configured context limit,
 the turn fails from `Preparing` with `context_budget_unknown` (RFC-001 C01);
-if the projection overflows the budget, with `context_overflow`. Either way the
+if a later projection overflows the budget, with `context_budget_exceeded`. Either way the
 provider is never asked for a stream. Otherwise the core keeps the projection,
 commits C2 and sends that projection with `StartInference` after the ack. C2
 adds no entries, so the projection is still the head's; the core checks the
@@ -562,6 +635,9 @@ exactly one per event, and is unrelated to journal sequences. Kinds:
   and `ToolFinished { call, status, code }`. Pending approval state uses the same
   client reducer, so resync cannot lose a ticket. Started and finished tool
   events follow intent/result durability, respectively.
+- `CompactionPreviewed`, `CompactionCommitted` and `CompactionFailed`: preview
+  reports/diffs and durable summary notification, or a stable failure code
+  (see [compaction](#compaction-commands-and-automatic-triggers)).
 - `Diagnostic` and `Fault`.
 
 `Runtime::view()` returns `RuntimeView { epoch, event_seq, snapshot, phase,
@@ -768,8 +844,9 @@ events that follow.
 - CLI chat/tool execution and native providers. The library assembles and runs
   real file/sandbox backends; `harness doctor --workspace ... --data-root ...`
   reports their availability without starting a session.
-- General configuration-update commands, summary generation and compaction.
-  Remember is the implemented configuration-change path.
+- General configuration-update commands. Remember is the implemented
+  configuration-change path; summary generation/commit and automatic compaction
+  are implemented in m4-06.
 - Automatic reconciliation of uncertain side effects. Advisory file-image
   hints are implemented; resolution remains the user's statement.
 - Recovery UI beyond the handle, events and CLI (Milestone 5), and retrying a
@@ -827,6 +904,13 @@ one durable terminal outcome per turn. The 5,000-seed release check prints the
 tool paths reached. Real process death is separately exercised by the SIGKILL
 tool_host integration test and the offline `tool_session` example (an OS
 file-size fault kills its result append). The example prints deterministic
-context membership/provenance after user resolution. See
-[Milestone 3 acceptance](milestone-3-acceptance.md) and
+context membership/provenance after user resolution. C02 is covered by
+`runtime::tests::compaction` and `runtime::driver::tests::compaction_tests`:
+read-only previews, every stale binding, exact source manifests, configured
+retention, ancestor-only rolling replacement, original-byte preservation,
+budget refusal, idle-only commits, cancellation/deadline/epoch boundaries and
+crashes during generation, after publication and after commit/before reply.
+Each randomized seed additionally runs compaction preview/commit/stale/automatic
+interleavings with Lost/Durable/Torn crashes, storage oracle, replay and resync.
+See [Milestone 3 acceptance](milestone-3-acceptance.md) and
 [development](development.md#runtime-tests).

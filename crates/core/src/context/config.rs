@@ -197,7 +197,7 @@ pub struct SessionConfiguration {
 
 /// Independently configured summary generation; never defaults to the session model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(try_from = "ConfiguredCompaction")]
 pub struct CompactionConfig {
     /// Required for generation, but not for pure selection.
     pub summary_model: Option<ModelRef>,
@@ -205,6 +205,8 @@ pub struct CompactionConfig {
     pub max_summary_tokens: u32,
     /// Completed turns left verbatim; at least two, plus any current turn.
     pub retain_recent_turns: usize,
+    /// Automatic idle preparation; absent defaults to whether a summary model is set.
+    pub automatic: bool,
 }
 
 impl Default for CompactionConfig {
@@ -213,14 +215,21 @@ impl Default for CompactionConfig {
             summary_model: None,
             max_summary_tokens: 2048,
             retain_recent_turns: 2,
+            automatic: false,
         }
     }
 }
 
 impl CompactionConfig {
+    /// Whether the configured automatic idle trigger is enabled.
+    pub fn automatic(&self) -> bool {
+        self.automatic
+    }
+
     /// Validate programmatically constructed values as well as decoded values.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
-        if self.retain_recent_turns < 2
+        if (self.automatic() && self.summary_model.is_none())
+            || self.retain_recent_turns < 2
             || self.max_summary_tokens == 0
             || self
                 .summary_model
@@ -230,6 +239,39 @@ impl CompactionConfig {
             return Err(ConfigurationError::InvalidCompaction);
         }
         Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfiguredCompaction {
+    summary_model: Option<ModelRef>,
+    max_summary_tokens: u32,
+    retain_recent_turns: usize,
+    automatic: Option<bool>,
+}
+impl Default for ConfiguredCompaction {
+    fn default() -> Self {
+        let defaults = CompactionConfig::default();
+        Self {
+            summary_model: None,
+            max_summary_tokens: defaults.max_summary_tokens,
+            retain_recent_turns: defaults.retain_recent_turns,
+            automatic: None,
+        }
+    }
+}
+impl TryFrom<ConfiguredCompaction> for CompactionConfig {
+    type Error = ConfigurationError;
+    fn try_from(raw: ConfiguredCompaction) -> Result<Self, Self::Error> {
+        let config = Self {
+            automatic: raw.automatic.unwrap_or(raw.summary_model.is_some()),
+            summary_model: raw.summary_model,
+            max_summary_tokens: raw.max_summary_tokens,
+            retain_recent_turns: raw.retain_recent_turns,
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 

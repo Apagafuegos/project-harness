@@ -13,7 +13,10 @@ use super::{
     *,
 };
 use crate::{
-    context::ContextReport,
+    context::{
+        ContextBuilder, ContextReport,
+        compaction::{CompactionError, CompactionPreview, CompactionStrategy, RollingSummary},
+    },
     model::{
         ArtifactReadError, ArtifactSource, ModelEventStream, ModelProvider, ModelRequest,
         OperationControl,
@@ -64,6 +67,10 @@ impl Default for DriverConfig {
 enum Message {
     Command(Command, oneshot::Sender<CommandResult>),
     View(oneshot::Sender<RuntimeView>),
+    InspectContextPreview(
+        EntryId,
+        oneshot::Sender<Result<CompactionPreview, Rejection>>,
+    ),
     InspectContext(
         Option<EntryId>,
         Option<ModelRef>,
@@ -84,6 +91,13 @@ enum Message {
     Inject(Input, oneshot::Sender<()>),
     #[cfg(test)]
     ToolAnswer(Answer, oneshot::Sender<()>),
+    #[cfg(test)]
+    CompactionAnswer(
+        RuntimeEpoch,
+        CompactionToken,
+        Result<Box<CompactionPreview>, CompactionError>,
+        oneshot::Sender<()>,
+    ),
     #[cfg(test)]
     InstallConfiguration(crate::context::SessionConfiguration, oneshot::Sender<()>),
     #[cfg(test)]
@@ -440,6 +454,20 @@ impl SessionHandle {
         receive.await.unwrap_or(Err(InspectError::Closed))
     }
 
+    /// Inspect a live compaction preview, including its diff; never generate it.
+    /// Consumed, invalidated or restarted identities return `StalePreview`.
+    pub async fn inspect_context_preview(
+        &self,
+        preview_id: EntryId,
+    ) -> Result<CompactionPreview, Rejection> {
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .send(Message::InspectContextPreview(preview_id, reply))
+            .await
+            .map_err(|_| Rejection::Faulted)?;
+        receive.await.unwrap_or(Err(Rejection::Faulted))
+    }
+
     /// Publish an artifact, replying only after file and directory sync.
     pub async fn put_artifact(&self, bytes: Vec<u8>) -> Result<ArtifactRef, PersistError> {
         if bytes.len() > self.max_artifact_bytes {
@@ -582,6 +610,18 @@ impl Drop for Live {
     }
 }
 
+struct CompactionWork {
+    token: CompactionToken,
+    epoch: RuntimeEpoch,
+    cancel: CancellationToken,
+    future: Pin<Box<dyn Future<Output = Result<CompactionPreview, CompactionError>> + Send>>,
+}
+impl Drop for CompactionWork {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 struct Driver<E> {
     root: Arc<DataRoot>,
     session: SessionId,
@@ -597,6 +637,7 @@ struct Driver<E> {
     next_request: u64,
     storage: Option<PendingStorage>,
     inference: Option<Live>,
+    compaction: Option<CompactionWork>,
     timers: BTreeMap<TimerId, JoinHandle<()>>,
     timer_send: mpsc::UnboundedSender<TimerFire>,
     timer_receive: mpsc::UnboundedReceiver<TimerFire>,
@@ -651,6 +692,7 @@ impl<E: Env + Send + 'static> Driver<E> {
             next_request: 0,
             storage: None,
             inference: None,
+            compaction: None,
             timers: BTreeMap::new(),
             timer_send,
             timer_receive,
@@ -678,6 +720,13 @@ impl<E: Env + Send + 'static> Driver<E> {
         self.step(Input::Start);
         loop {
             if self.closing {
+                if self.compaction.is_some() {
+                    self.next_request += 1;
+                    self.step(Input::Command {
+                        request: RequestId(self.next_request),
+                        command: Command::CancelCompaction,
+                    });
+                }
                 if !self.cancel_sent
                     && let Some(turn_id) = self.runtime.view().active_turn
                     && matches!(self.runtime.phase(), Phase::Durable(_))
@@ -743,6 +792,10 @@ impl<E: Env + Send + 'static> Driver<E> {
                         }
                     }
                 }
+                result = async { self.compaction.as_mut().expect("guarded").future.as_mut().await }, if self.compaction.is_some() => {
+                    let work = self.compaction.take().expect("guarded");
+                    self.compaction_answer(work.epoch.clone(), work.token, result);
+                }
                 // Last, so timers and commands (a cancel) are never starved by
                 // a stream that is always ready. Pull-driven: it produces only
                 // when polled here, and each event spends Tokio's coop budget,
@@ -764,6 +817,7 @@ impl<E: Env + Send + 'static> Driver<E> {
             }
         }
         self.inference = None;
+        self.compaction = None;
         self.hint_load = None;
         self.hint_ready = None;
         for (_, timer) in std::mem::take(&mut self.timers) {
@@ -877,6 +931,57 @@ impl<E: Env + Send + 'static> Driver<E> {
                             Err(error) => Input::PersistFailed { token, error },
                         }
                     }));
+                }
+                Effect::ProposeCompaction { token, mut input } => {
+                    if self.compaction.is_some() {
+                        executor_error = Some("compaction_overlap");
+                        continue;
+                    }
+                    if let Ok(built) = ContextBuilder::new(&input.context, &input.configuration)
+                        .with_tools(&input.tools)
+                        .build(&input.snapshot, input.head.as_ref(), None)
+                    {
+                        let root = self.root.clone();
+                        input.artifacts =
+                            ArtifactSource::new(&built.projection.input, move |reference| {
+                                let root = root.clone();
+                                Box::pin(async move {
+                                    tokio::task::spawn_blocking(move || {
+                                        let limit = usize::try_from(reference.bytes)
+                                            .map_err(|_| ArtifactReadError::Unavailable)?;
+                                        root.read_artifact(&reference, limit)
+                                            .map_err(|_| ArtifactReadError::Unavailable)
+                                    })
+                                    .await
+                                    .map_err(|_| ArtifactReadError::Unavailable)?
+                                })
+                            });
+                    }
+                    let cancel = CancellationToken::new();
+                    let control = OperationControl {
+                        cancel: cancel.clone(),
+                        deadline: Some(
+                            tokio::time::Instant::now() + self.config.runtime.compaction_deadline,
+                        ),
+                    };
+                    let provider = self.provider.clone();
+                    self.compaction = Some(CompactionWork {
+                        token,
+                        epoch: self.runtime.epoch().clone(),
+                        cancel,
+                        future: Box::pin(async move {
+                            RollingSummary::new(provider).propose(input, control).await
+                        }),
+                    });
+                }
+                Effect::CancelCompaction { token } => {
+                    if self
+                        .compaction
+                        .as_ref()
+                        .is_some_and(|work| work.token == token)
+                    {
+                        self.compaction = None;
+                    }
                 }
                 // The core built the projection in `Preparing`; the driver
                 // only hands it to the provider with the response identity.
@@ -1088,9 +1193,24 @@ impl<E: Env + Send + 'static> Driver<E> {
         // sender failed to close, before local inference IDs can be reused.
         if self.runtime.phase() == Phase::Faulted {
             self.inference = None;
+            self.compaction = None;
             self.deferred_tool = None;
             self.hint_load = None;
             self.hint_ready = None;
+        }
+    }
+
+    fn compaction_answer(
+        &mut self,
+        epoch: RuntimeEpoch,
+        token: CompactionToken,
+        result: Result<CompactionPreview, CompactionError>,
+    ) {
+        if epoch == *self.runtime.epoch() {
+            self.step(Input::CompactionProposed {
+                token,
+                result: result.map(Box::new),
+            });
         }
     }
 
@@ -1215,6 +1335,7 @@ impl<E: Env + Send + 'static> Driver<E> {
     /// Stop the faulted runtime's worker and attach a new runtime over the
     /// journal `opening` yields, with a new epoch, then let it recover.
     async fn replace(&mut self, opening: Opening) -> Result<RuntimeView, PersistError> {
+        self.compaction = None;
         // Drop advisory worker senders before draining the storage worker.
         self.hint_load = None;
         self.hint_ready = None;
@@ -1280,6 +1401,9 @@ impl<E: Env + Send + 'static> Driver<E> {
                 let request = RequestId(self.next_request);
                 self.replies.insert(request, reply);
                 self.step(Input::Command { request, command });
+            }
+            Message::InspectContextPreview(id, reply) => {
+                let _ = reply.send(self.runtime.inspect_context_preview(&id));
             }
             Message::View(reply) => {
                 let _ = reply.send(self.runtime.view());
@@ -1361,6 +1485,11 @@ impl<E: Env + Send + 'static> Driver<E> {
             #[cfg(test)]
             Message::Inject(input, reply) => {
                 self.step(input);
+                let _ = reply.send(());
+            }
+            #[cfg(test)]
+            Message::CompactionAnswer(epoch, token, result, reply) => {
+                self.compaction_answer(epoch, token, result.map(|preview| *preview));
                 let _ = reply.send(());
             }
             #[cfg(test)]

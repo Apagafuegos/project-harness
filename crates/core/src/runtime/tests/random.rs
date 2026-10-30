@@ -1028,6 +1028,7 @@ fn run_seed(seed: u64) -> Finished {
     check_resync(&finished);
     check_replay(&finished);
     check_contexts(&finished, &mut context);
+    compaction::randomized(seed);
     finished
 }
 
