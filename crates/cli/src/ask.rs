@@ -422,8 +422,15 @@ async fn drive(
     }
     // A continuation that names another provider or model switches explicitly,
     // while idle and before the turn opens. The report is printed either way; a
-    // refusal exits 2 having written nothing.
-    if let Some(switch) = continuation_switch(o) {
+    // refusal exits 2 having written nothing. Naming the branch's current model
+    // is not a switch, so no `model_changed` entry is appended for it.
+    let current = client
+        .view()
+        .snapshot
+        .model_at(client.view().snapshot.head())
+        .map_err(|_| configuration("unknown_head"))?
+        .clone();
+    if let Some(switch) = continuation_switch(o).filter(|(model, _)| model != &current) {
         match handle
             .command(Command::SwitchModel {
                 model: switch.0,

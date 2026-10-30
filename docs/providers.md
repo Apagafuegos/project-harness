@@ -96,9 +96,10 @@ to its owner).
   `ModelCatalog`, because a session that may switch needs limits for every
   instance it can reach. Core's `ModelCatalog` is not iterable, so the adapters
   add their own rows instead of the router merging catalogs.
-- The public 17-case conformance suite runs through the router
-  (`conformance_cases_pass_through_the_router`), so dispatch is proven not to
-  change any observed behavior, and the end-to-end switching tests
+- The Echo adapter's public conformance cases run through the router
+  (`conformance_cases_pass_through_the_router`, the same eleven cases as without
+  it), so dispatch is proven not to change any observed behavior, and the
+  end-to-end switching tests
   (`crates/providers/tests/switch.rs`) run a real session with both adapters
   against loopback fixtures.
 

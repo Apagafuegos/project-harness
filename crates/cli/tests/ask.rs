@@ -661,6 +661,24 @@ async fn continuation_without_an_override_keeps_the_saved_model() {
             model: "scripted".into()
         }
     );
+    // Naming the branch's own model explicitly is not a switch either.
+    let before = f.snapshot(&err);
+    f.options.model = ModelRef {
+        provider_instance: "test-codex".into(),
+        model: "scripted".into(),
+    };
+    f.options.explicit_model = true;
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("third")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("switch:"), "{err}");
+    assert!(
+        !f.snapshot(&err)
+            .entries()
+            .any(|(_, stored)| matches!(stored.entry.payload, EntryPayload::ModelChanged(_)))
+    );
+    assert!(f.snapshot(&err).sequence() > before.sequence());
 }
 
 /// A required incompatibility cannot be omitted under either policy. The
