@@ -2,7 +2,9 @@
 
 The scaffold, specification artifacts, headless storage (Milestone 1) and the
 headless mock lifecycle with context inspection (Milestone 2), and tools,
-selective security and recovery (Milestone 3) are complete.
+selective security and recovery (Milestone 3), and native providers, rolling
+compaction and headless ask (Milestone 4) are complete within their recorded
+scope; Anthropic live evidence still needs an API key.
 Later stages have acceptance criteria; they are not implemented features.
 
 ## 0. Foundation and proposed specification — present
@@ -60,13 +62,13 @@ fingerprint and size. Every started turn now ends with exactly one
 
 The milestone goal runs in one place as `cargo run --example scripted_session`.
 [Milestone 2 acceptance](milestone-2-acceptance.md) maps every criterion and
-M01–M04, C01, R02 and E01 to tests. It has no gap rows. Two cases remain
-partial; the original third remainder (R02) is now closed:
+M01–M04, C01, R02 and E01 to tests. It has no gap rows. Its original remainders
+are now closed by later milestones:
 
-- **M03:** per-operation deadlines, queue bounds inside a native adapter and a
-  second native adapter (Milestone 4).
-- **M04:** the explicit `omit` switch policy and native replay state
-  (Milestone 4).
+- **M03:** per-operation deadlines, bounded native queues and both native
+  adapters are covered by [Milestone 4 acceptance](milestone-4-acceptance.md).
+- **M04:** reject/explicit omit switching and owner-scoped native replay through
+  reopen are covered by Milestone 4.
 - **R02:** the original approval/execution cancellation remainder is now closed
   by [Milestone 3 acceptance](milestone-3-acceptance.md).
 
@@ -108,19 +110,39 @@ There are no gap rows; recorded partial capabilities/limits are:
   journal's immediate release/reopen (ADR 0012 amendment); no bypass or effect retry.
 
 Additional filesystem/sandbox threat-model limits are recorded in the acceptance
-notes and owning ADRs. Native providers and CLI chat remain later work.
+notes and owning ADRs. Native providers and headless ask are implemented in M4;
+the Ratatui client remains M5.
 
-## 4. Native providers and rolling compaction
+## 4. Native providers and rolling compaction — complete
 
-Integrate OpenAI Responses first against current official documentation, with
-native-event fixtures and opt-in live checks. Then add native Anthropic Messages
-without provider-specific branches in orchestration. Prove portable diagnostics,
-opaque-state retention, and safe switching within existing sessions.
+Implemented OpenAI Responses first against the official reference and Codex
+source, with native fixtures, a sanitized recording and separate opt-in live
+checks. Native Anthropic Messages uses the same seam with no provider-specific
+orchestration branch or core change. Both adapters prove portable diagnostics,
+owner-scoped opaque-state retention and safe reject/explicit-omit switching
+inside durable sessions through the Router.
 
-Implement automatic/manual rolling summaries behind the strategy interface,
-previews, source manifests, retained recent turns, and inspection diffs. Prove
-C02 and budget failures without rewriting history. Ordinary CI stays offline;
-live inference/summarization checks are separate and explicit.
+Automatic and manual rolling summaries use `CompactionStrategy`, an independent
+summary model, read-only previews, exact source manifests, retained recent turns
+and inspection diffs. C02, stale binding checks and explicit budget failures
+preserve original history. Headless `harness ask` streams one turn and handles
+terminal approvals. Ordinary validation is offline after dependency/toolchain
+provisioning; live checks are separate, explicit and never part of CI.
+
+[Milestone 4 acceptance](milestone-4-acceptance.md) maps every criterion and
+M01–M04/C01–C02 to gate tests and records live evidence. The deterministic offline
+`cargo run --example provider_session` tour uses both real adapters and is diffed
+twice in the gate. Known partials/limits:
+
+- Anthropic live checks and cross-provider live switching need
+  `ANTHROPIC_API_KEY`; fixture coverage is complete, not live compatibility proof.
+- `ConvertSupported` is refused; continuation conversion needs a later decision
+  (ADR 0015). Neither M4 adapter emits a response-level continuation (ADR 0014).
+- Pins do not exist yet (C02, ADR 0019; M6).
+- Estimates are heuristic; provider-specific feature limits and the Codex
+  backend-selected output budget are recorded in ADRs 0017/0018.
+- Preserved-thinking transformations are requested but not parsed/reported
+  (ADR 0018 amendment); a replay can be dropped by the API after prefix edits.
 
 ## 5. Ratatui client
 

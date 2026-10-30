@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 ln -s /usr/bin/dirname "$scratch/dirname"
+ln -s /usr/bin/grep "$scratch/grep"
 cat >"$scratch/cargo" <<'CARGO'
 #!/bin/sh
 if command -v bwrap >/dev/null 2>&1; then

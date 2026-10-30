@@ -2,9 +2,10 @@
 
 Status: Six high-level contracts provisionally agreed. Session storage is
 implemented under [decision 0003](decisions/0003-jsonl-storage.md). The pure
-runtime core is implemented under [decision 0004](decisions/0004-pure-runtime-core.md);
-its async driver and recovery are not. Other details remain proposed in
-[RFC-001](rfcs/001-core-types-state-persistence.md).
+runtime core, async driver and recovery are implemented under decisions
+0004–0007. Milestones 3–4 add real tools/sandboxing, native providers, rolling
+compaction and headless ask (ADRs 0009–0020). Remaining proposals in
+[RFC-001](rfcs/001-core-types-state-persistence.md) are not implementation claims.
 
 ## Engine and client
 
@@ -64,7 +65,7 @@ Git worktrees/checkpoints are outside v0.1.
 
 ## Persistence and execution ordering
 
-RFC-001 proposes a checksummed JSONL commit that publishes entries and their
+The implemented RFC-001 persistence contract uses a checksummed JSONL commit that publishes entries and their
 active-head update together. Audit-only records retain the head. Branch
 navigation is itself a durable commit, without deleting sibling entries.
 
@@ -83,13 +84,14 @@ their safety depends on correct implementation because they are not OS-sandboxed
 
 Bubblewrap is the selected enforcement backend, with explicit mounts, namespaces,
 network denial, environment filtering, and process supervision. Before its tests
-pass, the project must not claim to provide safe process execution. The RFC
-proposes deny-network only initially; restricted network exceptions need a
+pass, the project must not claim to provide safe process execution. Required
+S02 gate tests now exercise these boundaries. Execution is deny-network only;
+restricted network exceptions need a
 separately enforced backend and cannot silently become host networking.
 
 ## Implementation status
 
-The two-crate workspace includes a blocking headless session store and J01–J03
+The three-crate workspace includes a blocking headless session store and J01–J03
 behavioral tests: exact-byte checksums, atomic commits/head selection, semantic
 replay, locking, artifact integrity, writer poisoning and explicit tail repair.
 The schema and all three example journals are exercised by tests. See
@@ -103,6 +105,10 @@ broadcast/handle; a dedicated thread owns the blocking store. `harness_core::mod
 defines the provider stream seam and a scripted mock. `harness_core::context`
 is the pure context builder: the core calls it in `Preparing`, and its report
 is available through `SessionHandle::inspect_context` and the read-only
-`harness context` command. See [context](context.md). Native providers, tools,
-summary generation and the TUI remain unimplemented. See the
+`harness context` command. See [context](context.md). `harness-providers` owns
+both native adapters, shared HTTP/SSE/credentials and the instance Router, never
+core orchestration. The runtime runs real authorized tools and independently
+configured summary generation through the same provider seam. The headless
+`harness ask` client uses typed commands/events and terminal approvals; Ratatui
+remains M5. See [M4 acceptance](milestone-4-acceptance.md) and the
 [roadmap](roadmap.md).

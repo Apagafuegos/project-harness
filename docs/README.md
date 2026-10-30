@@ -35,6 +35,21 @@ describing a future component is not evidence that it is implemented.
   mandatory S02 gate, session-owned host assembly and lock/spawn limitation.
 - [Tool recovery decision](decisions/0013-tool-recovery.md): D9 read-only closure,
   advisory file-image hints and explicit user resolution.
+- [Native model seam](decisions/0014-model-seam.md): complete requests, native
+  replay, deadlines, conformance and redaction amendments.
+- [Switching and metadata](decisions/0015-switching-model-metadata.md): reject,
+  explicit omission and cross-provider routing amendment.
+- [Provider transport](decisions/0016-provider-transport.md): HTTP/SSE bounds,
+  cleanup, credentials and headerless-SSE amendment.
+- [OpenAI Responses](decisions/0017-openai-adapter.md): native mappings, stateless
+  profiles, official sources, catalog and sanitized live recording.
+- [Anthropic Messages](decisions/0018-anthropic-adapter.md): native mappings,
+  signed state and preserved-thinking amendment.
+- [Rolling compaction](decisions/0019-compaction.md): selection, generation,
+  previews and runtime/automatic-trigger amendment.
+- [Headless ask](decisions/0020-headless-ask.md): durable CLI, approvals and
+  cross-provider switching amendment.
+- [Providers](providers.md): implemented adapters, router, credentials and opt-in checks.
 - [Built-in tools usage](tools.md): implemented file/shell backends and host assembly.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
   cancellation, worker/driver, provider stream, media, resync, recovery and
@@ -58,6 +73,8 @@ describing a future component is not evidence that it is implemented.
   case mapped to tests, with partial rows stated.
 - [Milestone 3 acceptance](milestone-3-acceptance.md): tools, security, recovery,
   full R02, output artifacts, randomized coverage and mutation checks.
+- [Milestone 4 acceptance](milestone-4-acceptance.md): both native adapters,
+  compaction, headless ask, offline validation and sanitized live evidence.
 
 ## Document status
 
@@ -75,9 +92,10 @@ decision 0005; the context builder and report under decision 0006; startup
 recovery and tail repair under decision 0007; the pure tool layer and policy
 under decision 0009; approval/execution integration under decision 0010;
 trusted files under decision 0011; sandbox and host assembly under decision 0012;
-and tool recovery under decision 0013. Native adapters and compaction generation
-remain proposed. Schema/examples alone are
-not evidence of implementation.
+and tool recovery under decision 0013. M4 implements native model replay and
+switching (0014/0015), transport/credentials (0016), both native adapters
+(0017/0018), compaction generation/runtime (0019) and headless ask (0020).
+Schema/examples alone are not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is
 validated only when its behavioral requirements have executable tests; live

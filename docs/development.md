@@ -14,6 +14,9 @@ Inside the checkout, `rustup toolchain install` installs the toolchain from
 `rust-toolchain.toml`, which also selects it for Cargo. If rustup was just
 installed, open a new shell or source `"$HOME/.cargo/env"` so Cargo is on `PATH`.
 
+`rustfmt.toml` pins `style_edition = "2024"` for both `cargo fmt` and bare
+`rustfmt` (including editor/background formatters), keeping import ordering consistent.
+
 There is no separate bootstrap script, container requirement, or mandatory editor.
 An editor with rust-analyzer is optional; let its extension manage its language
 server or install it separately through rustup.
@@ -33,7 +36,9 @@ The check script verifies formatting, Clippy with warnings denied, workspace
 tests and doctests, a development build, documentation with warnings denied,
 CLI help/version smoke checks, a `harness context` smoke test that must
 print the compaction fixture's golden report, and two runs of the
-`scripted_session` example whose output must match. It can also be invoked
+`scripted_session`, `tool_session` and `provider_session` examples whose output
+must match. Provider examples use attributed loopback fixtures, not credentials.
+It can also be invoked
 from another working directory. CI runs the same script with the repository
 toolchain.
 
@@ -41,8 +46,9 @@ The checks exercise J01–J03 storage behavior, the runtime core against real
 storage including crashes and recovery, the context builder and its golden
 reports, and the Rust API usage
 examples, including the specification journals and injected durability
-failures. They do not prove provider compatibility, workspace tools or sandbox
-enforcement.
+failures. Native fixture conformance, real workspace tools and the mandatory
+S02 targets also run. Live provider compatibility is separate opt-in evidence;
+see [Milestone 4 acceptance](milestone-4-acceptance.md).
 
 For narrower checks while working:
 
@@ -194,7 +200,10 @@ is reported once; file tools remain usable, with no unrestricted fallback.
 
 A new session ID is printed on stderr. Continue with `--session ID` and the same
 workspace, data root, auth profile and summary policy. The saved model is used
-unless an explicit `--model` matches it; this command does not switch models.
+unless `--provider` or `--model` explicitly requests a switch. Switches default
+to reject; `--switch-policy omit-optional` permits reported native-state loss,
+never required media/tool incompatibilities. `--provider anthropic` uses
+`ANTHROPIC_API_KEY`, not consumer subscription credentials.
 Imported policies with remembered grants or different approval defaults are refused.
 Uncertain side effects require explicit resolution through the runtime API; this
 minimal client never guesses, replays tools or automatically repairs a torn tail.
@@ -282,9 +291,9 @@ measurement, not a production promise.
 
 ## Host capabilities
 
-`harness doctor` probes the host for what the Milestone 3 tools will need and
-prints JSON. It is a diagnostic only: no tool uses it yet, and it never
-changes host configuration.
+`harness doctor` probes the host for the implemented file and sandbox tools and
+prints JSON. It never changes host configuration. Tool-host assembly uses the
+same capability checks and fails closed when enforcement is unavailable.
 
 - **openat2:** resolution beneath a directory with `RESOLVE_BENEATH`,
   `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_XDEV`; an
@@ -305,10 +314,10 @@ changes host configuration.
   Otherwise `bus_source` is `none`, with the reason, and the limit is
   reported as a gap.
 
-CI runs it in a separate, non-failing job, before and after loading the
+CI runs it in the required Host sandbox security (S02) job, before and after loading the
 committed AppArmor profile, and uploads the reports as the `harness-doctor`
 artifact. [Decision 0008](decisions/0008-host-sandbox.md) records where the
-shell security suite will run.
+shell security suite runs.
 
 ### When the shell sandbox is unavailable
 
@@ -388,14 +397,16 @@ First-party unsafe code is forbidden; this does not audit dependencies or create
 an execution sandbox.
 
 Clap supplies CLI help, version, and argument validation. The CLI depends on
-`harness-core` and Serde JSON for `harness context`; its tests use Tempfile. Storage uses Serde and
+`harness-core`, `harness-providers`, Serde JSON and Tokio (including signal
+handling); its tests use Tempfile. Storage uses Serde and
 Serde JSON, the bundled JSON Schema validator with remote resolution disabled,
 SHA-256, UUIDv7, UTC timestamps, Rustix filesystem/locking primitives, typed
 errors and imbl persistent collections for sharing session snapshots. Tempfile
 is test-only. Tokio is enabled with `default-features = false` and only `rt`,
-`sync`, `time`, `macros`; tests additionally enable `test-util`. No Tokio
-multithread runtime, I/O features or tokio-util are enabled. Ratatui and HTTP
-clients will be added when their implementations need them.
+`sync`, `time`, `macros` in core; tests additionally enable `test-util`.
+Providers use reqwest with rustls, no default features, for HTTP/SSE; their
+fixture servers enable Tokio networking/I/O. See ADR 0016 for that boundary.
+No multithread runtime is required. Ratatui remains M5.
 
 Commit `Cargo.lock`. Use `--locked` in routine builds and CI. To intentionally
 change dependencies, edit the manifest or run a targeted `cargo update -p NAME`,
@@ -403,21 +414,36 @@ review the manifest and lockfile changes, and run the checks. When changing Rust
 update `rust-toolchain.toml` and the workspace `rust-version` together, and update
 the version mentioned in these docs. CI reads the toolchain file directly.
 
-Network access is needed to install Rust and fetch uncached dependencies. Once
-fetched, checks must not contact model providers or other services. To verify
-this locally, set `CARGO_NET_OFFLINE=true` when running the check script.
+Network access is needed only for provisioning Rust, OS packages and locked
+dependencies (`cargo fetch --locked`). `check.sh` exports `CARGO_NET_OFFLINE=true`
+and checks that no live entry point joined validation. CI explicitly fetches
+before validation and then runs tests in a loopback-only network namespace.
+Reproduce that enforcement (after provisioning) with a timeout of at least 60 minutes:
+
+```sh
+./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh \
+  env CARGO_NET_OFFLINE=true ./scripts/check.sh
+```
+
+`with-offline-network.sh` requires noninteractive sudo, `unshare`, `ip` and
+`setpriv`, and has no fallback. It creates only a network namespace, brings up
+loopback, then drops to the caller's UID/groups before running validation.
+It preserves the host user namespace so UID-map security tests remain meaningful.
+Loopback fixture sockets are intentional; “offline” means no external network,
+not no sockets. CI checkout/toolchain/apt/dependency provisioning does use the
+network; it is not part of the offline validation claim.
 
 ## Secrets and runtime data
 
-The current library/CLI do not read credentials or `.env` files. No API keys are required.
-When providers are implemented, document their configuration and opt-in live
-checks. Keep credentials out of Git, fixtures, logs, session entries, context
-snapshots, and tool subprocess environments. Environment inheritance must be
-explicit when process execution is introduced.
+Ordinary tests/examples require no credentials and never read the real Codex
+login. The live CLI reads the explicitly selected API-key environment variable
+or the read-only Codex login; it does not load `.env` files. See
+[providers](providers.md) for configuration and separate opt-in live checks.
+Keep credentials out of Git, fixtures, logs, session entries, context snapshots,
+and tool subprocess environments. Tool environment inheritance is allowlisted.
 
-The storage library can create a private state root, checksummed journals and
-content-addressed artifacts when explicitly called. The CLI creates no runtime
-storage; `harness context` only reads an existing one. See [session storage](session-storage.md) for API usage and limits.
+The library and `harness ask` create private state roots, checksummed journals
+and content-addressed artifacts. `harness context` only reads an existing one. See [session storage](session-storage.md) for API usage and limits.
 Retention/deletion UI remains future work.
 
 ## Specification artifacts
@@ -425,12 +451,12 @@ Retention/deletion UI remains future work.
 [RFC-001](rfcs/001-core-types-state-persistence.md) has a bundled JSON Schema,
 checksummed example journals, and conformance cases. Storage tests validate all
 three examples and their artifacts and cover J01–J03. Context tests build
-golden reports from all three and cover C01. Security, model and other context
-gates remain future work.
+golden reports from all three and cover C01. Native model conformance and C02
+run in the gate; [M4 acceptance](milestone-4-acceptance.md) maps each case.
 
-Bubblewrap and Linux namespace support will be prerequisites for external tool
-execution, not for the current storage/CLI checks. Do not install or
-claim a working sandbox merely because it is the chosen backend.
+Bubblewrap and Linux namespace support are required for external execution and
+the full security gate. A missing backend fails closed; the explicit local
+`HARNESS_ALLOW_NO_SANDBOX=1` opt-out is not acceptance evidence.
 
 ## References
 

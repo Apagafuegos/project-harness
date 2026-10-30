@@ -4,6 +4,10 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+# Provision the pinned toolchain and locked dependencies before validation.
+export CARGO_NET_OFFLINE=true
+./scripts/test-offline-gate.sh
+
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
@@ -22,6 +26,7 @@ fi
 cargo build --workspace --locked
 # Compile outside the smoke bounds: cold builds can be slow under load.
 cargo build --locked -q -p harness-core --examples
+cargo build --locked -q -p harness-providers --example provider_session
 cargo test --locked -q -p harness-core --example scripted_session --no-run
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 # Run binaries directly so timeout signals the smoke process, not cargo.
@@ -63,3 +68,12 @@ diff -u "$smoke/tool-example-1.txt" "$smoke/tool-example-2.txt"
 grep -q 'advisory hint matches_post_image' "$smoke/tool-example-1.txt"
 grep -q 'ToolResult Some(UserObserved)' "$smoke/tool-example-1.txt"
 echo "tool_session example: deterministic, uncertain write resolved by the user"
+
+# M4: real native adapters behind the router, entirely on attributed loopback.
+timeout 300 "$bin/examples/provider_session" >"$smoke/provider-example-1.txt"
+timeout 300 "$bin/examples/provider_session" >"$smoke/provider-example-2.txt"
+diff -u "$smoke/provider-example-1.txt" "$smoke/provider-example-2.txt"
+grep -q 'switch Reject: refused' "$smoke/provider-example-1.txt"
+grep -q 'switch OmitOptional: accepted' "$smoke/provider-example-1.txt"
+grep -q 'Anthropic turn: completed' "$smoke/provider-example-1.txt"
+echo "provider_session example: deterministic, native adapters and compaction"

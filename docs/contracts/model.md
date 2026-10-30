@@ -10,7 +10,9 @@ artifact access and core-enforced inference deadlines
 ([decision 0014](../decisions/0014-model-seam.md)).
 Milestone 4 step 01b adds catalog capabilities, enforced model-switch policies
 ([decision 0015](../decisions/0015-switching-model-metadata.md)) and a public
-fixture conformance suite. No native provider adapter exists yet.
+fixture conformance suite. OpenAI Responses and Anthropic Messages now run
+that suite through real native adapters ([providers](../providers.md),
+[Milestone 4 acceptance](../milestone-4-acceptance.md)).
 
 ## Purpose and ownership
 
@@ -160,9 +162,9 @@ The mock adapter must support deterministic scripts covering:
 - Native replay state preservation and rejection of incompatible state.
 
 A common conformance suite should run against mock/native-event fixtures for
-each adapter. The first live adapter is planned for OpenAI Responses, followed
-by native Anthropic Messages. Verify their current official API specifications
-when implementing; this draft does not prescribe their wire formats.
+each adapter. OpenAI Responses and native Anthropic Messages are implemented;
+their ADRs cite the official API specifications and own their wire mappings.
+This high-level contract does not prescribe provider wire formats.
 
 Live streaming text, complete tool-call reconstruction, usage, errors, and
 cancellation must be checked explicitly. A second provider must work without
@@ -214,8 +216,8 @@ retention when the core itself fails an already partially received response.
 `ScriptedProvider` runs the complete suite. Deliberately broken scripts test
 every validator, including cross-kind index reuse and continuation on failure.
 `./scripts/check.sh` also builds/tests the public feature and its external
-consumer; no credentials or network are required. Native queue bounds and
-explicit opt-in live checks remain separate adapter gates.
+consumer; no credentials or network are required. Native queue bounds are tested by the shared transport tests, and explicit
+opt-in live checks remain separate from ordinary validation.
 
 ## Concrete specification
 

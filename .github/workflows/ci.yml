@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+# Provisioning below is the only network phase; validation is offline.
+env:
+  CARGO_NET_OFFLINE: "true"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,9 +28,11 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
           sudo apparmor_parser -r ci/apparmor/harness-ci-bwrap
           bwrap --version
+      - name: Fetch locked dependencies (bootstrap only)
+        run: CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Validate (including required S02 security suite)
         # Do not carry the runner's non-CLOEXEC pipe into the test harness.
-        run: ./scripts/with-clean-fds.sh ./scripts/check.sh
+        run: ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh ./scripts/check.sh
 
   host-capabilities:
     # Required real-Linux S02 gate, with before/after doctor evidence.
@@ -40,6 +46,8 @@ jobs:
         run: rustup toolchain install
       - name: Install Bubblewrap
         run: sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+      - name: Fetch locked dependencies (bootstrap only)
+        run: CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Build
         run: cargo build --locked -p harness
       - name: Doctor as the runner comes
@@ -55,9 +63,9 @@ jobs:
       - name: Required S02 security suite
         run: |
           bwrap --version
-          ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
-          ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
-          ./scripts/with-clean-fds.sh cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
+          ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
+          ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
+          ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
       - name: Summary
         if: always()
         run: |

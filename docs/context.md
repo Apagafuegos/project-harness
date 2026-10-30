@@ -8,8 +8,8 @@ Milestone 4 step 01a adds tool definitions, inference options and validated
 native continuation selection ([decision 0014](decisions/0014-model-seam.md)).
 Milestone 4 steps 05–06 add rolling summaries, manual preview/commit/cancel,
 inspection diffs and idle-only automatic triggering
-([decision 0019](decisions/0019-compaction.md)). Native wire formats remain
-planned; see [Not implemented](#not-implemented).
+([decision 0019](decisions/0019-compaction.md)). Both native wire adapters are
+implemented in `harness-providers`; see [providers](providers.md).
 
 ## Three layers
 
@@ -99,8 +99,8 @@ Notes:
   [recovery](runtime.md#recovery)) is shown to the model in later turns, so the
   model must be able to tell it from real tool output. The same value is in
   `result.metadata.provenance`; the top-level field makes it explicit, and a
-  check rejects a mismatch. How each provider labels it is left to the
-  Milestone 4 adapters.
+  check rejects a mismatch. Both native adapters label status and provenance in deterministic tool-result
+  text; Anthropic also sets `is_error`.
 - **Result codes.** A `tool_result` item leaves out the stored v2
   `metadata.code`, in the item and in the hashed bytes. The model reads the
   code through the text, which leads with it. A result written as v1 or as v2
@@ -380,7 +380,7 @@ for pre-C1 budget checking, pending-start deduplication, events and failure code
 
 ## Not implemented
 
-- Native wire formats (Milestone 4) and real tokenizers.
+- Real tokenizers (estimates remain explicitly heuristic).
 - Pinning and alternative strategies (Milestone 6).
 
 ## Tests

@@ -342,9 +342,9 @@ Reads ignore remember. Broken policy fails the turn `policy_invalid`, cancels
 unstarted proposals without a model-facing policy error, and leaves the runtime
 usable. Policy and instructions decode the same configuration bytes.
 
-Every `StartInference.tools` carries enabled, available definitions in registry
-order. These definitions are **outside** `ModelInput` and its fingerprint;
-projection behavior, versions and goldens do not change. The async driver uses
+Every `StartInference.input.tools` carries enabled, available definitions in
+registry order. Tools and inference options are inside `ModelInput` and its
+version-4 fingerprint (ADR 0014). The async driver uses
 `Runtime::with_tools` with the configured host's available backends, including
 after reopen or in-place repair. The default host preserves no-tools behavior.
 
@@ -393,10 +393,10 @@ flight). Otherwise they get `Busy`, `RecoveryRequired`, `ResolutionRequired` or
 commit, a `navigate` or a `model_changed` entry, and the reply follows its ack.
 Invalid requests (`head_unchanged`, `unknown_head`,
 `head_inside_tool_exchange`, `empty_model`) are rejected before persisting.
-`model_changed` records the `reject` portability policy. Before switching, a
-client can preview the switch with `inspect_context(None, Some(model))`: the
-report lists provider state that would stop being portable and the budget
-under the new model's limits. The command itself does not run the preview.
+`model_changed` records the explicitly selected portability policy. Both the
+command and `inspect_context(None, Some(model))` build a pure portability preview;
+the command rejects unsupported loss before any write. Reports include native
+state loss and required media/tool incompatibilities, plus the target budget.
 
 ## Cancellation
 
@@ -439,9 +439,10 @@ Cancellation never claims rollback.
 `harness_core::model` is the seam. `ModelProvider::stream(&self, ModelRequest,
 OperationControl) -> ModelEventStream` returns an owned, pull-driven
 `futures_core::Stream` of `ProviderEvent`s that starts work when polled. Setup
-failures are terminal events. `OperationControl` carries a `CancellationToken`;
-deadlines are deferred. `ModelInput` is the projection: the model and its
-ordered `ContextItem`s (instructions, user, assistant, tool result, summary).
+failures are terminal events. `OperationControl` carries a `CancellationToken`
+and optional absolute deadline. `ModelInput` is the projection: model, ordered
+`ContextItem`s (instructions, user, assistant, tool result, summary), tools,
+options and an optional validated continuation.
 
 `model::scripted::ScriptedProvider` replays one `Script` per stream. Its steps
 are `Event`, `Wait` (until a test signals), `AwaitCancel` and `Stall` (until
@@ -843,9 +844,10 @@ events that follow.
 
 ## Not implemented yet
 
-- CLI chat/tool execution and native providers. The library assembles and runs
-  real file/sandbox backends; `harness doctor --workspace ... --data-root ...`
-  reports their availability without starting a session.
+- Ratatui UI (M5). The headless `harness ask` already streams native provider
+  turns and terminal approvals over real file/sandbox backends.
+  `harness doctor --workspace ... --data-root ...` reports backend availability
+  without starting a session.
 - General configuration-update commands. Remember is the implemented
   configuration-change path; summary generation/commit and automatic compaction
   are implemented in m4-06.
@@ -917,5 +919,6 @@ budget refusal, idle-only commits, cancellation/deadline/epoch boundaries and
 crashes during generation, after publication and after commit/before reply.
 Each randomized seed additionally runs compaction preview/commit/stale/automatic
 interleavings with Lost/Durable/Torn crashes, storage oracle, replay and resync.
-See [Milestone 3 acceptance](milestone-3-acceptance.md) and
+See [Milestone 3 acceptance](milestone-3-acceptance.md),
+[Milestone 4 acceptance](milestone-4-acceptance.md) and
 [development](development.md#runtime-tests).

@@ -169,8 +169,8 @@ differences with their Codex sources, the catalog sources and the live check.
 streaming API at `https://api.anthropic.com/v1/messages`. Construct with
 `from_env()` (`ANTHROPIC_API_KEY`, sent as `x-api-key`), or
 `with_transport`/`with_endpoint` for a proxy or loopback fixtures. Every request
-carries `anthropic-version: 2026-10-21`; no beta header is needed for anything
-this mapping uses.
+carries `anthropic-version: 2026-10-21`; replayed thinking additionally uses
+the preserved-thinking beta described below.
 
 - The API is stateless, so no `NativeContinuation` is ever emitted. Signed
   `thinking` blocks (with `thinking` and `signature`) and opaque
@@ -225,7 +225,10 @@ loopback servers. It includes the crate-private Echo SSE adapter with eleven
 public core conformance cases, the OpenAI adapter's complete 17-case conformance
 manifest on both profiles, and the Anthropic adapter's complete 17-case manifest
 over hand-written fixtures. No real `~/.codex/auth.json` is opened, no Anthropic
-credential is read, and no test reaches the network.
+credential is read, and no test reaches the external network.
+The [M4 acceptance](milestone-4-acceptance.md) adds terminal-success dispatch,
+cumulative-usage replacement and multimodal/native replay through reopen for
+both real adapters, plus the deterministic `provider_session` tour.
 The workspace gate is `CARGO_NET_OFFLINE=true ./scripts/check.sh`, after a
 one-time `cargo fetch`, using the pinned Rust 1.99.1 toolchain.
 

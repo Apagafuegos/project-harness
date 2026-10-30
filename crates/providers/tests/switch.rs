@@ -14,9 +14,10 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use harness_core::{
     context::{ModelCapabilities, ModelCatalog, ModelInfo, ModelLimits, Part, RequiredCapability},
-    model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl},
+    model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl, ProviderEvent},
     runtime::*,
     session::*,
     tools::SandboxConfig,
@@ -343,6 +344,14 @@ async fn read_request(socket: &mut TcpStream, path: &str) -> Option<Received> {
 struct Recording {
     inner: Arc<dyn ModelProvider>,
     requests: Arc<Mutex<Vec<ModelRequest>>>,
+    terminal_gate: Arc<TerminalGate>,
+}
+
+#[derive(Default)]
+struct TerminalGate {
+    armed: std::sync::atomic::AtomicBool,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl ModelProvider for Recording {
@@ -351,7 +360,19 @@ impl ModelProvider for Recording {
             .lock()
             .expect("requests")
             .push(request.clone());
-        self.inner.stream(request, control)
+        let mut stream = self.inner.stream(request, control);
+        let gate = self.terminal_gate.clone();
+        Box::pin(async_stream::stream! {
+            while let Some(event) = stream.next().await {
+                if matches!(event, ProviderEvent::Finished { .. })
+                    && gate.armed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    gate.reached.notify_one();
+                    gate.release.notified().await;
+                }
+                yield event;
+            }
+        })
     }
 }
 
@@ -366,6 +387,12 @@ struct Fixture {
     openai_requests: Arc<Mutex<Vec<ModelRequest>>>,
     anthropic_requests: Arc<Mutex<Vec<ModelRequest>>>,
     text_only: ModelRef,
+    root: Arc<DataRoot>,
+    provider: Arc<dyn ModelProvider>,
+    driver: DriverConfig,
+    host: ToolHostConfig,
+    session: SessionId,
+    terminal_gate: Arc<TerminalGate>,
 }
 
 impl Fixture {
@@ -395,13 +422,15 @@ impl Fixture {
             transport,
         )
         .with_endpoint(anthropic.url.clone());
-        let provider = Arc::new(
+        let terminal_gate = Arc::new(TerminalGate::default());
+        let provider: Arc<dyn ModelProvider> = Arc::new(
             Router::new()
                 .with(
                     OPENAI,
                     Arc::new(Recording {
                         inner: Arc::new(openai_adapter),
                         requests: openai_requests.clone(),
+                        terminal_gate: terminal_gate.clone(),
                     }),
                 )
                 .with(
@@ -409,6 +438,7 @@ impl Fixture {
                     Arc::new(Recording {
                         inner: Arc::new(anthropic_adapter),
                         requests: anthropic_requests.clone(),
+                        terminal_gate: terminal_gate.clone(),
                     }),
                 ),
         );
@@ -473,10 +503,10 @@ impl Fixture {
         };
         let handle = SessionHandle::create_with_tools(
             root.clone(),
-            session,
+            session.clone(),
             header,
-            provider,
-            driver,
+            provider.clone(),
+            driver.clone(),
             &host,
         )
         .await
@@ -489,7 +519,26 @@ impl Fixture {
             openai_requests,
             anthropic_requests,
             text_only,
+            root,
+            provider,
+            driver,
+            host,
+            session,
+            terminal_gate,
         }
+    }
+
+    async fn reopen(&mut self) {
+        self.handle.shutdown().await;
+        self.handle = SessionHandle::open_with_tools(
+            self.root.clone(),
+            self.session.clone(),
+            self.provider.clone(),
+            self.driver.clone(),
+            &self.host,
+        )
+        .await
+        .expect("reopen real storage");
     }
 
     fn openai_model() -> ModelRef {
@@ -755,12 +804,13 @@ async fn anthropic_to_openai_is_rejected_by_default_for_signed_thinking() {
 
 #[tokio::test]
 async fn switching_back_replays_only_the_owning_providers_state_and_no_continuation() {
-    let fixture = Fixture::new().await;
+    let mut fixture = Fixture::new().await;
     fixture.openai.reply(
         OPENAI_MODEL,
         Reply::fixture(include_str!("../fixtures/openai/native_state.sse")),
     );
     fixture.turn("hello").await;
+    fixture.reopen().await;
     fixture
         .switch(Fixture::anthropic_model(), Portability::OmitOptional)
         .await
@@ -770,6 +820,7 @@ async fn switching_back_replays_only_the_owning_providers_state_and_no_continuat
         Reply::fixture(include_str!("../fixtures/anthropic/native_state.sse")),
     );
     fixture.turn("middle").await;
+    fixture.reopen().await;
 
     // Back to OpenAI: Anthropic's signed block is lost, OpenAI's own encrypted
     // reasoning is replayed again, and no continuation is carried across.
@@ -1113,4 +1164,264 @@ async fn native_tool_call_ids_stay_paired_across_a_switch_in_both_directions() {
         "the result names the same id"
     );
     fixture.handle.shutdown().await;
+}
+
+// M01: an actual adapter has assembled a ready call, but the runtime has not
+// received the terminal event. No proposal, intent or execution may be durable.
+async fn terminal_gates_dispatch(anthropic: bool) {
+    let fixture = Fixture::new().await;
+    let (server, model, call, text) = if anthropic {
+        fixture
+            .switch(Fixture::anthropic_model(), Portability::Reject)
+            .await
+            .expect("switch");
+        (
+            &fixture.anthropic,
+            ANTHROPIC_MODEL,
+            include_str!("../fixtures/anthropic/one_tool.sse"),
+            include_str!("../fixtures/anthropic/text.sse"),
+        )
+    } else {
+        (
+            &fixture.openai,
+            OPENAI_MODEL,
+            include_str!("../fixtures/openai/one_tool.sse"),
+            include_str!("../fixtures/openai/text.sse"),
+        )
+    };
+    server.reply(model, Reply::fixture(call));
+    server.reply(model, Reply::fixture(text));
+    fixture
+        .terminal_gate
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let Accepted::TurnStarted { turn_id, .. } = fixture
+        .handle
+        .command(Command::StartTurn {
+            command_id: CommandId::new(),
+            content: vec![ContentBlock::Text {
+                text: "read notes.txt".into(),
+            }],
+        })
+        .await
+        .expect("start")
+    else {
+        panic!("not a turn")
+    };
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        fixture.terminal_gate.reached.notified(),
+    )
+    .await
+    .expect("adapter reached terminal");
+    let view = fixture.handle.view().await.expect("view");
+    assert_eq!(view.phase, Phase::Durable(RuntimeState::Inferring));
+    assert!(view.pending_approval.is_none());
+    assert!(
+        !view.snapshot.entries().any(|(_, stored)| matches!(
+            stored.entry.payload,
+            EntryPayload::AssistantResponse(_) | EntryPayload::ToolResult(_)
+        )),
+        "no proposal or execution result before terminal success"
+    );
+    assert_eq!(server.received().len(), 1, "no dependent inference");
+    fixture.terminal_gate.release.notify_one();
+    let view = fixture.finish(turn_id).await;
+    assert!(
+        view.snapshot
+            .entries()
+            .any(|(_, stored)| matches!(&stored.entry.payload,
+        EntryPayload::ToolResult(result) if result.result.status == ToolStatus::Succeeded)),
+        "the valid call must really execute after terminal success"
+    );
+    fixture.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn m01_openai_ready_call_waits_for_terminal_success() {
+    terminal_gates_dispatch(false).await;
+}
+#[tokio::test]
+async fn m01_anthropic_ready_call_waits_for_terminal_success() {
+    terminal_gates_dispatch(true).await;
+}
+
+async fn cumulative_usage_replaces(anthropic: bool) {
+    let fixture = Fixture::new().await;
+    let (server, model, usage) = if anthropic {
+        fixture
+            .switch(Fixture::anthropic_model(), Portability::Reject)
+            .await
+            .expect("switch");
+        (
+            &fixture.anthropic,
+            ANTHROPIC_MODEL,
+            include_str!("../fixtures/anthropic/usage.sse"),
+        )
+    } else {
+        (
+            &fixture.openai,
+            OPENAI_MODEL,
+            include_str!("../fixtures/openai/usage.sse"),
+        )
+    };
+    server.reply(model, Reply::fixture(usage));
+    let view = fixture.turn("usage").await;
+    let usage = view
+        .snapshot
+        .entries()
+        .find_map(|(_, stored)| match &stored.entry.payload {
+            EntryPayload::AssistantResponse(response) => response.usage.clone(),
+            _ => None,
+        })
+        .expect("final usage");
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(9), "snapshots replace, never sum");
+    assert_eq!(usage.cached_input_tokens, Some(4));
+    fixture.handle.shutdown().await;
+}
+#[tokio::test]
+async fn m03_openai_cumulative_usage_is_not_summed() {
+    cumulative_usage_replaces(false).await;
+}
+#[tokio::test]
+async fn m03_anthropic_cumulative_usage_is_not_summed() {
+    cumulative_usage_replaces(true).await;
+}
+
+async fn media_and_native_state_reopen(anthropic: bool) {
+    let mut fixture = Fixture::new().await;
+    let (model, native, text) = if anthropic {
+        fixture
+            .switch(Fixture::anthropic_model(), Portability::Reject)
+            .await
+            .expect("switch");
+        (
+            ANTHROPIC_MODEL,
+            include_str!("../fixtures/anthropic/native_state.sse"),
+            include_str!("../fixtures/anthropic/text.sse"),
+        )
+    } else {
+        (
+            OPENAI_MODEL,
+            include_str!("../fixtures/openai/native_state.sse"),
+            include_str!("../fixtures/openai/text.sse"),
+        )
+    };
+    let bytes = b"\x89PNG-fixture";
+    let image = fixture
+        .handle
+        .put_artifact(bytes.to_vec())
+        .await
+        .expect("image");
+    let server = if anthropic {
+        fixture.anthropic.clone()
+    } else {
+        fixture.openai.clone()
+    };
+    server.reply(model, Reply::fixture(native));
+    fixture
+        .start(Command::StartTurn {
+            command_id: CommandId::new(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "look".into(),
+                },
+                ContentBlock::Image {
+                    artifact: image.clone(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+        })
+        .await;
+    let before = fixture
+        .handle
+        .inspect_context(None, None)
+        .await
+        .expect("context");
+    fixture.reopen().await;
+    let after = fixture
+        .handle
+        .inspect_context(None, None)
+        .await
+        .expect("context");
+    assert_eq!(before, after, "immutable context survives reopen");
+    server.reply(model, Reply::fixture(text));
+    fixture.turn("replay").await;
+    let owner = if anthropic { ANTHROPIC } else { OPENAI };
+    let request = last(&fixture, owner);
+    assert_eq!(states(&request).len(), 1);
+    assert_eq!(states(&request)[0].0, request.input.model);
+    assert_eq!(
+        request.artifacts.read(&image).await.expect("image bytes"),
+        bytes
+    );
+    assert!(request.input.continuation.is_none());
+    let submitted = server.received();
+    let body = &submitted.last().expect("replayed request").body;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    assert!(
+        body.to_string().contains(&encoded),
+        "actual native image round trip"
+    );
+    let expected = if anthropic {
+        "sig_fixture_thinking"
+    } else {
+        "gAAAA-fixture-encrypted-reasoning"
+    };
+    assert!(
+        body.to_string().contains(expected),
+        "exact native state replayed after reopen"
+    );
+    // Switch after reopen: both policies are checked against retained state.
+    let target = if anthropic {
+        Fixture::openai_model()
+    } else {
+        Fixture::anthropic_model()
+    };
+    assert!(matches!(
+        fixture.switch(target.clone(), Portability::Reject).await,
+        Err(Rejection::PortabilityLoss(_))
+    ));
+    fixture
+        .switch(target, Portability::OmitOptional)
+        .await
+        .expect("omit");
+    let (other, other_model, other_text) = if anthropic {
+        (
+            &fixture.openai,
+            OPENAI_MODEL,
+            include_str!("../fixtures/openai/text.sse"),
+        )
+    } else {
+        (
+            &fixture.anthropic,
+            ANTHROPIC_MODEL,
+            include_str!("../fixtures/anthropic/text.sse"),
+        )
+    };
+    other.reply(other_model, Reply::fixture(other_text));
+    fixture.turn("foreign owner").await;
+    let request = last(&fixture, if anthropic { OPENAI } else { ANTHROPIC });
+    assert!(states(&request).is_empty());
+    assert!(request.input.continuation.is_none());
+    assert!(
+        !other
+            .received()
+            .last()
+            .expect("foreign request")
+            .body
+            .to_string()
+            .contains(expected)
+    );
+    fixture.handle.shutdown().await;
+}
+#[tokio::test]
+async fn m04_openai_multimodal_and_native_replay_survive_reopen() {
+    media_and_native_state_reopen(false).await;
+}
+#[tokio::test]
+async fn m04_anthropic_multimodal_and_native_replay_survive_reopen() {
+    media_and_native_state_reopen(true).await;
 }
