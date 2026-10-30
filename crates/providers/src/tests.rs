@@ -1,0 +1,1091 @@
+use super::*;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use credentials::{Credential, CredentialSource};
+use futures_util::StreamExt;
+use harness_core::{
+    model::{
+        ArtifactSource, InferenceOptions, ModelInput, ModelProvider, ModelRequest,
+        OperationControl, ProviderEvent, ProviderOutcome,
+        conformance::{
+            self, Case, CaseKind, Expected, Fixture, Observation, SubmittedRequest, SubmittedTool,
+        },
+    },
+    session::{FinishReason, ModelErrorCode, ModelRef, ResponseId},
+};
+use reqwest::header::HeaderMap;
+use serde_json::{Value, json};
+use sse::SseConfig;
+use std::{
+    collections::BTreeMap,
+    future::poll_fn,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
+use transport::{Transport, TransportConfig};
+
+const SECRET: &str = "SENTINEL-DO-NOT-DISCLOSE-987654321";
+fn credential() -> Credential {
+    Credential::bearer(SECRET.into(), HeaderMap::new(), None).unwrap()
+}
+fn transport() -> Transport {
+    Transport::new(TransportConfig {
+        allow_loopback_http: true,
+        ..Default::default()
+    })
+    .unwrap()
+}
+fn request() -> ModelRequest {
+    ModelRequest {
+        response_id: ResponseId::try_from("019a0000-0000-7000-8000-000000000001".to_owned())
+            .unwrap(),
+        input: ModelInput {
+            model: ModelRef {
+                provider_instance: "echo".into(),
+                model: "echo".into(),
+            },
+            items: vec![],
+            tools: vec![],
+            options: InferenceOptions {
+                max_output_tokens: 100,
+                reasoning_effort: None,
+                provider_options: Default::default(),
+            },
+            continuation: None,
+        },
+        artifacts: ArtifactSource::default(),
+    }
+}
+#[derive(Default)]
+struct Probe {
+    active: AtomicUsize,
+    accepted: AtomicUsize,
+    closed: AtomicBool,
+    submitted: Mutex<Option<Value>>,
+    headers_ok: AtomicBool,
+}
+struct Fake {
+    endpoint: String,
+    probe: Arc<Probe>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for Fake {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl Fake {
+    async fn new(status: u16, headers: &str, body: Vec<u8>, hold: bool, setup: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/echo", listener.local_addr().unwrap());
+        let probe = Arc::new(Probe::default());
+        let p = probe.clone();
+        let headers = headers.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                p.accepted.fetch_add(1, Ordering::SeqCst);
+                p.active.fetch_add(1, Ordering::SeqCst);
+                let mut input = vec![];
+                let mut buf = [0; 4096];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    input.extend_from_slice(&buf[..n]);
+                    if let Some(end) = input.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&input[..end]).to_ascii_lowercase();
+                        let length: usize = header
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length: ")?.parse().ok())
+                            .unwrap_or(0);
+                        if input.len() >= end + 4 + length {
+                            p.headers_ok.store(
+                                header.contains(
+                                    "authorization: bearer sentinel-do-not-disclose-987654321",
+                                ) && header.contains("user-agent: harness/0.1.0"),
+                                Ordering::SeqCst,
+                            );
+                            *p.submitted.lock().unwrap() =
+                                serde_json::from_slice(&input[end + 4..end + 4 + length]).ok();
+                            break;
+                        }
+                    }
+                }
+                if !setup {
+                    let response = format!(
+                        "HTTP/1.1 {status} Fake\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n{headers}\r\n"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    if !body.is_empty() {
+                        let _ = socket
+                            .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                            .await;
+                        let _ = socket.write_all(&body).await;
+                        let _ = socket.write_all(b"\r\n").await;
+                    }
+                    if !hold {
+                        let _ = socket.write_all(b"0\r\n\r\n").await;
+                    }
+                }
+                if hold || setup {
+                    loop {
+                        if socket.read(&mut buf).await.unwrap_or(0) == 0 {
+                            break;
+                        }
+                    }
+                }
+                drop(socket);
+                p.active.fetch_sub(1, Ordering::SeqCst);
+                p.closed.store(true, Ordering::SeqCst);
+            }
+        });
+        Self {
+            endpoint,
+            probe,
+            task,
+        }
+    }
+    async fn sse(body: &str) -> Self {
+        Self::new(200, "", body.as_bytes().to_vec(), false, false).await
+    }
+    async fn closed(&self) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !self.probe.closed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("connection was not closed");
+        assert_eq!(self.probe.active.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// Test-only adapter: a deliberately trivial vocabulary, not any provider API.
+struct EchoSseProvider {
+    transport: Transport,
+    endpoint: String,
+    bounds: SseConfig,
+}
+impl ModelProvider for EchoSseProvider {
+    fn stream(
+        &self,
+        request: ModelRequest,
+        control: OperationControl,
+    ) -> harness_core::model::ModelEventStream {
+        let t = self.transport.clone();
+        let endpoint = self.endpoint.clone();
+        let tools: Vec<_> = request.input.tools.iter().map(|t| json!({"name":t.name,"description":t.description,"input_schema":t.input_schema})).collect();
+        let body = json!({"tools":tools,"options":request.input.options});
+        let c = control.clone();
+        let mut stream = sse::read(
+            async move { t.post(&endpoint, &body, credential(), c).await },
+            self.bounds.clone(),
+            control,
+        );
+        Box::pin(async_stream::stream! {
+            let mut started = false;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Err(e) => { drop(stream); yield terminal(if e.is_stopped() { ProviderOutcome::Cancelled } else { ProviderOutcome::Failed }, None, (!e.is_stopped()).then(|| e.model_error())); return; }
+                    Ok(event) => match event.event.as_deref() {
+                        Some("start") if !started => { started = true; yield ProviderEvent::Started; }
+                        Some("text") if started => yield ProviderEvent::TextDelta { block_index: 0, text: event.data },
+                        Some("finish") if started => { drop(stream); yield terminal(ProviderOutcome::Completed, Some(match event.data.as_str() { "refusal" => FinishReason::Refusal, "output_limit" => FinishReason::OutputLimit, _ => FinishReason::Stop }), None); return; }
+                        _ => { drop(stream); yield terminal(ProviderOutcome::Failed, None, Some(error::TransportError::new(ModelErrorCode::MalformedStream, "invalid echo event").model_error())); return; }
+                    }
+                }
+            }
+            drop(stream);
+            yield terminal(ProviderOutcome::Failed, None, Some(error::TransportError::new(ModelErrorCode::MalformedStream, "truncated echo response").model_error()));
+        })
+    }
+}
+fn terminal(
+    outcome: ProviderOutcome,
+    finish_reason: Option<FinishReason>,
+    error: Option<harness_core::session::ModelError>,
+) -> ProviderEvent {
+    ProviderEvent::Finished {
+        outcome,
+        finish_reason,
+        error,
+        continuation: None,
+    }
+}
+fn echo(fake: &Fake) -> EchoSseProvider {
+    EchoSseProvider {
+        transport: transport(),
+        endpoint: fake.endpoint.clone(),
+        bounds: Default::default(),
+    }
+}
+fn read(fake: &Fake, config: SseConfig, control: OperationControl) -> sse::SseStream {
+    let t = transport();
+    let endpoint = fake.endpoint.clone();
+    let c = control.clone();
+    sse::read(
+        async move { t.post(&endpoint, &json!({}), credential(), c).await },
+        config,
+        control,
+    )
+}
+async fn code(fake: &Fake) -> error::TransportError {
+    transport()
+        .post(
+            &fake.endpoint,
+            &json!({}),
+            credential(),
+            OperationControl::default(),
+        )
+        .await
+        .err()
+        .expect("expected HTTP failure")
+}
+#[tokio::test]
+async fn invalid_bounds_never_open_transport() {
+    let fake = Fake::sse("data: unused\n\n").await;
+    for config in [
+        SseConfig {
+            max_event_bytes: 0,
+            ..Default::default()
+        },
+        SseConfig {
+            max_queue_bytes: 1,
+            ..Default::default()
+        },
+        SseConfig {
+            max_queue_events: 0,
+            ..Default::default()
+        },
+        SseConfig {
+            max_queue_events: usize::MAX,
+            ..Default::default()
+        },
+        SseConfig {
+            max_queue_bytes: usize::MAX,
+            ..Default::default()
+        },
+    ] {
+        let error = read(&fake, config, Default::default())
+            .next()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.model_error().code, ModelErrorCode::InvalidRequest);
+    }
+    assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn wrong_content_type_and_interrupted_echo() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        let _ = socket.read(&mut buffer).await.unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+    });
+    let error = transport()
+        .post(&endpoint, &json!({}), credential(), Default::default())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.model_error().code, ModelErrorCode::MalformedStream);
+    task.await.unwrap();
+    let fake = Fake::sse("event: start\ndata: yes\n\nevent: text\ndata: partial\n\n").await;
+    let events: Vec<_> = echo(&fake)
+        .stream(request(), Default::default())
+        .collect()
+        .await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Finished { outcome: ProviderOutcome::Failed, error: Some(e), .. }) if e.code == ModelErrorCode::MalformedStream)
+    );
+    let fake = Fake::new(
+        200,
+        "",
+        format!(
+            "event: start\ndata: yes\n\n{}",
+            "event: text\ndata: x\n\n".repeat(20)
+        )
+        .into_bytes(),
+        true,
+        false,
+    )
+    .await;
+    let mut provider = echo(&fake);
+    provider.bounds.max_response_bytes = 80;
+    let events: Vec<_> = provider
+        .stream(request(), Default::default())
+        .collect()
+        .await;
+    assert!(
+        matches!(events.last(), Some(ProviderEvent::Finished { error: Some(e), .. }) if e.code == ModelErrorCode::LimitExceeded)
+    );
+    fake.closed().await;
+}
+#[test]
+fn codex_bounded_files_and_no_symlink_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    login_fixture(&path, u32::MAX as u64);
+    let symlink = dir.path().join("link.json");
+    std::os::unix::fs::symlink(&path, &symlink).unwrap();
+    no_secret(
+        credentials::CodexLogin::from_path(symlink)
+            .credential()
+            .unwrap_err(),
+    );
+    std::fs::write(&path, vec![b'x'; 65537]).unwrap();
+    no_secret(
+        credentials::CodexLogin::from_path(&path)
+            .credential()
+            .unwrap_err(),
+    );
+    for value in [
+        json!({"tokens":{"access_token":"a.!!!!.c","account_id":"fixture"}}),
+        json!({"tokens":{"access_token":"a.e30.c"}}),
+    ] {
+        std::fs::write(&path, value.to_string()).unwrap();
+        no_secret(
+            credentials::CodexLogin::from_path(&path)
+                .credential()
+                .unwrap_err(),
+        );
+    }
+}
+fn no_secret(value: impl std::fmt::Debug) {
+    let captured = format!("{value:?}");
+    assert!(
+        !captured.contains(SECRET),
+        "secret leaked in captured diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn sse_fields_and_fragmented_line_endings() {
+    let body = "\u{feff}:comment\r\nevent: token\rid: one\nretry: 15\r\ndata: α\r\ndata: β\r\n\r\n";
+    // Exercise every byte boundary, including UTF-8, BOM and CRLF splits.
+    for split in 0..=body.len() {
+        let bytes = body.as_bytes().to_vec();
+        let stream: transport::ByteStream = Box::pin(
+            async_stream::stream! { yield Ok(bytes[..split].to_vec()); yield Ok(bytes[split..].to_vec()); },
+        );
+        let mut reader = sse::read(async { Ok(stream) }, Default::default(), Default::default());
+        let event = reader.next().await.unwrap().unwrap();
+        assert_eq!(
+            event,
+            sse::SseEvent {
+                event: Some("token".into()),
+                id: Some("one".into()),
+                retry: Some(15),
+                data: "α\nβ".into()
+            }
+        );
+        assert!(reader.next().await.is_none());
+    }
+}
+#[tokio::test]
+async fn sse_invalid_utf8_truncation_and_metadata() {
+    for body in [
+        b"data: \xff\n\n".to_vec(),
+        b"data: unfinished".to_vec(),
+        b"data: unfinished\n".to_vec(),
+        b":comment".to_vec(),
+    ] {
+        let fake = Fake::new(200, "", body, false, false).await;
+        let error = read(&fake, Default::default(), Default::default())
+            .next()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.model_error().code, ModelErrorCode::MalformedStream);
+    }
+    let fake = Fake::sse(":ignore\nunknown: x\nid: bad\0id\nretry: -5\ndata\n\n").await;
+    let event = read(&fake, Default::default(), Default::default())
+        .next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.data, "");
+    assert_eq!(event.id, None);
+    assert_eq!(event.retry, None);
+}
+#[tokio::test]
+async fn oversized_event() {
+    let fake = Fake::new(
+        200,
+        "",
+        format!("event: start\ndata: {}\n\n", "x".repeat(256 * 1024)).into_bytes(),
+        true,
+        false,
+    )
+    .await;
+    let mut stream = echo(&fake).stream(request(), Default::default());
+    assert!(
+        matches!(stream.next().await, Some(ProviderEvent::Finished { error: Some(e), .. }) if e.code == ModelErrorCode::LimitExceeded)
+    );
+    fake.closed().await;
+}
+#[tokio::test]
+async fn response_bound_and_conservative_queue_backpressure() {
+    let fake = Fake::sse(&"data: x\n\n".repeat(20)).await;
+    let mut stream = read(
+        &fake,
+        SseConfig {
+            max_response_bytes: 64,
+            ..Default::default()
+        },
+        Default::default(),
+    );
+    let mut count = 0;
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(_) => count += 1,
+            Err(e) => {
+                assert_eq!(e.model_error().code, ModelErrorCode::LimitExceeded);
+                break;
+            }
+        }
+    }
+    assert!(count > 0 && count < 20);
+    // A custom source records pulls. With one reserved slot and one event budget,
+    // the worker cannot read a third chunk while the second event is queued.
+    let pulls = Arc::new(AtomicUsize::new(0));
+    let p = pulls.clone();
+    let bytes: transport::ByteStream = Box::pin(
+        async_stream::stream! { for _ in 0..20 { p.fetch_add(1, Ordering::SeqCst); yield Ok(b"data: x\n\n".to_vec()); } },
+    );
+    let mut reader = sse::read(
+        async { Ok(bytes) },
+        SseConfig {
+            max_event_bytes: 32,
+            max_queue_bytes: 32,
+            max_queue_events: 1,
+            ..Default::default()
+        },
+        Default::default(),
+    );
+    assert!(reader.next().await.unwrap().is_ok());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(pulls.load(Ordering::SeqCst), 2);
+    drop(reader);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(pulls.load(Ordering::SeqCst), 2);
+}
+#[tokio::test]
+async fn cancel_deadline_drop_close_connection() {
+    for mode in [
+        "cancel",
+        "deadline",
+        "drop",
+        "cancel_paused",
+        "deadline_paused",
+    ] {
+        let fake = Fake::new(
+            200,
+            "",
+            b"event: start\ndata: yes\n\n".to_vec(),
+            true,
+            false,
+        )
+        .await;
+        let control = OperationControl {
+            deadline: mode
+                .starts_with("deadline")
+                .then(|| tokio::time::Instant::now() + Duration::from_millis(100)),
+            ..Default::default()
+        };
+        let mut stream = echo(&fake).stream(request(), control.clone());
+        assert_eq!(stream.next().await, Some(ProviderEvent::Started));
+        match mode {
+            "drop" => drop(stream),
+            "cancel_paused" => {
+                control.cancel.cancel();
+                fake.closed().await;
+                drop(stream);
+            }
+            "deadline_paused" => {
+                fake.closed().await;
+                drop(stream);
+            }
+            _ => {
+                if mode == "cancel" {
+                    control.cancel.cancel();
+                }
+                assert!(matches!(
+                    stream.next().await,
+                    Some(ProviderEvent::Finished {
+                        outcome: ProviderOutcome::Cancelled,
+                        ..
+                    })
+                ));
+                assert!(stream.next().await.is_none());
+            }
+        }
+        fake.closed().await;
+    }
+}
+#[tokio::test]
+async fn setup_cancel_deadline_first_byte_timeout() {
+    for mode in ["cancel", "deadline", "drop", "timeout", "timeout_headers"] {
+        let fake = Fake::new(200, "", vec![], true, mode != "timeout_headers").await;
+        let mut t = transport();
+        if mode.starts_with("timeout") {
+            t = Transport::new(TransportConfig {
+                allow_loopback_http: true,
+                first_byte_timeout: Duration::from_millis(60),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let control = OperationControl {
+            deadline: (mode == "deadline")
+                .then(|| tokio::time::Instant::now() + Duration::from_millis(60)),
+            ..Default::default()
+        };
+        let endpoint = fake.endpoint.clone();
+        let c = control.clone();
+        let mut stream = sse::read(
+            async move { t.post(&endpoint, &json!({}), credential(), c).await },
+            Default::default(),
+            control.clone(),
+        );
+        assert!(
+            poll_fn(|cx| std::task::Poll::Ready(stream.as_mut().poll_next(cx)))
+                .await
+                .is_pending()
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake.probe.submitted.lock().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if mode == "drop" {
+            drop(stream);
+            fake.closed().await;
+            continue;
+        }
+        if mode == "cancel" {
+            control.cancel.cancel();
+        }
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.is_stopped(), !mode.starts_with("timeout"));
+        fake.closed().await;
+    }
+}
+#[tokio::test]
+async fn http_error_taxonomy_retry_and_redaction() {
+    for (status, body, expected) in [
+        (401, "", ModelErrorCode::Authentication),
+        (403, "", ModelErrorCode::Authentication),
+        (400, "", ModelErrorCode::InvalidRequest),
+        (404, "", ModelErrorCode::InvalidRequest),
+        (422, "", ModelErrorCode::InvalidRequest),
+        (413, "", ModelErrorCode::ContextOverflow),
+        (
+            400,
+            "context_length_exceeded",
+            ModelErrorCode::ContextOverflow,
+        ),
+        (429, "", ModelErrorCode::RateLimit),
+        (500, "", ModelErrorCode::ProviderFailure),
+        (502, "", ModelErrorCode::ProviderFailure),
+        (503, "", ModelErrorCode::ProviderFailure),
+        (504, "", ModelErrorCode::ProviderFailure),
+        (418, "overloaded", ModelErrorCode::ProviderFailure),
+    ] {
+        let fake = Fake::new(
+            status,
+            "retry-after-ms: 123\r\n",
+            format!("{SECRET} {body}").into_bytes(),
+            false,
+            false,
+        )
+        .await;
+        let e = code(&fake).await;
+        assert_eq!(e.model_error().code, expected);
+        assert_eq!(e.model_error().retry_after_ms, Some(123));
+        assert_eq!(
+            e.model_error().provider_code,
+            Some(format!("http_{status}"))
+        );
+        no_secret(&e);
+        no_secret(e.to_string());
+        no_secret(e.model_error());
+        assert!(fake.probe.headers_ok.load(Ordering::SeqCst));
+        assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 1);
+        let mut stream = echo(&fake).stream(request(), Default::default());
+        assert!(
+            matches!(stream.next().await, Some(ProviderEvent::Finished { error: Some(e), .. }) if e.code == expected)
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 2);
+    }
+    for (header, expected) in [
+        ("Retry-After: 2\r\n".to_string(), Some(2000)),
+        (
+            format!(
+                "Retry-After: {}\r\n",
+                httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(60))
+            ),
+            None,
+        ),
+    ] {
+        let fake = Fake::new(429, &header, vec![], false, false).await;
+        let delay = code(&fake).await.model_error().retry_after_ms.unwrap();
+        if let Some(expected) = expected {
+            assert_eq!(delay, expected);
+        } else {
+            assert!((58000..=60000).contains(&delay));
+        }
+    }
+    let fake = Fake::new(500, "", vec![b'x'; 100_000], false, false).await;
+    assert_eq!(code(&fake).await.body().len(), 65536);
+}
+#[tokio::test]
+async fn no_redirect() {
+    let target = Fake::sse("data: leaked\n\n").await;
+    let fake = Fake::new(
+        307,
+        &format!("Location: {}\r\n", target.endpoint),
+        vec![],
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(
+        code(&fake).await.model_error().provider_code.as_deref(),
+        Some("http_307")
+    );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(target.probe.accepted.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn url_policy_and_connection_failures() {
+    for endpoint in [
+        "http://example.com",
+        "http://localhost",
+        "http://127.0.0.2",
+        "ftp://127.0.0.1",
+        "https://user:password@example.com",
+    ] {
+        let e = transport()
+            .post(endpoint, &json!({}), credential(), Default::default())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.model_error().code, ModelErrorCode::InvalidRequest);
+        no_secret(e);
+    }
+    let fake = Fake::sse("data: x\n\n").await;
+    let t = Transport::new(Default::default()).unwrap();
+    assert_eq!(
+        t.post(&fake.endpoint, &json!({}), credential(), Default::default())
+            .await
+            .err()
+            .unwrap()
+            .model_error()
+            .code,
+        ModelErrorCode::InvalidRequest
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let e = transport()
+        .post(&endpoint, &json!({}), credential(), Default::default())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.model_error().code, ModelErrorCode::Transport);
+    no_secret(e);
+    // Reset during both HTTP and TLS setup, entirely on loopback.
+    for scheme in ["http", "https"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("{scheme}://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            drop(socket);
+        });
+        let e = transport()
+            .post(&endpoint, &json!({}), credential(), Default::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(!e.is_stopped());
+        assert_eq!(e.model_error().code, ModelErrorCode::Transport);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn ipv6_loopback_opt_in() {
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buffer = [0; 4096];
+        let _ = socket.read(&mut buffer).await.unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 11\r\nConnection: close\r\n\r\ndata: yes\n\n").await.unwrap();
+    });
+    let mut bytes = transport()
+        .post(&endpoint, &json!({}), credential(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(bytes.next().await.unwrap().unwrap(), b"data: yes\n\n");
+    task.await.unwrap();
+}
+fn login_fixture(path: &std::path::Path, expiry: u64) -> String {
+    let token = format!(
+        "header.{}.{}",
+        URL_SAFE_NO_PAD.encode(json!({"exp":expiry}).to_string()),
+        SECRET
+    );
+    std::fs::write(
+        path,
+        json!({"tokens":{"access_token":token,"account_id":"fixture-account"}}).to_string(),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    token
+}
+#[test]
+fn codex_read_only_rereads_expiry_and_redaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    let source = credentials::CodexLogin::from_path(&path);
+    let e = source.credential().unwrap_err();
+    assert!(e.message.contains("run `codex login`"));
+    no_secret(e);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let token = login_fixture(&path, now + 3600);
+    let original = std::fs::read(&path).unwrap();
+    let c = source.credential().unwrap();
+    assert!(c.expiry().unwrap() > SystemTime::now());
+    assert!(
+        c.request_headers()["authorization"] == format!("Bearer {token}"),
+        "wrong bearer header"
+    );
+    assert_eq!(c.request_headers()["chatgpt-account-id"], "fixture-account");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    no_secret(&c);
+    no_secret(c.to_string());
+    no_secret(&source);
+    no_secret(source.to_string());
+    no_secret(c.request_headers());
+    login_fixture(&path, now - 1);
+    let e = source.credential().unwrap_err();
+    assert_eq!(e.code, ModelErrorCode::Authentication);
+    assert!(e.message.contains("run `codex login`"));
+    no_secret(e);
+    login_fixture(&path, now + 7200);
+    assert!(source.credential().unwrap().expiry().unwrap() > c.expiry().unwrap());
+    for value in [
+        json!({}),
+        json!({"tokens":{"access_token":SECRET,"account_id":"fixture"}}),
+        json!({"tokens":{"access_token":"a.e30.c","account_id":"fixture"}}),
+    ] {
+        std::fs::write(&path, value.to_string()).unwrap();
+        no_secret(source.credential().unwrap_err());
+    }
+    std::fs::write(&path, SECRET).unwrap();
+    no_secret(source.credential().unwrap_err());
+    no_secret(Credential::bearer(format!("{SECRET}\r\n"), HeaderMap::new(), None).unwrap_err());
+}
+#[test]
+fn insecure_credential_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("auth.json");
+    login_fixture(&path, u32::MAX as u64);
+    for mode in [0o644, 0o640, 0o604] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let e = credentials::CodexLogin::from_path(&path)
+            .credential()
+            .unwrap_err();
+        assert_eq!(e.message, "insecure credential file");
+    }
+    // Ownership predicate is exercised on a real opened fixture's metadata,
+    // including the mismatch branch on unprivileged CI runners.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let metadata = std::fs::File::open(&path).unwrap().metadata().unwrap();
+    let owner = rustix::process::getuid().as_raw();
+    assert!(credentials::secure_file(&metadata, owner));
+    assert!(!credentials::secure_file(&metadata, owner.wrapping_add(1)));
+    // When privileged, also exercise the complete mismatched-owner file read.
+    if rustix::process::getuid().is_root() {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rustix::fs::chown(&path, Some(rustix::process::Uid::from_raw(65534)), None).unwrap();
+        assert_eq!(
+            credentials::CodexLogin::from_path(&path)
+                .credential()
+                .unwrap_err()
+                .message,
+            "insecure credential file"
+        );
+    }
+}
+#[tokio::test]
+async fn backpressured_cancel_deadline_drop_release() {
+    for mode in ["cancel", "deadline", "drop"] {
+        let fake = Fake::new(
+            200,
+            "",
+            format!(
+                "event: start\ndata: yes\n\n{}",
+                "event: text\ndata: x\n\n".repeat(20)
+            )
+            .into_bytes(),
+            true,
+            false,
+        )
+        .await;
+        let mut provider = echo(&fake);
+        provider.bounds = SseConfig {
+            max_event_bytes: 64,
+            max_queue_bytes: 64,
+            max_queue_events: 1,
+            ..Default::default()
+        };
+        let control = OperationControl {
+            deadline: (mode == "deadline")
+                .then(|| tokio::time::Instant::now() + Duration::from_millis(80)),
+            ..Default::default()
+        };
+        let mut stream = provider.stream(request(), control.clone());
+        assert_eq!(stream.next().await, Some(ProviderEvent::Started));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if mode == "drop" {
+            drop(stream);
+        } else {
+            if mode == "cancel" {
+                control.cancel.cancel();
+            }
+            fake.closed().await;
+            drop(stream);
+        }
+        fake.closed().await;
+    }
+}
+#[test]
+fn captured_secret_outputs() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["_redaction", "--nocapture"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains(SECRET),
+        "secret leaked in stdout or panic"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains(SECRET),
+        "secret leaked in stderr or log"
+    );
+    assert!(output.status.success(), "redaction subprocess failed");
+    no_secret(TransportConfig {
+        proxy: Some(format!("http://user:{SECRET}@127.0.0.1")),
+        ..Default::default()
+    });
+}
+#[tokio::test]
+async fn proxy_environment_ignored() {
+    if std::env::var_os("HARNESS_PROXY_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::proxy_environment_ignored"])
+            .env("HARNESS_PROXY_CHILD", "1")
+            .env("HTTP_PROXY", "http://127.0.0.1:1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:1")
+            .env("ALL_PROXY", "http://127.0.0.1:1")
+            .env("http_proxy", "http://127.0.0.1:1")
+            .env("https_proxy", "http://127.0.0.1:1")
+            .env("all_proxy", "http://127.0.0.1:1")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ambient proxy changed direct transport"
+        );
+        return;
+    }
+    let fake = Fake::sse("data: yes\n\n").await;
+    let mut stream = read(&fake, Default::default(), Default::default());
+    assert_eq!(stream.next().await.unwrap().unwrap().data, "yes");
+    assert_eq!(fake.probe.accepted.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn echo_conformance() {
+    use harness_core::{
+        model::ReasoningEffort,
+        session::{EffectClass, EffectSet, ExecutionBackend},
+        tools::ToolDefinition,
+    };
+    for kind in [
+        CaseKind::Text,
+        CaseKind::Refusal,
+        CaseKind::OutputLimit,
+        CaseKind::ProviderError,
+        CaseKind::RateLimit,
+        CaseKind::SetupFailure,
+        CaseKind::CancelSetup,
+        CaseKind::CancelStreaming,
+        CaseKind::Drop,
+        CaseKind::Deadline,
+        CaseKind::Request,
+    ] {
+        let (status, body, hold, setup) = match kind {
+            CaseKind::ProviderError => (503, "error", false, false),
+            CaseKind::RateLimit => (429, "error", false, false),
+            CaseKind::SetupFailure => (401, "error", false, false),
+            CaseKind::CancelSetup | CaseKind::Drop => (200, "", true, true),
+            CaseKind::CancelStreaming => (200, "event: start\ndata: yes\n\n", true, false),
+            CaseKind::Refusal => (
+                200,
+                "event: start\ndata: yes\n\nevent: finish\ndata: refusal\n\n",
+                false,
+                false,
+            ),
+            CaseKind::OutputLimit => (
+                200,
+                "event: start\ndata: yes\n\nevent: finish\ndata: output_limit\n\n",
+                false,
+                false,
+            ),
+            _ => (
+                200,
+                "event: start\ndata: yes\n\nevent: text\ndata: hello\n\nevent: finish\ndata: stop\n\n",
+                false,
+                false,
+            ),
+        };
+        let fake = Fake::new(
+            status,
+            "retry-after-ms: 75\r\n",
+            body.as_bytes().to_vec(),
+            hold,
+            setup,
+        )
+        .await;
+        let mut expected = Expected::default();
+        match kind {
+            CaseKind::Text | CaseKind::Request => {
+                expected.text = BTreeMap::from([(0, "hello".into())]);
+            }
+            CaseKind::Refusal => expected.finish_reason = Some(FinishReason::Refusal),
+            CaseKind::OutputLimit => expected.finish_reason = Some(FinishReason::OutputLimit),
+            CaseKind::ProviderError | CaseKind::RateLimit | CaseKind::SetupFailure => {
+                expected.outcome = ProviderOutcome::Failed;
+                expected.finish_reason = None;
+                expected.error = Some(harness_core::session::ModelError {
+                    code: match kind {
+                        CaseKind::ProviderError => ModelErrorCode::ProviderFailure,
+                        CaseKind::RateLimit => ModelErrorCode::RateLimit,
+                        _ => ModelErrorCode::Authentication,
+                    },
+                    message: "provider HTTP request failed".into(),
+                    provider_code: Some(format!("http_{status}")),
+                    retry_after_ms: Some(75),
+                });
+            }
+            _ => {}
+        }
+        let mut input = request();
+        if kind == CaseKind::Request {
+            input.input.tools = ["read", "other"]
+                .into_iter()
+                .map(|name| ToolDefinition {
+                    name: name.into(),
+                    description: format!("definition {name}"),
+                    input_schema: json!({"type":"object"}),
+                    effects: EffectSet::new([EffectClass::Read]).unwrap(),
+                    backend: ExecutionBackend::TrustedFs,
+                })
+                .collect();
+            input.input.options.reasoning_effort = Some(ReasoningEffort::High);
+            input.input.options.provider_options =
+                serde_json::from_value(json!({"echo":{"strict":true}})).unwrap();
+        }
+        let case = Case {
+            kind,
+            fixture: format!("{kind:?}"),
+            request: input,
+            expected,
+            unsupported_option: None,
+        };
+        let factory = |_: &str| {
+            let p = fake.probe.clone();
+            Fixture {
+                provider: Arc::new(echo(&fake)),
+                observe: Arc::new(move || {
+                    let submitted = p.submitted.lock().unwrap().as_ref().and_then(|body| {
+                        let options = serde_json::from_value(body.get("options")?.clone()).ok()?;
+                        let tools = body
+                            .get("tools")?
+                            .as_array()?
+                            .iter()
+                            .map(|t| {
+                                Some(SubmittedTool {
+                                    name: t.get("name")?.as_str()?.into(),
+                                    description: t.get("description")?.as_str()?.into(),
+                                    input_schema: t.get("input_schema")?.clone(),
+                                })
+                            })
+                            .collect::<Option<Vec<_>>>()?;
+                        Some(SubmittedRequest { tools, options })
+                    });
+                    Observation {
+                        submitted,
+                        released: p.active.load(Ordering::SeqCst) == 0,
+                    }
+                }),
+            }
+        };
+        conformance::run_case(&factory, &case).await.unwrap();
+    }
+}
+
+#[test]
+fn env_key_read_once_in_child() {
+    // Re-exec avoids unsafe mutation of the environment in a threaded test runner.
+    if std::env::var_os("HARNESS_ENV_CHILD").is_some() {
+        let c = credentials::EnvApiKey::new("HARNESS_FIXTURE_KEY").unwrap();
+        no_secret(&c);
+        no_secret(c.to_string());
+        no_secret(c.credential().unwrap());
+        let error = credentials::EnvApiKey::new("HARNESS_MISSING_KEY").unwrap_err();
+        assert!(error.message.contains("HARNESS_MISSING_KEY"));
+        no_secret(error);
+        let error = credentials::EnvApiKey::new("HARNESS_EMPTY_KEY").unwrap_err();
+        no_secret(error);
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tests::env_key_read_once_in_child",
+            "--nocapture",
+        ])
+        .env("HARNESS_ENV_CHILD", "1")
+        .env("HARNESS_FIXTURE_KEY", SECRET)
+        .env("HARNESS_EMPTY_KEY", "")
+        .env_remove("HARNESS_MISSING_KEY")
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
+    assert!(output.status.success(), "credential child failed");
+}
