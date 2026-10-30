@@ -19,25 +19,30 @@ shift
 auth="${HARNESS_LIVE_OPENAI_AUTH:-codex}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --auth)
-      [ "$#" -ge 2 ] || { echo "--auth needs a value" >&2; exit 2; }
-      auth="$2"
-      shift 2
-      ;;
-    *)
-      echo "unknown argument: $1" >&2
+  --auth)
+    [ "$#" -ge 2 ] || {
+      echo "--auth needs a value" >&2
       exit 2
-      ;;
+    }
+    auth="$2"
+    shift 2
+    ;;
+  *)
+    echo "unknown argument: $1" >&2
+    exit 2
+    ;;
   esac
 done
 
 case "$auth" in
-  codex|api-key) ;;
-  *)
-    echo "unknown auth: $auth (use codex or api-key)" >&2
-    exit 2
-    ;;
+codex | api-key) ;;
+*)
+  echo "unknown auth: $auth (use codex or api-key)" >&2
+  exit 2
+  ;;
 esac
 
 cd "$(dirname "$0")/.."
-exec cargo run --locked --quiet -p harness-providers --example live_openai -- "$auth"
+# Set HARNESS_LIVE_OPENAI_RECORDING to a new path to retain the first completed
+# stream as a sanitized fixture (never raw IDs, prose or encrypted payloads).
+exec cargo run --locked --quiet -p harness-providers --features live-recording --example live_openai -- "$auth"

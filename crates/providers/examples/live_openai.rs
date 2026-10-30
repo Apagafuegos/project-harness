@@ -183,6 +183,14 @@ fn main() {
         }
     };
 
+    // The recorder strips IDs, prose, usage totals and opaque payloads before
+    // writing; no raw capture or credentials are ever written to disk.
+    #[cfg(feature = "live-recording")]
+    let adapter = match std::env::var_os("HARNESS_LIVE_OPENAI_RECORDING") {
+        Some(path) => adapter.with_sanitized_recording(std::path::PathBuf::from(path)),
+        None => adapter,
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -244,7 +252,10 @@ async fn run(adapter: &OpenAiResponses, model: &str) -> usize {
             number(usage.cached_input_tokens),
             number(usage.reasoning_tokens),
         ),
-        None => println!("usage: absent (the backend reported no usage)"),
+        None => {
+            println!("usage: fail (the backend reported no usage)");
+            failures += 1;
+        }
     }
 
     // 3. Tool-call round trip with a scripted approval.
@@ -331,18 +342,45 @@ async fn tool_round_trip(adapter: &OpenAiResponses, model: &str) -> Result<bool,
         return Ok(false);
     };
     if name != TOOL_NAME {
-        return Err(format!("the model called {name} instead of {TOOL_NAME}"));
+        return Err("the model selected an unexpected tool".into());
     }
     let ready = events
         .iter()
         .any(|event| matches!(event, ProviderEvent::ToolCallReady { block_index } if *block_index == index));
-    if !ready {
+    if !ready
+        || !matches!(
+            terminal(&events),
+            Some(ProviderEvent::Finished {
+                outcome: ProviderOutcome::Completed,
+                finish_reason: Some(FinishReason::ToolCalls),
+                ..
+            })
+        )
+    {
         return Ok(false);
     }
     let call_id = call_id.ok_or("the provider returned no call id")?;
-    // Scripted approval: the harness would ask a user here; the check approves.
-    let mut arguments = serde_json::Map::new();
-    arguments.insert("value".into(), json!("ping"));
+    let mut fragments = String::new();
+    for event in &events {
+        if let ProviderEvent::ToolArgumentsDelta {
+            block_index,
+            fragment,
+        } = event
+            && *block_index == index
+        {
+            fragments.push_str(fragment);
+        }
+    }
+    let arguments: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&fragments).map_err(|_| "invalid tool arguments")?;
+    let echoed = arguments
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| *value == "ping")
+        .ok_or("unexpected echo argument")?
+        .to_owned();
+    // Scripted approval and pure echo execution, using the actual parsed call.
+
     let harness_call = harness_core::session::CallId::new();
     input.items.push(ContextItem::Assistant {
         entry_id: harness_core::session::EntryId::new(),
@@ -364,9 +402,7 @@ async fn tool_round_trip(adapter: &OpenAiResponses, model: &str) -> Result<bool,
             },
             invocation_id: None,
             status: harness_core::session::ToolStatus::Succeeded,
-            content: vec![ContentBlock::Text {
-                text: "ping".into(),
-            }],
+            content: vec![ContentBlock::Text { text: echoed }],
             metadata: harness_core::session::ToolMetadata {
                 exit_code: Some(0),
                 duration_ms: Some(1),

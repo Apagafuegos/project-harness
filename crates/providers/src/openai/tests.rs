@@ -38,6 +38,17 @@ use crate::{
     credentials::Credential, sse::SseEvent, transport::Transport, transport::TransportConfig,
 };
 
+// Other provider tests include this private test helper independently; keep
+// this adapter's fixtures self-contained without editing the shared tests.
+#[allow(dead_code, clippy::duplicate_mod)]
+#[path = "../../../../tests/support/loopback.rs"]
+mod loopback;
+
+fn client_nonce() -> &'static str {
+    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NONCE.get_or_init(loopback::nonce)
+}
+
 // ---------------------------------------------------------------- fake server
 
 /// One canned HTTP response. `silent` sends no headers at all; `hold` keeps the
@@ -80,74 +91,121 @@ impl Reply {
     }
 }
 
-/// A single-connection loopback server that records the request body and
-/// whether the client closed the connection.
+/// An attributed loopback server: unrelated probes never affect client state.
 struct Server {
     url: String,
     submitted: Arc<Mutex<Option<Value>>>,
     released: Arc<AtomicBool>,
     connections: Arc<AtomicUsize>,
+    ignored: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+    _side_probe: loopback::SideProbe,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Server {
     fn start(reply: Reply) -> Self {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fixture");
         listener.set_nonblocking(true).expect("nonblocking");
-        let port = listener.local_addr().expect("addr").port();
+        let address = listener.local_addr().expect("addr");
+        let side_probe = loopback::SideProbe::register(address);
+        let path = format!("/responses/{}", loopback::nonce());
+        let url = format!("http://{address}{path}");
         let submitted = Arc::new(Mutex::new(None));
         let released = Arc::new(AtomicBool::new(true));
         let connections = Arc::new(AtomicUsize::new(0));
-        let (record, closed, count) = (submitted.clone(), released.clone(), connections.clone());
-        tokio::spawn(async move {
-            let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
-                return;
-            };
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            count.fetch_add(1, Ordering::SeqCst);
-            closed.store(false, Ordering::SeqCst);
-            let body = read_request(&mut socket).await;
-            *record.lock().expect("record") = body;
-            if !reply.silent {
-                let mut head = format!("HTTP/1.1 {} {}\r\n", reply.status, reason(reply.status));
-                for (name, value) in &reply.headers {
-                    head.push_str(&format!("{name}: {value}\r\n"));
-                }
-                // A held response must stay open mid-body, so it is chunked and
-                // never terminated; `content-length` would end the body early
-                // and the client would see a clean EOF instead of pending.
-                if reply.hold {
-                    head.push_str("transfer-encoding: chunked\r\n\r\n");
-                    let _ = socket.write_all(head.as_bytes()).await;
-                    let chunk = format!("{:x}\r\n", reply.body.len());
-                    let _ = socket.write_all(chunk.as_bytes()).await;
-                    let _ = socket.write_all(&reply.body).await;
-                    let _ = socket.write_all(b"\r\n").await;
-                } else {
-                    head.push_str(&format!("content-length: {}\r\n\r\n", reply.body.len()));
-                    let _ = socket.write_all(head.as_bytes()).await;
-                    let _ = socket.write_all(&reply.body).await;
-                }
-                let _ = socket.flush().await;
-            }
-            if reply.hold {
-                let mut buffer = [0u8; 1024];
-                loop {
-                    match socket.read(&mut buffer).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {}
+        let ignored = Arc::new(AtomicUsize::new(0));
+        let (record, closed, count, unrelated) = (
+            submitted.clone(),
+            released.clone(),
+            connections.clone(),
+            ignored.clone(),
+        );
+        let task = tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener");
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                let (mut socket, _) = tokio::select! {
+                    accepted = listener.accept() => accepted.expect("accept"),
+                    Some(result) = handlers.join_next(), if !handlers.is_empty() => {
+                        result.expect("connection handler");
+                        continue;
                     }
-                }
+                };
+                let (record, closed, count, unrelated) = (
+                    record.clone(),
+                    closed.clone(),
+                    count.clone(),
+                    unrelated.clone(),
+                );
+                let path = path.clone();
+                let reply = reply.clone();
+                handlers.spawn(async move {
+                    let body = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        read_request(&mut socket, &path),
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                    let Some(body) = body else {
+                        let ignored = unrelated.fetch_add(1, Ordering::SeqCst) + 1;
+                        eprintln!("openai fixture: ignored unrelated connection #{ignored}");
+                        return;
+                    };
+                    count.fetch_add(1, Ordering::SeqCst);
+                    closed.store(false, Ordering::SeqCst);
+                    *record.lock().expect("record") = Some(body);
+                    if !reply.silent {
+                        let mut head =
+                            format!("HTTP/1.1 {} {}\r\n", reply.status, reason(reply.status));
+                        for (name, value) in &reply.headers {
+                            head.push_str(&format!("{name}: {value}\r\n"));
+                        }
+                        // A held response must stay open mid-body, so it is chunked and
+                        // never terminated; `content-length` would end the body early
+                        // and the client would see a clean EOF instead of pending.
+                        if reply.hold {
+                            head.push_str("transfer-encoding: chunked\r\n\r\n");
+                            let _ = socket.write_all(head.as_bytes()).await;
+                            let chunk = format!("{:x}\r\n", reply.body.len());
+                            let _ = socket.write_all(chunk.as_bytes()).await;
+                            let _ = socket.write_all(&reply.body).await;
+                            let _ = socket.write_all(b"\r\n").await;
+                        } else {
+                            head.push_str(&format!("content-length: {}\r\n\r\n", reply.body.len()));
+                            let _ = socket.write_all(head.as_bytes()).await;
+                            let _ = socket.write_all(&reply.body).await;
+                        }
+                        let _ = socket.flush().await;
+                    }
+                    if reply.hold {
+                        let mut buffer = [0u8; 1024];
+                        loop {
+                            match socket.read(&mut buffer).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    }
+                    let _ = socket.shutdown().await;
+                    closed.store(true, Ordering::SeqCst);
+                });
             }
-            let _ = socket.shutdown().await;
-            closed.store(true, Ordering::SeqCst);
         });
         Self {
-            url: format!("http://127.0.0.1:{port}/v1/responses"),
+            url,
             submitted,
             released,
             connections,
+            ignored,
+            task,
+            _side_probe: side_probe,
         }
     }
 
@@ -173,14 +231,14 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-async fn read_request(socket: &mut TcpStream) -> Option<Value> {
+async fn read_request(socket: &mut TcpStream, path: &str) -> Option<Value> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut head_end = None;
     let mut length = 0usize;
     loop {
         let read = socket.read(&mut chunk).await.ok()?;
-        if read == 0 {
+        if read == 0 || buffer.len() + read > 1024 * 1024 {
             return None;
         }
         buffer.extend_from_slice(&chunk[..read]);
@@ -188,7 +246,15 @@ async fn read_request(socket: &mut TcpStream) -> Option<Value> {
             && let Some(position) = find(&buffer, b"\r\n\r\n")
         {
             head_end = Some(position + 4);
-            let head = String::from_utf8_lossy(&buffer[..position]).to_ascii_lowercase();
+            let raw_head = String::from_utf8_lossy(&buffer[..position]);
+            let head = raw_head.to_ascii_lowercase();
+            if raw_head.lines().next() != Some(format!("POST {path} HTTP/1.1").as_str())
+                || !head
+                    .lines()
+                    .any(|line| line == format!("x-harness-test: {}", client_nonce()))
+            {
+                return None;
+            }
             for line in head.lines() {
                 if let Some(value) = line.strip_prefix("content-length:") {
                     length = value.trim().parse().ok()?;
@@ -286,10 +352,12 @@ impl crate::credentials::CredentialSource for Missing {
 const SENTINEL_SECRET: &str = "SENTINEL-SECRET-TOKEN";
 
 fn fixed() -> Fixed {
-    Fixed(
-        Credential::bearer(SENTINEL_SECRET.to_owned(), Default::default(), None)
-            .expect("credential"),
-    )
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-harness-test",
+        client_nonce().parse().expect("run header"),
+    );
+    Fixed(Credential::bearer(SENTINEL_SECRET.to_owned(), headers, None).expect("credential"))
 }
 
 fn transport() -> Transport {
@@ -362,7 +430,7 @@ fn decode_request(body: &Value) -> SubmittedRequest {
 fn model() -> ModelRef {
     ModelRef {
         provider_instance: "openai".into(),
-        model: super::LIVE_CHECK_MODEL.into(),
+        model: "gpt-5.5".into(),
     }
 }
 
@@ -603,6 +671,7 @@ fn case(kind: CaseKind, profile: Profile) -> Case {
         }
     };
     if profile == Profile::ChatGptCodex {
+        request.input.model.model = super::LIVE_CHECK_MODEL.into();
         // `ChatGptCodex` sends no `max_output_tokens`, so the decoded evidence
         // reports 0; the row carries that value so the round-trip check stays
         // meaningful for every field the profile does serialize.
@@ -759,7 +828,7 @@ fn platform_request_is_one_correct_stateless_body() {
     let input = full_input();
     let body = request::build(&input, Profile::Platform, &Reads::default()).expect("build");
     let expected = json!({
-        "model": super::LIVE_CHECK_MODEL,
+        "model": "gpt-5.5",
         "instructions": "You are the harness.\n\nPrefer small diffs.",
         "input": [
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Read notes.txt"}]},
@@ -807,7 +876,8 @@ fn platform_request_is_one_correct_stateless_body() {
 
 #[test]
 fn chatgpt_request_moves_instructions_into_input() {
-    let input = full_input();
+    let mut input = full_input();
+    input.model.model = super::LIVE_CHECK_MODEL.into();
     let body = request::build(&input, Profile::ChatGptCodex, &Reads::default()).expect("build");
     // The Codex client has no output-budget field; it always sends tool_choice
     // and parallel_tool_calls instead.
@@ -1146,6 +1216,111 @@ async fn a_rate_limit_is_reported_once_without_a_retry() {
     }
     assert_eq!(terminal, 1);
     assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn finished_releases_connection_without_another_poll() {
+    use harness_core::model::ProviderEvent;
+    use std::time::Duration;
+
+    for profile in [Profile::Platform, Profile::ChatGptCodex] {
+        // Keep HTTP pending after the native terminal event: neither server
+        // EOF nor a second consumer poll may mask a retained SSE reader.
+        let mut reply = parse_fixture(fixture_text("text"));
+        reply.hold = true;
+        let server = Server::start(reply);
+        let adapter = adapter(profile, server.url.clone());
+        let row = case(CaseKind::Text, profile);
+        let mut stream = adapter.stream(row.request, Default::default());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = futures_util::StreamExt::next(&mut stream)
+                    .await
+                    .expect("event");
+                if matches!(event, ProviderEvent::Finished { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("terminal event");
+        assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+        // Do not poll or drop `stream` until after observing peer close.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !server.released.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .expect("Finished retained a live connection");
+        drop(stream);
+    }
+}
+
+#[tokio::test]
+async fn fixture_attribution_ignores_wrong_paths_and_missing_run_headers() {
+    let server = Server::start(Reply::silent());
+    let url = reqwest::Url::parse(&server.url).expect("url");
+    let address = ("127.0.0.1", url.port().expect("port"));
+    for request in [
+        format!(
+            "POST /wrong HTTP/1.1\r\nx-harness-test: {}\r\ncontent-length: 2\r\n\r\n{{}}",
+            client_nonce()
+        ),
+        format!(
+            "POST {} HTTP/1.1\r\ncontent-length: 2\r\n\r\n{{}}",
+            url.path()
+        ),
+    ] {
+        let mut socket = TcpStream::connect(address).await.expect("probe connect");
+        socket
+            .write_all(request.as_bytes())
+            .await
+            .expect("probe write");
+        let mut byte = [0];
+        tokio::time::timeout(std::time::Duration::from_secs(2), socket.read(&mut byte))
+            .await
+            .expect("unrelated connection closed")
+            .expect("read");
+    }
+    assert!(server.ignored.load(Ordering::SeqCst) >= 2);
+    assert!(server.submitted.lock().expect("record").is_none());
+    assert_eq!(server.connections.load(Ordering::SeqCst), 0);
+    assert!(server.released.load(Ordering::SeqCst));
+}
+
+#[test]
+fn account_catalog_and_portable_reasoning_levels_are_sourced() {
+    use harness_core::context::InputMediaKind;
+    let info = super::info(Profile::ChatGptCodex, super::LIVE_CHECK_MODEL).expect("account model");
+    assert_eq!(info.limits.context_tokens, Some(500_000));
+    assert_eq!(info.limits.max_output_tokens, None);
+    assert!(
+        info.capabilities
+            .input_media
+            .contains(&InputMediaKind::Image)
+    );
+    assert!(info.capabilities.tools);
+    assert!(super::info(Profile::ChatGptCodex, "gpt-5.5").is_none());
+    assert_eq!(
+        super::info(Profile::Platform, "gpt-5.5")
+            .expect("platform")
+            .limits
+            .max_output_tokens,
+        Some(128_000)
+    );
+    for (portable, wire) in [
+        (ReasoningEffort::Low, "low"),
+        (ReasoningEffort::Medium, "medium"),
+        (ReasoningEffort::High, "high"),
+    ] {
+        let mut input = full_input();
+        input.model.model = super::LIVE_CHECK_MODEL.into();
+        input.options.reasoning_effort = Some(portable);
+        let body = request::build(&input, Profile::ChatGptCodex, &Reads::default()).expect("body");
+        assert_eq!(body["reasoning"]["effort"], json!(wire));
+        assert!(body.get("max_output_tokens").is_none());
+    }
 }
 
 // --------------------------------------------------------- test-only helpers

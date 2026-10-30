@@ -239,16 +239,25 @@ adapter never offers a control it cannot verify.
 | Model | Profile | Context | Max output | Capabilities | Source |
 | --- | --- | --- | --- | --- | --- |
 | `gpt-5.5` | `Platform` | 1,050,000 | 128,000 | image input, reasoning effort, tools | `developers.openai.com/api/docs/models/gpt-5.5` |
-| `gpt-5.5` | `ChatGptCodex` | 272,000 | unknown | image input, reasoning effort, tools | `openai/codex` `models-manager/models.json`, `"context_window": 272000` |
+| `gpt-6.1-sol` | `ChatGptCodex` | 500,000 | unknown | image input, reasoning effort, tools | `~/.codex/models_cache.json`, `fetched_at: 2026-10-30T12:51:51.951342245Z`, `client_version: 0.166.0` |
 
-The ChatGPT-side output limit is left **unknown, not invented**: the Codex model
-catalog carries no `max_output_tokens` for this model, and the backend's client
+The subscription row comes from this account's backend-fetched model list, not
+from the repo's bundled catalog. The latter lists `gpt-5.5`, but the prior live
+check found it was not served to this account; that subscription row is removed.
+The platform `gpt-5.5` row remains. The cached `gpt-6.1-sol` model advertises
+reasoning levels `low`, `medium`, `high`, `xhigh`, `ultra`; portable
+`ReasoningEffort::{Low, Medium, High}` map directly to the matching first three
+strings, without widening effort to `xhigh` or `ultra`. The same cache lists
+`input_modalities: ["text", "image"]`. No output limit is stated.
+
+The ChatGPT-side output limit is left **unknown, not invented**: the fetched model
+cache carries no `max_output_tokens` for this model, and the backend's client
 sends no output-budget field at all. Unknown is the honest value; `ModelLimits`
 treats `None` as unknown rather than zero, and the context builder still refuses
 to infer when a *context* window is unknown (here it is known). Applications must
 use `openai::catalog` for the provider instance so the builder and the adapter
-agree; a different context window on the two profiles for the same model name is
-the reason the catalog is profile-aware.
+agree. Catalog rows are profile-specific: account availability on the subscription
+endpoint is not evidence of availability or limits on the platform endpoint.
 
 ## Opt-in live check
 
@@ -256,29 +265,47 @@ the reason the catalog is profile-aware.
 `examples/live_openai.rs` through the real adapter. It is never part of
 `check.sh` or CI. Default auth is `codex` (the subscription login); `--auth
 api-key` uses `OPENAI_API_KEY`. The model is `HARNESS_LIVE_OPENAI_MODEL`,
-defaulting to `gpt-5.5`, the highest-priority list-visible model in the Codex
-catalog and available to every plan the catalog names. It covers streaming text,
+defaulting to the account-served `gpt-6.1-sol` from the fetched cache cited above
+(also the user's configured Codex model). It covers streaming text,
 one tool-call round trip with a scripted approval, usage, an invalid model name
 and a cancellation mid-stream, prints a pass/fail summary only, and never prints
 tokens, account IDs or response IDs.
 
-Observed on 2026-10-30, twice (once before and once after aligning the profile
-with the Codex request field set), on this machine's ChatGPT login:
+### Round-2 live observation (2026-10-30)
 
-- `CodexLogin`, the endpoint, the `originator` header and the request shape all
-  work: the backend returns normalized JSON errors that the adapter maps, rather
-  than transport or authentication failures.
-- Both runs ended `invalid_request`; the second showed
-  `provider_code: model_not_found` for `gpt-5.5`, so this account's subscription
-  does not serve that model even though the shipped catalog lists it for every
-  plan. The text, tool and cancellation cases therefore did not complete.
-- The invalid-model case passed in both runs, exercising real error mapping.
+One invocation with default auth/model, after changing the default to
+`gpt-6.1-sol`, returned:
 
-This is a model-availability fact, not a request-shape defect: with the
-source-conformant body the backend reaches model resolution and reports the
-model, which it could not do for a body it rejected outright. The default stays
-as sourced; users point `HARNESS_LIVE_OPENAI_MODEL` at a model their plan
-serves, and the check is not retried in a loop.
+```text
+live openai: auth=codex model=gpt-6.1-sol context=500000 max_output=unknown
+text streaming: fail (outcome=Failed finish=None error=ProviderFailure/"-")
+usage: fail (the backend reported no usage)
+tool round trip: fail (no completed call)
+invalid model: pass (InvalidRequest)
+cancellation: fail (outcome=Failed finish=None error=ProviderFailure/"-")
+summary: fail (4 case(s))
+```
+
+No retry was made. The no-code failures do **not** establish a specific backend
+contract violation or demonstrate successful streaming; that remains unverified.
+The earlier round's two invocations with `gpt-5.5` had failed (one explicitly
+reported `model_not_found`); those are historical evidence only, not current
+model-catalog authority.
+
+### Sanitized recording tooling
+
+The opt-in script enables the `live-recording` feature. Set
+`HARNESS_LIVE_OPENAI_RECORDING` to a new file path to capture the first completed
+text turn. This does not write a raw stream: an allowlist reconstructs the mapper
+fields only, replaces IDs with synthetic identities derived from output indices,
+replaces text and encrypted payloads with placeholders, omits all headers and
+metadata, and substitutes synthetic usage counts. Files are labeled `RECORDED`
+and never overwritten. The sentinel test verifies removal before writing.
+Ordinary tests never read credentials, cached account metadata, or the network.
+
+The round-2 invocation enabled this recorder, but no stream completed, so no
+recorded fixture was saved. Item 8 remains unfulfilled; no hand-written fixture
+is mislabeled as a recording.
 
 ## Evidence and scope
 
@@ -291,7 +318,14 @@ every field the profile does serialize still has to round-trip exactly. Unit
 tests cover the golden Platform and ChatGptCodex request bodies, capability and
 provider-option refusal, owner-scoped state replay, unknown/ignored event
 counters, malformed-stream detection, error classification, the Codex login
-hint, no-retry behaviour and secret redaction. No test reads the real
+hint, no-retry behaviour and secret redaction. Round 2 adds a peer-close test
+that retains the provider stream after `Finished` without polling it again,
+account-catalog/effort assertions, and probe attribution tests. The fixture
+server registers `tests/support/loopback.rs::SideProbe`, accepts concurrently,
+and admits only its random per-server path plus the test run header. Unrelated
+connections are counted/logged/closed without changing inference observations.
+Five consecutive runs with `HARNESS_TEST_LOOPBACK_PROBE=1` each passed all 40
+provider tests. No test reads the real
 `~/.codex/auth.json` or opens a network connection outside loopback.
 
 Out of scope for this step: hosted tools (`web_search`, `file_search`, image

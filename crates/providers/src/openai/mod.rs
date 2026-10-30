@@ -32,6 +32,8 @@ use crate::{
 
 mod events;
 pub mod models;
+#[cfg(any(test, feature = "live-recording"))]
+mod recording;
 mod request;
 #[cfg(test)]
 mod tests;
@@ -126,6 +128,8 @@ pub struct OpenAiResponses {
     sse: SseConfig,
     endpoint: String,
     counters: Arc<Counters>,
+    #[cfg(feature = "live-recording")]
+    recording: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for OpenAiResponses {
@@ -164,6 +168,8 @@ impl OpenAiResponses {
             sse: SseConfig::default(),
             endpoint: profile.endpoint().to_owned(),
             counters: Arc::new(Counters::default()),
+            #[cfg(feature = "live-recording")]
+            recording: None,
         }
     }
 
@@ -190,6 +196,15 @@ impl OpenAiResponses {
         self
     }
 
+    /// Record the first successfully completed text stream as a sanitized SSE
+    /// fixture. Requires the explicit `live-recording` feature; no raw bytes,
+    /// IDs, text or encrypted payloads are written. Never overwrites a file.
+    #[cfg(feature = "live-recording")]
+    pub fn with_sanitized_recording(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.recording = Some(path.into());
+        self
+    }
+
     /// Which profile this instance speaks.
     pub fn profile(&self) -> Profile {
         self.profile
@@ -209,6 +224,8 @@ impl ModelProvider for OpenAiResponses {
         let config = self.sse.clone();
         let endpoint = self.endpoint.clone();
         let counters = self.counters.clone();
+        #[cfg(feature = "live-recording")]
+        let mut recorder = self.recording.clone().map(recording::Recorder::new);
         Box::pin(async_stream::stream! {
             // Setup failures are terminal events, never early errors.
             let credential = match credential_source.credential() {
@@ -247,7 +264,13 @@ impl ModelProvider for OpenAiResponses {
             let mut mapper = events::Mapper::new(profile, counters);
             while let Some(item) = stream.next().await {
                 let mapped = match item {
-                    Ok(event) => mapper.push(&event),
+                    Ok(event) => {
+                        #[cfg(feature = "live-recording")]
+                        if let Some(recorder) = &mut recorder {
+                            recorder.push(&event);
+                        }
+                        mapper.push(&event)
+                    },
                     Err(error) => {
                         drop(stream);
                         yield transport_terminal(profile, error);
@@ -256,14 +279,27 @@ impl ModelProvider for OpenAiResponses {
                 };
                 match mapped {
                     Ok(emitted) => {
-                        let finished = mapper.finished();
+                        if mapper.finished() {
+                            // The consumer may never poll again after Finished.
+                            // Release the SSE reader before recording or yielding.
+                            drop(stream);
+                            #[cfg(feature = "live-recording")]
+                            if emitted.iter().any(|event| matches!(event, ProviderEvent::Finished {
+                                outcome: harness_core::model::ProviderOutcome::Completed,
+                                finish_reason: Some(harness_core::session::FinishReason::Stop),
+                                ..
+                            })) && let Some(recorder) = &recorder
+                                && recorder.save().is_err()
+                            {
+                                eprintln!("sanitized recording: could not save fixture");
+                            }
+                            for event in emitted {
+                                yield event;
+                            }
+                            return;
+                        }
                         for event in emitted {
                             yield event;
-                        }
-                        if finished {
-                            // Release the connection before announcing the end.
-                            drop(stream);
-                            return;
                         }
                     }
                     Err(error) => {

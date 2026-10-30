@@ -15,10 +15,10 @@ use super::Profile;
 
 /// Default model for the opt-in live check.
 ///
-/// `gpt-5.5` is in the Codex CLI's bundled catalog, so the ChatGPT Codex
-/// backend accepts it. The live check can override it with
-/// `HARNESS_LIVE_OPENAI_MODEL`.
-pub const LIVE_CHECK_MODEL: &str = "gpt-5.5";
+/// Account-served model from `~/.codex/models_cache.json`, fetched at
+/// `2026-10-30T12:51:51.951342245Z` by codex-cli `0.166.0` (not the repo's
+/// bundled catalog). Override with `HARNESS_LIVE_OPENAI_MODEL`.
+pub const LIVE_CHECK_MODEL: &str = "gpt-6.1-sol";
 
 /// One sourced catalog row. Profile-specific because the ChatGPT backend
 /// serves a smaller context window for the same model name.
@@ -37,7 +37,7 @@ struct Entry {
 
 /// Platform (`api.openai.com`) rows: limits from the platform model pages.
 const PLATFORM: &[Entry] = &[Entry {
-    model: LIVE_CHECK_MODEL,
+    model: "gpt-5.5",
     // developers.openai.com/api/docs/models/gpt-5.5: "1,050,000 context window".
     context_tokens: Some(1_050_000),
     // Same page: "128,000 max output tokens".
@@ -47,17 +47,18 @@ const PLATFORM: &[Entry] = &[Entry {
     reasoning: true,
 }];
 
-/// ChatGPT Codex rows: context windows from the Codex CLI's bundled catalog.
+/// ChatGPT Codex rows: account-served models from the CLI's fetched cache.
 const CHATGPT: &[Entry] = &[Entry {
     model: LIVE_CHECK_MODEL,
-    // openai/codex codex-rs/models-manager/models.json: gpt-5.5
-    // "context_window": 272000.
-    context_tokens: Some(272_000),
+    // ~/.codex/models_cache.json, fetched_at 2026-10-30T12:51:51.951342245Z,
+    // client_version 0.166.0: gpt-6.1-sol has "context_window": 500000.
+    context_tokens: Some(500_000),
     // The catalog carries no output limit for this model, and the backend
     // accepts no output-token field, so this stays unknown.
     max_output_tokens: None,
-    // Same catalog: "input_modalities": ["text", "image"] and reasoning
-    // summaries enabled.
+    // Same cache: "input_modalities": ["text", "image"], supported reasoning
+    // levels low, medium, high, xhigh, ultra. Portable low/medium/high map
+    // identically to those backend strings (see request::build).
     images: true,
     reasoning: true,
 }];

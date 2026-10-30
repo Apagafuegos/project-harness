@@ -72,8 +72,15 @@ a proxy or loopback fixtures.
   `run codex login` hint. There is no automatic retry.
 - `scripts/live-check.sh openai [--auth codex|api-key]` is the opt-in real turn
   check. It is never part of `check.sh` or CI, and prints no secrets or IDs. Set
-  `HARNESS_LIVE_OPENAI_MODEL` to a model your ChatGPT plan serves; the default is
-  the Codex catalog's top-priority listed model.
+  `HARNESS_LIVE_OPENAI_MODEL` to override the default `gpt-6.1-sol`, sourced from
+  the account's fetched `~/.codex/models_cache.json` (2026-10-30, CLI 0.166.0).
+  Its context window is 500,000 tokens; output limit is unknown. Portable
+  low/medium/high efforts map directly to backend low/medium/high. Platform
+  metadata retains `gpt-5.5`; use a platform model override for `--auth api-key`.
+- Set `HARNESS_LIVE_OPENAI_RECORDING` to a new path to retain the first completed
+  text stream as a labeled fixture. The opt-in recorder replaces IDs, prose and
+  encrypted payloads **before** writing. No raw capture is ever saved. The latest
+  live run did not complete a stream, so no recording is claimed (ADR 0017).
 
 ADR 0017 holds the request mapping, the full event-mapping table, the profile
 differences with their Codex sources, the catalog sources and the live check.
