@@ -21,8 +21,8 @@ fi
 ./scripts/test-security-gate.sh
 cargo build --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo run --locked -p harness -- --help
-cargo run --locked -p harness -- --version
+timeout 300 cargo run --locked -p harness -- --help
+timeout 300 cargo run --locked -p harness -- --version
 
 # Smoke-test `harness context` on the RFC-001 compaction fixture: a private
 # data root built with plain tools must print the checked-in golden report.
@@ -35,7 +35,7 @@ for artifact in "$fixtures"/artifacts/*; do
     install -m 600 "$artifact" "$smoke/state/artifacts/"
 done
 install -m 600 "$fixtures/compaction.jsonl" "$smoke/state/sessions/$session.jsonl"
-cargo run --locked -q -p harness -- context "$smoke/state" "$session" \
+timeout 300 cargo run --locked -q -p harness -- context "$smoke/state" "$session" \
     --context-tokens 128000 >"$smoke/report.json"
 diff -u crates/core/src/context/golden/compaction.json "$smoke/report.json"
 echo "harness context smoke test: report matches the compaction golden file"
@@ -43,16 +43,17 @@ echo "harness context smoke test: report matches the compaction golden file"
 # The Milestone 2 end-to-end example: two turns, a crash during a third,
 # automatic recovery and the final context report. It is offline and
 # deterministic, so two runs must print the same bytes.
-cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-1.txt"
-cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-2.txt"
+timeout 300 cargo test --locked -q -p harness-core --example scripted_session
+timeout 300 cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-1.txt"
+timeout 300 cargo run --locked -q -p harness-core --example scripted_session >"$smoke/example-2.txt"
 diff -u "$smoke/example-1.txt" "$smoke/example-2.txt"
 grep -q "streams opened by recovery: 0" "$smoke/example-1.txt"
 echo "scripted_session example: deterministic, recovered without a stream"
 
 # M3: real descriptor-rooted read/edit, approval, process death during write
 # result append, explicit tail repair and user resolution. No sandbox backend.
-cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-1.txt"
-cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-2.txt"
+timeout 300 cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-1.txt"
+timeout 300 cargo run --locked -q -p harness-core --example tool_session >"$smoke/tool-example-2.txt"
 diff -u "$smoke/tool-example-1.txt" "$smoke/tool-example-2.txt"
 grep -q 'advisory hint matches_post_image' "$smoke/tool-example-1.txt"
 grep -q 'ToolResult Some(UserObserved)' "$smoke/tool-example-1.txt"

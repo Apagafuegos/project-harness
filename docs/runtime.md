@@ -619,7 +619,10 @@ policy change; in-place reopen never silently changes protection capabilities.
   `InspectError::Closed`. It is answered while draining for shutdown, like views.
 - `subscribe()` immediately registers a broadcast receiver. `next().await`
   yields `Some(SubscriptionItem::Reset(ClientView))` first, then contiguous
-  `Event(RuntimeEvent)` items, or `None` after driver shutdown.
+  `Event(RuntimeEvent)` items, or `None` after driver shutdown. The first reset
+  may already reflect completed open-time recovery (including `Durable(Idle)`).
+  Clients must check the reset's view before waiting for a phase or fact: events
+  covered by that reset are intentionally not replayed.
 - `put_artifact(Vec<u8>).await -> Result<ArtifactRef, PersistError>` rejects
   payloads above `max_artifact_bytes` before any I/O. The worker publishes the
   bytes and replies after artifact file and directory sync. Artifact I/O failure
