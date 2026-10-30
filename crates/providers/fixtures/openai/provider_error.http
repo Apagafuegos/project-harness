@@ -1,0 +1,5 @@
+status: 500
+header: retry-after-ms: 250
+header: content-type: application/json
+---
+{"error":{"code":"server_error","message":"The server had an error while processing your request."}}

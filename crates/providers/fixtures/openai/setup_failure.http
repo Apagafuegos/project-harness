@@ -1,0 +1,4 @@
+status: 401
+header: content-type: application/json
+---
+{"error":{"code":"invalid_api_key","message":"Incorrect API key provided."}}

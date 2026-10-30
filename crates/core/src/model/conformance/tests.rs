@@ -838,6 +838,38 @@ async fn pre_submission_control_and_setup_failure_need_no_native_request() {
 }
 
 #[tokio::test]
+async fn native_state_accepts_optional_continuation_but_failure_still_rejects_it() {
+    for continuation in [false, true] {
+        let mut row = case(CaseKind::NativeState);
+        let mut script = steps(CaseKind::NativeState);
+        if !continuation {
+            row.expected.continuation = None;
+            *script.last_mut().unwrap() = Step::completed(FinishReason::Stop);
+        }
+        let script = Mutex::new(Some(script));
+        run_case(
+            &|_: &str| fixture(script.lock().unwrap().take().unwrap()),
+            &row,
+        )
+        .await
+        .unwrap();
+    }
+    let mut finish = Step::failed(error(ModelErrorCode::ProviderFailure));
+    if let Step::Event(ProviderEvent::Finished { continuation, .. }) = &mut finish {
+        *continuation = Some(NativeContinuation {
+            schema: "handle.v1".into(),
+            payload: vec![4, 5],
+        });
+    }
+    broken(
+        CaseKind::ProviderError,
+        vec![start(), finish],
+        "continuation_on_failure",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn broken_native_state_on_failed_cancelled_and_eof_finishes_fails() {
     broken(
         CaseKind::NativeState,

@@ -122,6 +122,19 @@ allows cleanup confirmation. User cancellation still wins as user cancellation
 when requested durably. All terminal paths/faults disarm the deadline. There is
 no clock in the builder or core.
 
+## Amendment (m4-03)
+
+M4 decision 15 makes continuation optional in the public `NativeState`
+conformance case: native blocks and a completed outcome are required, but a
+response-level continuation is not. Fixtures with continuations retain the
+existing metadata, bounds and no-continuation-on-failure checks. OpenAI's
+stateless adapter uses per-item state without a continuation.
+
+M4 decision 16 replaces the derived `Debug` on `ProviderEvent` and
+`NativeContinuation` with hand-written impls that print opaque payloads as
+`[redacted; N bytes]`; types, fields and other impls are unchanged. Adapter
+steps may make small fixes inside `model/` that change no public type.
+
 ## Evidence
 
 - `context::tests::continuation_*`: branch/prefix, instructions, tools, options,

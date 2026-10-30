@@ -47,7 +47,7 @@ pub enum CaseKind {
     SetupFailure,
     /// Multiple cumulative, nullable usage snapshots.
     Usage,
-    /// Bounded native blocks and continuation on completion.
+    /// Bounded native blocks on completion, with an optional continuation.
     NativeState,
     /// Cancellation while setup is pending.
     CancelSetup,
@@ -380,9 +380,7 @@ fn validate_case(case: &Case) -> Result<(), Failure> {
         SetupFailure => expected.outcome == ProviderOutcome::Failed,
         Usage => expected.usage.len() >= 2 && expected.usage.windows(2).any(|v| v[0] != v[1]),
         NativeState => {
-            !expected.native.is_empty()
-                && expected.continuation.is_some()
-                && expected.outcome == ProviderOutcome::Completed
+            !expected.native.is_empty() && expected.outcome == ProviderOutcome::Completed
         }
         Request => {
             case.request.input.tools.len() >= 2

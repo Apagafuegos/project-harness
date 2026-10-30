@@ -1,0 +1,18 @@
+status: 200
+header: content-type: text/event-stream
+---
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_fixture_malformed","status":"in_progress","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"fc_fixture_bad","type":"function_call","call_id":"call_fixture_bad","name":"read","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":3,"item_id":"fc_fixture_bad","output_index":0,"delta":"{\"path\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_fixture_bad","output_index":0,"delta":"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"fc_fixture_bad","type":"function_call","call_id":"call_fixture_bad","name":"read","arguments":"{\"path\":}"}}
+

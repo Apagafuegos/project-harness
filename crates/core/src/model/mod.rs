@@ -26,6 +26,8 @@ use crate::{
 mod artifacts;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+#[cfg(test)]
+mod redaction_tests;
 pub mod scripted;
 pub use artifacts::{ArtifactReadError, ArtifactSource};
 
@@ -93,12 +95,29 @@ pub enum ReasoningEffort {
 }
 
 /// Complete native continuation payload. Identity and owner are core-owned.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeContinuation {
     /// Provider-defined replay schema.
     pub schema: String,
     /// Opaque sensitive bytes; never rendered as text.
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for NativeContinuation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeContinuation")
+            .field("schema", &self.schema)
+            .field("payload", &Opaque(&self.payload))
+            .finish()
+    }
+}
+
+/// Debug rendering of opaque native bytes: their length only, never content.
+struct Opaque<'a>(&'a [u8]);
+impl std::fmt::Debug for Opaque<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[redacted; {} bytes]", self.0.len())
+    }
 }
 
 /// Caller-owned controls for one stream.
@@ -137,7 +156,7 @@ pub enum ProviderOutcome {
 ///     owner: ModelRef { provider_instance: "other".into(), model: "other".into() },
 /// };
 /// ```
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum ProviderEvent {
     /// The response opened. At most once, before any content.
     Started,
@@ -201,4 +220,72 @@ pub enum ProviderEvent {
         /// Native continuation, permitted only on a completed response.
         continuation: Option<NativeContinuation>,
     },
+}
+
+/// Field-for-field `Debug` that replaces opaque payload bytes with their length.
+/// A derive would print native replay data; decision 16 forbids that.
+impl std::fmt::Debug for ProviderEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Started => f.write_str("Started"),
+            Self::TextDelta { block_index, text } => f
+                .debug_struct("TextDelta")
+                .field("block_index", block_index)
+                .field("text", text)
+                .finish(),
+            Self::ReasoningSummaryDelta { block_index, text } => f
+                .debug_struct("ReasoningSummaryDelta")
+                .field("block_index", block_index)
+                .field("text", text)
+                .finish(),
+            Self::ToolCallStarted {
+                block_index,
+                name,
+                provider_call_id,
+            } => f
+                .debug_struct("ToolCallStarted")
+                .field("block_index", block_index)
+                .field("name", name)
+                .field("provider_call_id", provider_call_id)
+                .finish(),
+            Self::ToolArgumentsDelta {
+                block_index,
+                fragment,
+            } => f
+                .debug_struct("ToolArgumentsDelta")
+                .field("block_index", block_index)
+                .field("fragment", fragment)
+                .finish(),
+            Self::ToolCallReady { block_index } => f
+                .debug_struct("ToolCallReady")
+                .field("block_index", block_index)
+                .finish(),
+            Self::ProviderState {
+                block_index,
+                schema,
+                payload,
+            } => f
+                .debug_struct("ProviderState")
+                .field("block_index", block_index)
+                .field("schema", schema)
+                .field("payload", &Opaque(payload))
+                .finish(),
+            Self::UsageUpdated { usage } => f
+                .debug_struct("UsageUpdated")
+                .field("usage", usage)
+                .finish(),
+            Self::Finished {
+                outcome,
+                finish_reason,
+                error,
+                continuation,
+            } => f
+                .debug_struct("Finished")
+                .field("outcome", outcome)
+                .field("finish_reason", finish_reason)
+                .field("error", error)
+                .field("continuation", continuation)
+                .finish(),
+        }
+    }
 }

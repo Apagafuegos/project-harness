@@ -1,0 +1,18 @@
+status: 200
+header: content-type: text/event-stream
+---
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_fixture_limit","status":"in_progress","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_fixture_limit","type":"message","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_fixture_limit","output_index":0,"content_index":0,"delta":"Hello, I can"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":4,"output_index":0,"item":{"id":"msg_fixture_limit","type":"message","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"Hello, I can"}]}}
+
+event: response.incomplete
+data: {"type":"response.incomplete","sequence_number":5,"response":{"id":"resp_fixture_limit","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":null}}
+

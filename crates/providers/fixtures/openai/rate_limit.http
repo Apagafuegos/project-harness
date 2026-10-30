@@ -1,0 +1,5 @@
+status: 429
+header: retry-after: 2
+header: content-type: application/json
+---
+{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for requests in organization org_fixture."}}

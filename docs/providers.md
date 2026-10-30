@@ -1,9 +1,9 @@
-# Provider transport (implemented M4 step 02)
+# Provider transport and the OpenAI adapter (M4 steps 02–03)
 
 `harness-providers` is the shared HTTP/SSE and credential boundary for adapters.
-It depends on `harness-core`; core does not depend on it. Native OpenAI and
-Anthropic adapters, endpoints, request formats and live checks are **not yet
-implemented**. See [ADR 0016](decisions/0016-provider-transport.md).
+It depends on `harness-core`; core does not depend on it. Anthropic adapter is **not yet implemented**. The OpenAI Responses adapter is
+implemented; see [ADR 0016](decisions/0016-provider-transport.md) and
+[ADR 0017](decisions/0017-openai-adapter.md).
 
 ## Adapter use
 
@@ -46,12 +46,40 @@ The Codex account ID becomes a sensitive `chatgpt-account-id` header. No
 Anthropic consumer subscription credentials are supported: use an API key.
 Never put credentials in `ModelRequest`, events, journals or logs.
 
+## OpenAI Responses adapter
+
+`openai::OpenAiResponses` implements `ModelProvider` over the Responses streaming
+API on two profiles: `Profile::Platform` with `OPENAI_API_KEY`, and
+`Profile::ChatGptCodex` with the read-only Codex CLI login. Construct with
+`platform_from_env()` or `codex_login()`, or `with_transport`/`with_endpoint` for
+a proxy or loopback fixtures.
+
+- Requests are stateless: `store: false`, no `previous_response_id`, and
+  `include: ["reasoning.encrypted_content"]`. Encrypted reasoning returns as
+  owner-scoped `ProviderState` and is replayed only to the same owner. No
+  `NativeContinuation` is ever emitted.
+- `openai::catalog(profile, instance)` supplies sourced limits for the context
+  builder; capabilities for both profiles live in one table. Unknown models are
+  text-plus-tools with no reasoning control.
+- Provider options are namespaced under `openai.*` (`reasoning_summary`,
+  `prompt_cache_key`, `service_tier`). Unknown keys are `invalid_request`;
+  another provider's namespace is `unsupported_capability`.
+- Errors keep ADR 0016's classification plus the provider's own error code, with
+  fixed diagnostics: provider text is never echoed. `ChatGptCodex` adds the
+  `run codex login` hint. There is no automatic retry.
+- `scripts/live-check.sh openai [--auth codex|api-key]` is the opt-in real turn
+  check. It is never part of `check.sh` or CI, and prints no secrets or IDs.
+
+ADR 0017 holds the request mapping, the full event-mapping table, the profile
+differences with their Codex sources, the catalog sources and the live check.
+
 ## Offline tests
 
 `cargo test -p harness-providers --locked` runs only local fixture reads and
-loopback servers, including a crate-private Echo SSE adapter and eleven public
-core conformance cases. No real `~/.codex/auth.json` is opened. Native tool,
-usage, replay and unsupported-option conformance belongs to the real adapters.
+loopback servers. It includes the crate-private Echo SSE adapter with eleven
+public core conformance cases, and the OpenAI adapter's complete 17-case
+conformance manifest on both profiles over hand-written fixtures. No real
+`~/.codex/auth.json` is opened and no test reaches the network.
 The workspace gate is `CARGO_NET_OFFLINE=true ./scripts/check.sh`, after a
 one-time `cargo fetch`, using the pinned Rust 1.99.1 toolchain.
 

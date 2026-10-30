@@ -1,0 +1,33 @@
+status: 200
+header: content-type: text/event-stream
+---
+event: response.created
+data: {"type":"response.created","sequence_number":1,"response":{"id":"resp_fixture_tools","status":"in_progress","output":[],"usage":null}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"fc_fixture_a","type":"function_call","call_id":"call_fixture_a","name":"read","arguments":""}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":3,"output_index":1,"item":{"id":"fc_fixture_b","type":"function_call","call_id":"call_fixture_b","name":"bash","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":4,"item_id":"fc_fixture_a","output_index":0,"delta":"{\"command\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":5,"item_id":"fc_fixture_b","output_index":1,"delta":"{\"command\":"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":6,"item_id":"fc_fixture_a","output_index":0,"delta":"\"echo a\"}"}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":7,"item_id":"fc_fixture_b","output_index":1,"delta":"\"echo b\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":8,"output_index":0,"item":{"id":"fc_fixture_a","type":"function_call","call_id":"call_fixture_a","name":"read","arguments":"{\"command\":\"echo a\"}"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":9,"output_index":1,"item":{"id":"fc_fixture_b","type":"function_call","call_id":"call_fixture_b","name":"bash","arguments":"{\"command\":\"echo b\"}"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":10,"response":{"id":"resp_fixture_tools","status":"completed","output":[],"usage":null}}
+

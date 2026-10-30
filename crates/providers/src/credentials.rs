@@ -41,6 +41,23 @@ impl Credential {
     pub fn expiry(&self) -> Option<SystemTime> {
         self.expiry
     }
+    /// Add adapter-owned headers (never `Authorization`) without reading the secret.
+    ///
+    /// The adapter profile supplies transport headers such as `Accept`, and the
+    /// subscription profile its `originator`; the credential keeps the bearer
+    /// token opaque to the adapter.
+    pub(crate) fn with_extra_headers(mut self, extra: HeaderMap) -> Self {
+        for (name, value) in extra {
+            let Some(name) = name else { continue };
+            if name == AUTHORIZATION {
+                continue;
+            }
+            let mut value = value;
+            value.set_sensitive(true);
+            self.headers.insert(name, value);
+        }
+        self
+    }
     pub(crate) fn request_headers(&self) -> HeaderMap {
         let mut headers = self.headers.clone();
         for value in headers.values_mut() {
