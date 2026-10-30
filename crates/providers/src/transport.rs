@@ -150,6 +150,17 @@ pub(crate) async fn controlled<T>(
     control: &OperationControl,
     future: impl Future<Output = Result<T, TransportError>>,
 ) -> Result<T, TransportError> {
+    // A newly-created sleep for an already-expired deadline may initially be
+    // Pending until the timer driver runs. Do not let ready work win that race.
+    if control.cancel.is_cancelled() {
+        return Err(TransportError::stopped(false));
+    }
+    if control
+        .deadline
+        .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+    {
+        return Err(TransportError::stopped(true));
+    }
     tokio::select! { biased;
         _ = control.cancel.cancelled() => Err(TransportError::stopped(false)),
         _ = async { match control.deadline { Some(d) => tokio::time::sleep_until(d).await, None => std::future::pending().await } } => Err(TransportError::stopped(true)),

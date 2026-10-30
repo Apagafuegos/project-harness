@@ -324,8 +324,12 @@ account-catalog/effort assertions, and probe attribution tests. The fixture
 server registers `tests/support/loopback.rs::SideProbe`, accepts concurrently,
 and admits only its random per-server path plus the test run header. Unrelated
 connections are counted/logged/closed without changing inference observations.
-Five consecutive runs with `HARNESS_TEST_LOOPBACK_PROBE=1` each passed all 40
-provider tests. No test reads the real
+Five consecutive final runs with `HARNESS_TEST_LOOPBACK_PROBE=1` each passed all
+41 provider tests. The initial round-2 CI run (`41068959634`) exposed an existing
+Echo deadline race: creating `sleep_until(now())` can be initially pending while
+an immediately-ready operation wins. The shared transport now checks expired
+deadlines before polling work; `expired_deadline_wins_before_ready_work_is_polled`
+pins this without editing the protected Echo test file. No test reads the real
 `~/.codex/auth.json` or opens a network connection outside loopback.
 
 Out of scope for this step: hosted tools (`web_search`, `file_search`, image

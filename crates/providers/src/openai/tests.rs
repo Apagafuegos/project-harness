@@ -1323,6 +1323,25 @@ fn account_catalog_and_portable_reasoning_levels_are_sourced() {
     }
 }
 
+#[tokio::test]
+async fn expired_deadline_wins_before_ready_work_is_polled() {
+    use harness_core::model::OperationControl;
+    for _ in 0..64 {
+        let polled = AtomicBool::new(false);
+        let control = OperationControl {
+            deadline: Some(tokio::time::Instant::now()),
+            ..Default::default()
+        };
+        let result = crate::transport::controlled(&control, async {
+            polled.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(result.expect_err("expired operation ran").is_stopped());
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+}
+
 // --------------------------------------------------------- test-only helpers
 
 /// Helpers used by the tests above; kept here so the module stays self-contained.
