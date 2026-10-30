@@ -1,0 +1,5 @@
+# Hand-written from the error reference: 401 authentication_error.
+status: 401
+header: content-type: application/json
+---
+{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}

@@ -1,0 +1,6 @@
+# Hand-written from the error reference: 429 rate_limit_error with Retry-After.
+status: 429
+header: content-type: application/json
+header: retry-after: 2
+---
+{"type":"error","error":{"type":"rate_limit_error","message":"Number of requests exceeded"}}

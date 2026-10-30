@@ -1,9 +1,11 @@
-# Provider transport and the OpenAI adapter (M4 steps 02–03)
+# Provider transport, OpenAI and Anthropic adapters (M4 steps 02–04)
 
 `harness-providers` is the shared HTTP/SSE and credential boundary for adapters.
-It depends on `harness-core`; core does not depend on it. Anthropic adapter is **not yet implemented**. The OpenAI Responses adapter is
-implemented; see [ADR 0016](decisions/0016-provider-transport.md) and
-[ADR 0017](decisions/0017-openai-adapter.md).
+It depends on `harness-core`; core does not depend on it. Both native adapters
+are implemented: the OpenAI Responses adapter
+([ADR 0016](decisions/0016-provider-transport.md),
+[ADR 0017](decisions/0017-openai-adapter.md)) and the Anthropic Messages adapter
+([ADR 0018](decisions/0018-anthropic-adapter.md)).
 
 ## Adapter use
 
@@ -45,6 +47,13 @@ owns refresh. JWT exp decoding reports expiry and is not signature validation.
 The Codex account ID becomes a sensitive `chatgpt-account-id` header. No
 Anthropic consumer subscription credentials are supported: use an API key.
 Never put credentials in `ModelRequest`, events, journals or logs.
+
+`CredentialScheme` selects the authentication header. `Credential::bearer` and
+`EnvApiKey::new("OPENAI_API_KEY")` keep `Authorization: Bearer`;
+`Credential::api_key` and `EnvApiKey::new("ANTHROPIC_API_KEY")` send
+`x-api-key`. Both schemes keep the ADR 0016 guarantees: `[redacted]`
+`Debug`/`Display`, sensitive header values, reserved names refused as extra
+headers, and no secret in errors, events or logs. OpenAI behavior is unchanged.
 
 ## OpenAI Responses adapter
 
@@ -90,13 +99,60 @@ a proxy or loopback fixtures.
 ADR 0017 holds the request mapping, the full event-mapping table, the profile
 differences with their Codex sources, the catalog sources and the live check.
 
+## Anthropic Messages adapter
+
+`anthropic::AnthropicMessages` implements `ModelProvider` over the Messages
+streaming API at `https://api.anthropic.com/v1/messages`. Construct with
+`from_env()` (`ANTHROPIC_API_KEY`, sent as `x-api-key`), or
+`with_transport`/`with_endpoint` for a proxy or loopback fixtures. Every request
+carries `anthropic-version: 2026-10-21`; no beta header is needed for anything
+this mapping uses.
+
+- The API is stateless, so no `NativeContinuation` is ever emitted. Signed
+  `thinking` blocks (with `thinking` and `signature`) and opaque
+  `redacted_thinking` blocks (with `data`) return as owner-scoped
+  `ProviderState` (`anthropic.messages.thinking.v1`, ≤256 KiB) and are replayed
+  verbatim, in order, only to the same owner. Raw thinking text is never shown:
+  `thinking_delta` is retained for the signed block and counted as ignored.
+- Messages strictly alternate: adjacent same-role items merge into one turn, as
+  the API itself does. Instructions become the single `system` string (join
+  order preserved, levels collapsed). Tool results carry `is_error` and the same
+  deterministic status/provenance text as the OpenAI adapter.
+- A configured `ReasoningEffort` becomes `thinking: {"type":"adaptive"}` plus
+  `output_config.effort`; `enabled`+`budget_tokens` and `disabled` are rejected
+  by the current family, so the adapter sends neither. No effort means no
+  thinking control and the model's default.
+- Provider options are namespaced under `anthropic.*`
+  (`service_tier`: `auto`/`standard_only`). Unknown keys are `invalid_request`;
+  another provider's namespace is `unsupported_capability`.
+- HTTP errors are refined from the error body (`authentication_error`,
+  `permission_error`, `invalid_request_error`, `request_too_large`,
+  `rate_limit_error`, `overloaded_error`, `api_error`, `not_found_error`) with
+  fixed diagnostics and `retry-after`; local transport errors keep their code.
+  `pause_turn` and `model_context_window_exceeded` fail rather than claim a
+  completed answer. No automatic retry.
+- `anthropic::catalog(instance)` supplies the sourced 1M-context / 128K-output
+  rows for `claude-haiku-5-5`, `claude-sonnet-5-5` and `claude-opus-5-5`
+  (models overview, read 2026-10-30). Unknown models are text-plus-tools.
+- `scripts/live-check.sh anthropic` is the opt-in real check (text, usage, tool
+  round trip, invalid model, cancellation) against
+  `HARNESS_LIVE_ANTHROPIC_MODEL` (default `claude-haiku-5-5`). With no
+  `ANTHROPIC_API_KEY` it prints
+  `live anthropic: skipped (no ANTHROPIC_API_KEY)` and exits **77**
+  (skipped), distinct from 0 (pass) and 1 (fail).
+
+ADR 0018 holds the request mapping, the complete event table, the thinking and
+signature replay rules, the error refinements, the credential scheme, the
+catalog sources and the live check.
+
 ## Offline tests
 
 `cargo test -p harness-providers --locked` runs only local fixture reads and
 loopback servers. It includes the crate-private Echo SSE adapter with eleven
-public core conformance cases, and the OpenAI adapter's complete 17-case
-conformance manifest on both profiles over hand-written fixtures. No real
-`~/.codex/auth.json` is opened and no test reaches the network.
+public core conformance cases, the OpenAI adapter's complete 17-case conformance
+manifest on both profiles, and the Anthropic adapter's complete 17-case manifest
+over hand-written fixtures. No real `~/.codex/auth.json` is opened, no Anthropic
+credential is read, and no test reaches the network.
 The workspace gate is `CARGO_NET_OFFLINE=true ./scripts/check.sh`, after a
 one-time `cargo fetch`, using the pinned Rust 1.99.1 toolchain.
 

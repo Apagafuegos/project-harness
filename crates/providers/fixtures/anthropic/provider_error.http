@@ -1,0 +1,6 @@
+# Hand-written from the error reference: 529 overloaded_error with Retry-After.
+status: 529
+header: content-type: application/json
+header: retry-after-ms: 250
+---
+{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}

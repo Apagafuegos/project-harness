@@ -11,10 +11,21 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// A short-lived bearer secret and optional adapter headers and expiry.
+/// Authentication header selected by a credential source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CredentialScheme {
+    /// `Authorization: Bearer <secret>` (the existing default).
+    #[default]
+    Bearer,
+    /// `x-api-key: <secret>` (Anthropic API keys).
+    ApiKeyHeader,
+}
+
+/// A short-lived secret and optional adapter headers and expiry.
 #[derive(Clone)]
 pub struct Credential {
     secret: String,
+    scheme: CredentialScheme,
     headers: HeaderMap,
     expiry: Option<SystemTime>,
 }
@@ -25,14 +36,31 @@ impl Credential {
         headers: HeaderMap,
         expiry: Option<SystemTime>,
     ) -> Result<Self, ModelError> {
-        if secret.is_empty() || HeaderValue::from_str(&format!("Bearer {secret}")).is_err() {
+        Self::new(secret, CredentialScheme::Bearer, headers, expiry)
+    }
+    /// Construct an API-key-header credential, without exposing the key.
+    pub fn api_key(
+        secret: String,
+        headers: HeaderMap,
+        expiry: Option<SystemTime>,
+    ) -> Result<Self, ModelError> {
+        Self::new(secret, CredentialScheme::ApiKeyHeader, headers, expiry)
+    }
+    fn new(
+        secret: String,
+        scheme: CredentialScheme,
+        headers: HeaderMap,
+        expiry: Option<SystemTime>,
+    ) -> Result<Self, ModelError> {
+        if secret.is_empty() || HeaderValue::from_str(&secret).is_err() {
             return Err(auth("invalid credential"));
         }
-        if headers.contains_key(AUTHORIZATION) {
+        if headers.contains_key(AUTHORIZATION) || headers.contains_key("x-api-key") {
             return Err(auth("reserved credential header"));
         }
         Ok(Self {
             secret,
+            scheme,
             headers,
             expiry,
         })
@@ -49,7 +77,7 @@ impl Credential {
     pub(crate) fn with_extra_headers(mut self, extra: HeaderMap) -> Self {
         for (name, value) in extra {
             let Some(name) = name else { continue };
-            if name == AUTHORIZATION {
+            if name == AUTHORIZATION || name == "x-api-key" {
                 continue;
             }
             let mut value = value;
@@ -64,9 +92,16 @@ impl Credential {
             value.set_sensitive(true);
         }
         // Validated at construction; the secret is never mutable.
-        if let Ok(mut value) = HeaderValue::from_str(&format!("Bearer {}", self.secret)) {
+        let (name, text) = match self.scheme {
+            CredentialScheme::Bearer => (AUTHORIZATION, format!("Bearer {}", self.secret)),
+            CredentialScheme::ApiKeyHeader => (
+                reqwest::header::HeaderName::from_static("x-api-key"),
+                self.secret.clone(),
+            ),
+        };
+        if let Ok(mut value) = HeaderValue::from_str(&text) {
             value.set_sensitive(true);
-            headers.insert(AUTHORIZATION, value);
+            headers.insert(name, value);
         }
         headers
     }
@@ -106,7 +141,16 @@ impl EnvApiKey {
             .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| auth(&format!("missing or empty credential variable {variable}")))?;
         Ok(Self {
-            credential: Credential::bearer(value, HeaderMap::new(), None)?,
+            credential: Credential::new(
+                value,
+                if variable == "ANTHROPIC_API_KEY" {
+                    CredentialScheme::ApiKeyHeader
+                } else {
+                    CredentialScheme::Bearer
+                },
+                HeaderMap::new(),
+                None,
+            )?,
         })
     }
 }
