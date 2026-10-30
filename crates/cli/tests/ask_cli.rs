@@ -23,7 +23,9 @@ fn scan_no_secret(path: &Path, secret: &[u8]) {
 fn sentinel_credential_never_printed_on_real_auth_failure() {
     let sentinel = "SENTINEL-CREDENTIAL-ASK";
     // The subscription login is absent in this temporary HOME, so the adapter's
-    // own credential read fails. Nothing may echo the API key in the environment.
+    // own credential read fails. The API-key case uses a forbidden header byte,
+    // so real adapter construction fails locally, never by contacting OpenAI.
+    // A valid-looking sentinel would make this an accidental live test.
     for (auth, expected) in [
         ("codex", "run `codex login`"),
         ("api-key", "authentication"),
@@ -37,7 +39,8 @@ fn sentinel_credential_never_printed_on_real_auth_failure() {
             .arg(temp.path().join("state"))
             .args(["--auth", auth, "hello"])
             .env("HOME", temp.path())
-            .env("OPENAI_API_KEY", sentinel)
+            .env("OPENAI_API_KEY", format!("{sentinel}\n"))
+            .env_remove("ANTHROPIC_API_KEY")
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
