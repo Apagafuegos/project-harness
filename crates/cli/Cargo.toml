@@ -9,6 +9,8 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 harness-core = { path = "../core" }
+harness-providers = { path = "../providers" }
+tokio = { workspace = true, features = ["signal"] }
 serde_json.workspace = true
 rustix.workspace = true
 

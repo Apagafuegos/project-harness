@@ -12,7 +12,9 @@ read-only restart closure and advisory file-image recovery hints.
 [Decision 0010](decisions/0010-tool-pipeline.md) records that boundary. The
 trusted filesystem executor is implemented separately in
 [step 5](decisions/0011-trusted-file-tools.md). Step 7b assembles real file and
-sandbox backends from session policy through the handle; CLI chat remains planned.
+sandbox backends from session policy through the handle. Milestone 4 step 08 adds
+the headless `harness ask` client (decision 0020); the Ratatui client remains
+planned.
 Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
@@ -849,8 +851,11 @@ events that follow.
   are implemented in m4-06.
 - Automatic reconciliation of uncertain side effects. Advisory file-image
   hints are implemented; resolution remains the user's statement.
-- Recovery UI beyond the handle, events and CLI (Milestone 5), and retrying a
-  turn after recovery: the user starts a new turn.
+- A terminal client beyond `harness ask` (Milestone 5): the headless command
+  streams one real turn with terminal approvals, and
+  [decision 0020](decisions/0020-headless-ask.md) records its interface. Recovery
+  UI beyond the handle, events and CLI, and retrying a turn after recovery: the
+  user starts a new turn.
 
 ## Tests
 

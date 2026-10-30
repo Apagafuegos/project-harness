@@ -165,6 +165,64 @@ and diffs the output.
 cargo run --locked -p harness-core --example scripted_session
 ```
 
+## Headless `harness ask`
+
+Implemented in M4 step 08 ([ADR 0020](decisions/0020-headless-ask.md)):
+
+```sh
+cargo run --locked -p harness -- ask --workspace "$PWD" "Explain this project"
+printf 'Continue the explanation' | harness ask --workspace "$PWD" --session ID -
+```
+
+The default is OpenAI on your ChatGPT subscription (`--provider openai
+--auth codex`), using the read-only Codex CLI login. On authentication failure,
+run `codex login`. `--auth api-key` reads `OPENAI_API_KEY` instead. Model defaults
+are `gpt-6.1-sol` (Codex) and `gpt-5.5` (platform); `--model MODEL` overrides
+these, with sourced catalog limits only (unknown budgets fail explicitly).
+
+Only assistant text goes to stdout, flushed as it arrives, with no added newline.
+Status, bounded tool proposals/results, displayable reasoning summaries, final
+per-response usage and errors go to stderr. Raw reasoning/encrypted state is never
+displayed. Reasoning is dimmed only when stderr is a terminal.
+
+Approvals use `/dev/tty`, not stdin: a literal `y` approves; everything else,
+EOF or terminal failure denies. Without a controlling terminal **every call is
+denied**, including with `--approve-read-only`. With a terminal that flag approves
+only registry-declared read-only filesystem tools. Writes, edits and shell calls
+always require a human `y`. No remembered grants are written. Unavailable shell
+is reported once; file tools remain usable, with no unrestricted fallback.
+
+A new session ID is printed on stderr. Continue with `--session ID` and the same
+workspace, data root, auth profile and summary policy. The saved model is used
+unless an explicit `--model` matches it; this command does not switch models.
+Imported policies with remembered grants or different approval defaults are refused.
+Uncertain side effects require explicit resolution through the runtime API; this
+minimal client never guesses, replays tools or automatically repairs a torn tail.
+
+`--data-root DIR` must be absolute and outside the workspace, following the
+existing inspection commands' private storage rules. Its default is
+`$XDG_DATA_HOME/harness`, or `$HOME/.local/share/harness` when XDG_DATA_HOME is
+unset; parents are created as needed, and unsafe storage paths are still refused.
+`--summary-model MODEL` explicitly enables automatic compaction with an independent
+model. Without it automatic compaction is off, and overflow is
+`context_budget_exceeded`. Repeat the same summary flag when continuing a session.
+The process drains/shuts down after the turn, cancelling leftover idle summary
+work; pre-start overflow compaction finishes before a turn can open.
+
+First Ctrl-C sends runtime Cancel and waits for the durable cancelled finish;
+second Ctrl-C exits immediately, leaving normal startup recovery to the next open.
+Runtime timeout defaults apply: 300-second provider idle timeout, two-second cancel
+grace, and no absolute inference deadline (the configured default is `None`).
+Exit codes: **0** completed; **1** turn/provider/budget/infrastructure failure;
+**2** usage/configuration/storage-open refusal; **3** authentication;
+**130** cancelled. Errors include stable codes, and Codex authentication prints
+`run \`codex login\``.
+
+Offline tests inject `ScriptedProvider` and fake I/O into the client module.
+`scripts/live-check.sh ask` is an explicit, quota-spending Codex smoke in a temporary
+workspace; it checks exit 0 and stdout containing `pong`, printing only a sanitized
+summary. It is never part of `check.sh` or CI.
+
 ## Journal inspection and repair
 
 `harness journal inspect` and `harness journal repair` are described in

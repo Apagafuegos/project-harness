@@ -1,5 +1,6 @@
 //! Command-line entry point for the future Ratatui client.
 
+mod ask_cli;
 mod doctor;
 
 use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
@@ -23,12 +24,13 @@ fn command() -> Command {
         .long_about(
             "A small, inspectable, context-first agent harness.\n\n\
              Session storage, the runtime core and the context builder are \
-             implemented in harness-core. Model providers, tools and the \
-             terminal UI are not implemented yet. This CLI provides read-only \
+             implemented in harness-core. This CLI provides headless OpenAI \
+             turns with durable sessions and terminal approvals, read-only \
              context inspection, journal inspection, explicit torn-tail \
-             repair and a host capability probe.\n\n\
+             repair and a host capability probe. The terminal UI is planned.\n\n\
              Start with README.md and docs/README.md in the repository.",
         )
+        .subcommand(ask_cli::command())
         .subcommand(
             Command::new("context")
                 .about("Print the context report of a stored session as JSON")
@@ -203,6 +205,7 @@ fn main() -> ExitCode {
     let mut command = command();
     let matches = command.get_matches_mut();
     match matches.subcommand() {
+        Some(("ask", arguments)) => ask_cli::run(arguments),
         Some(("context", arguments)) => print("harness context", context(arguments)),
         Some(("doctor", arguments)) => print("harness doctor", run_doctor(arguments)),
         Some(("journal", journal)) => match journal.subcommand() {

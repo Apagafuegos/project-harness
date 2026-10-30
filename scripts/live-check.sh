@@ -3,6 +3,7 @@
 #
 #   scripts/live-check.sh openai [--auth codex|api-key]
 #   scripts/live-check.sh anthropic
+#   scripts/live-check.sh ask
 #
 # For OpenAI, default auth is `codex`, the user's ChatGPT subscription through
 # the read-only Codex CLI login. `--auth api-key` uses OPENAI_API_KEY instead.
@@ -18,9 +19,41 @@
 set -euo pipefail
 
 provider="${1:-}"
+if [ "$provider" = "ask" ]; then
+  [ "$#" -eq 1 ] || {
+    echo "usage: scripts/live-check.sh ask" >&2
+    exit 2
+  }
+  cd "$(dirname "$0")/.."
+  scratch="$(mktemp -d)"
+  trap 'rm -rf "$scratch"' EXIT
+  mkdir "$scratch/workspace"
+  cargo build --locked --quiet -p harness
+  set +e
+  "${CARGO_TARGET_DIR:-target}/debug/harness" ask --workspace "$scratch/workspace" --data-root "$scratch/state" \
+    --auth codex "Reply with the single word: pong" >"$scratch/stdout" 2>"$scratch/stderr"
+  code=$?
+  set -e
+  # Never echo raw diagnostics, session IDs, credentials or artifacts. The only
+  # failure evidence is the client's stable turn code, which is not free text.
+  echo "live ask: auth=codex"
+  echo "exit: $code"
+  if [ "$code" -eq 0 ] && grep -q 'pong' "$scratch/stdout"; then
+    echo "stdout contains pong: pass"
+    echo "summary: pass"
+  else
+    stable="$(grep -m1 '^turn: ' "$scratch/stderr" || true)"
+    [ -z "$stable" ] || echo "stable code: ${stable#turn: }"
+    echo "stdout contains pong: fail"
+    echo "summary: fail"
+    exit 1
+  fi
+  exit 0
+fi
 if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ]; then
   echo "usage: scripts/live-check.sh openai [--auth codex|api-key]" >&2
   echo "       scripts/live-check.sh anthropic" >&2
+  echo "       scripts/live-check.sh ask" >&2
   exit 2
 fi
 shift
