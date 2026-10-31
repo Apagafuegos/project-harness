@@ -59,6 +59,72 @@ cargo test -p harness-core --locked
 cargo doc --workspace --no-deps --locked --open
 ```
 
+## Using the TUI
+
+Run `harness` in the workspace directory (or `cargo run -p harness --` from
+this repository). Plain `harness` opens terminal chat; there is no `tui`
+subcommand. Both stdin and stdout must be terminals. For pipes and scripts use
+`harness ask --workspace DIR PROMPT` instead.
+
+```sh
+harness --data-root /absolute/private/state
+harness --provider openai --auth codex --model gpt-6.1-sol
+harness --provider anthropic --model claude-sonnet-5-5
+harness sessions
+harness --session SESSION_ID
+```
+
+The workspace is the canonical current directory and must be authorized and
+outside the private storage root. The six options `--data-root`, `--provider`,
+`--auth`, `--model`, `--summary-model`, and `--session` have ask's defaults.
+Without `--data-root`, storage is `$XDG_DATA_HOME/harness`, otherwise
+`$HOME/.local/share/harness`. New sessions record the built-in instructions and
+root `AGENTS.md`; edits affect new sessions only. Continuations keep their saved
+instructions and model unless explicitly overridden, and enforce the shared
+policy/credential checks. An explicit switch uses the loss-rejecting policy;
+refusal is visible in the banner and retains the saved model. Repeat the saved
+`--summary-model` choice when continuing a session that enabled compaction.
+
+- Enter sends; Shift+Enter or Alt+Enter inserts a newline. Bracketed paste is
+  one prompt edit, never a series of commands.
+- Esc cancels the active turn. Ctrl-C cancels; a second Ctrl-C during that turn
+  quits only after its durable finish. While idle, Ctrl-C asks for confirmation.
+- Ctrl-D with an empty prompt quits, cancelling any active turn durably. With a
+  nonempty prompt it does nothing. In a quit confirmation, Enter/y confirms;
+  n/Esc returns to editing.
+- Approval captures the keyboard: `a` allows once, `d` denies, `r` allows and
+  remembers, and Esc dismisses **by denying**. There is no automatic approval.
+  Remembered mutation grants follow the existing continuation policy checks;
+  a session with changed allowances may be refused on reopen.
+- On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
+  selects a resolution, and Enter submits the user's statement. Observed
+  success/failure needs text. Nothing reruns the uncertain operation.
+- PageUp/PageDown scroll; Ctrl-Up/Down scroll one line; Ctrl-R toggles expanded
+  reasoning summaries. Resize relays out immediately. The status line shows
+  phase, model, usage and the catalog's sourced context limit.
+
+SIGTERM/SIGHUP restore the main screen immediately, then perform durable
+shutdown. Panic restoration runs before the panic diagnostic. Faults remain
+visible and Ctrl-D can leave cleanly. A torn journal still requires explicit
+`harness journal inspect` / `repair`; the TUI does not silently repair it.
+
+### TUI verification
+
+`cargo test -p harness --test tui_runtime` exercises the injectable loop with
+TestBackend, scripted input/provider streams, and real storage. The separate
+`tui_recovery` target kills a child after a durable write intent, then resolves
+it through the running app without replay. The separate `tui_pty` target tests
+non-TTY refusal; enabling the default-off `test-provider` feature also runs the
+real binary under its own PTY for quit, panic and SIGTERM, checking termios and
+restoration sequences. `check.sh` runs both feature configurations. The fixture
+environment hooks are compiled only with that feature **and debug assertions**;
+they cannot activate in a release binary. `portable-pty` is test/example-only.
+
+`scripts/live-check.sh tui` is a separate, opt-in Codex subscription smoke. It
+starts the real binary under a PTY, types the fixed pong request, observes the
+completed answer, sends Ctrl-D, and verifies exit zero and terminal restoration.
+It spends quota once, never prints credentials, and does not retry rate limits.
+
 ## Runtime tests
 
 `crates/core/src/runtime/tests` drives the [runtime core](runtime.md) with a

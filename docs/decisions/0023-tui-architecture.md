@@ -1,7 +1,6 @@
 # 0023: TUI architecture — the pure model and the `Action` boundary
 
-Status: Part 1 implemented for Milestone 5 step 02. The terminal lifecycle and
-the event loop follow in step 03, which extends this record.
+Status: Parts 1 and 2 implemented for Milestone 5 steps 02 and 03.
 
 Date: 2026-10-31
 
@@ -215,9 +214,102 @@ the execution intent and its result, which an in-process test cannot produce
 without an engine change. The snapshot, call identity and turn are real; only
 the waiting state is attached. The modal logic depends only on that view.
 
-Part 2 (m5-03) will add the terminal guard, raw mode and alternate screen,
-restoration on panic and signals, the multiplexed event loop, resize,
-the read-only auto-approve toggle and the real quit-cancels-durably path. The
-projection, key map and `Action` boundary stay the extension point; a later
-catalog-aware shell can refresh model limits after a switch without changing
-the model.
+## Part 2: terminal lifecycle and asynchronous shell (m5-03)
+
+Plain `harness` is the interactive entry point, with the canonical cwd as its
+workspace. It takes the six shared provider/session options and assembles the
+session only through `wiring::open_session`; `ask` remains unchanged. There is
+no TUI subcommand or read-only auto-approval toggle. The earlier Part 1 closing
+paragraph's planned toggle was not an implemented feature; the settled M5
+approval decision and step-03 brief explicitly exclude it.
+
+`TerminalGuard` is the one terminal owner. It refuses nonterminal stdin **or**
+stdout before mutation, installs a once-only panic hook, then enables raw mode,
+the alternate screen and bracketed paste. A guard already exists during setup,
+so `?` cleans up partial setup as well as later terminal errors. Restoration
+first disables raw mode, then disables paste, leaves the alternate screen,
+shows the cursor and flushes. An atomic active flag makes repeated restoration
+harmless. The panic hook restores before invoking the previous hook, preserving
+panic diagnostics on the main screen; it does not attempt to replace hooks
+while unwinding. No process-exit path is used inside the TUI.
+
+The process runs one current-thread Tokio runtime. Storage and tool execution
+already use their engine-owned threads; terminal drawing and input reduction
+are short synchronous work. Adding another executor thread would provide no
+new ownership boundary. The shell's one `select!` polls crossterm `EventStream`,
+the subscription, a `FuturesUnordered` of command replies, Unix signals and a
+16 ms render tick. `EventStream` is never mixed with blocking `event::read` or
+`poll`. crossterm's `event-stream` and `bracketed-paste` features are enabled;
+workspace `futures-util` and `async-stream` are reused, not a new runtime or
+transport. Ratatui 0.30's backend error is generic (TestBackend is Infallible,
+CrosstermBackend uses io::Error), so the loop classifies backend errors instead
+of requiring every backend to use io::Error.
+
+`drive` injects a Ratatui terminal, event/subscription/signal streams and a typed
+`Commands` endpoint. Each command's owned future is polled in the select, never
+awaited inline. Accepted replies clear the error banner; rejected replies show
+bounded classifications without provider payloads. Initial input waits for the
+first reset, avoiding lost keystrokes before a view exists. Every subscription
+item goes to App. Resets replace rather than append transcript state. Dirty
+frames draw on ticks; clean ticks do not draw. Resize explicitly resizes and
+draws immediately. Paste calls `App::on_paste` once, neutralizes unsafe control
+characters, and cannot accept an approval or send a turn. The merged model
+catalog is supplied to App for current-model budget lookup, including after a
+switch. A continuation's explicit switch waits for recovery to reach idle,
+ignores identical models, and runs through the same nonblocking command path.
+Refusals keep the saved model and show a banner; no optional state is omitted.
+
+On quit, keys stop submitting new work. Pending starts are drained, and a start
+that wins the race is cancelled. `Cancel` acknowledgement is **not** treated as
+a turn finish: the loop waits for the subscription's durable closure (or the
+fault/resolution boundary), then the caller always invokes `shutdown`, including
+on loop errors. Shutdown drains tool cleanup and storage before returning.
+The provider cancellation grace belongs to the engine; the UI adds no silent
+retry or independent cancellation timeout. SIGINT is a Ctrl-C action. SIGTERM
+and SIGHUP restore immediately and stop drawing, then follow durable quit and
+shutdown. Signals are installed before storage/terminal setup so setup-time
+signals are retained. The guard can restore again on drop safely.
+
+### Offline PTY and crash seams
+
+`test-provider` is off by default. Only `all(feature = "test-provider",
+debug_assertions)` compiles `HARNESS_TUI_TEST_PROVIDER` (scripted pong or a
+stalled stream) and `HARNESS_TUI_TEST_PANIC`. Release binaries ignore these
+variables even if someone explicitly enables the feature. No network or
+credentials are needed for ordinary tests. `scripts/check.sh` runs the ordinary
+workspace tests and separately the feature-enabled PTY target.
+
+`portable-pty` 0.9 is a dev-dependency, shared with the opt-in live example.
+It encapsulates openpty, controlling-terminal setup, safe child spawning and
+termios queries; this avoids any unsafe code or shell/Python PTY toolchain in
+the repository. The real-binary tests are in their own integration target so
+spawn cannot overlap another target's journal-reopen assertions. They compare
+complete termios before/after and check enter/leave-alternate, enable/disable-
+paste and show-cursor sequences. The panic assertion additionally requires
+restoration **before** the panic message (drop-only cleanup is insufficient).
+SIGTERM is sent during a stalled inference, and journal reopen must find a
+cancelled turn. Non-TTY coverage includes genuine terminal stdin with piped
+stdout and verifies unchanged termios, exit 2 and no escape sequences.
+
+`tui_runtime` uses ScriptedProvider, real storage, scripted event streams and
+TestBackend for streaming/paste, approvals (allow/remember/deny/dismiss), Esc,
+double Ctrl-C durable quit, Ctrl-D, slow-command ticks, rejection banners,
+resize, faulted resets and lag reset deduplication. `tui_recovery` follows the
+M3 current-executable child pattern: a test executor holds after the durable
+write intent, the parent SIGKILLs the child, then the loop resolves the reopened
+uncertainty and starts another turn. No handle drop is called a crash and no
+uncertain write is replayed. The test executor is fixture-only, never an
+alternate production host assembly.
+
+`scripts/live-check.sh tui` builds the ordinary binary and drives it through
+the same PTY verifier with a real Codex subscription, the fixed pong prompt and
+Ctrl-D. It verifies answer, exit and restoration, prints only sanitized evidence,
+and never retries rate limits. It is absent from check.sh and CI.
+
+### Small App amendments
+
+The model adds catalog injection/current-model budget lookup, one atomic paste
+method, a generic fault banner for faulted resets, and the documented Enter key
+in quit confirmation. State reduction, approvals, uncertainty and transcript
+projection remain pure. No engine/provider code, journal format, transport or
+workspace crate is added.

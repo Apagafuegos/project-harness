@@ -1,5 +1,5 @@
-//! A pure terminal-UI model: state, keys, actions and rendering, with no
-//! terminal, no Tokio and no I/O.
+//! A pure terminal-UI model: state, keys, actions and rendering.
+//! The separate [`runtime`] shell owns terminal I/O and Tokio; [`App`] does not.
 //!
 //! The shell moves [`SubscriptionItem`]s and [`KeyEvent`]s in and [`Action`]s
 //! out. [`App::render`] draws into a Ratatui [`Frame`] without touching a
@@ -11,6 +11,7 @@
 //! See `docs/decisions/0023-tui-model.md`.
 
 mod render;
+pub mod runtime;
 mod transcript;
 
 use std::path::PathBuf;
@@ -122,6 +123,7 @@ impl ResolutionMode {
 /// The pure client model. One instance owns one session's screen.
 pub struct App {
     info: SessionInfo,
+    catalog: harness_core::context::ModelCatalog,
     view: Option<ClientView>,
     transcript: Vec<Line<'static>>,
     notices: Vec<Notice>,
@@ -148,6 +150,7 @@ impl App {
     pub fn new(info: SessionInfo) -> Self {
         Self {
             info,
+            catalog: Default::default(),
             view: None,
             transcript: Vec::new(),
             notices: Vec::new(),
@@ -160,6 +163,28 @@ impl App {
             interrupt_armed: false,
             reasoning: false,
             context: None,
+        }
+    }
+
+    /// Supply the merged, sourced catalog for the current and switched models.
+    pub fn set_catalog(&mut self, catalog: harness_core::context::ModelCatalog) {
+        self.catalog = catalog;
+    }
+
+    /// Insert bracketed paste atomically; modal input never becomes a command.
+    pub fn on_paste(&mut self, text: &str) {
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+            .collect();
+        match &mut self.modal {
+            Modal::None => {
+                let at = self.byte_index(self.cursor);
+                self.prompt.insert_str(at, &text);
+                self.cursor += text.chars().count();
+            }
+            Modal::Uncertain { input, .. } => input.push_str(&text),
+            _ => {}
         }
     }
 
@@ -190,6 +215,9 @@ impl App {
     pub fn on_subscription(&mut self, item: SubscriptionItem) {
         match item {
             SubscriptionItem::Reset(client) => {
+                if client.view().phase == Phase::Faulted {
+                    self.set_error("runtime fault");
+                }
                 self.view = Some(client);
                 self.notices.clear();
                 self.context = None;
@@ -534,7 +562,7 @@ impl App {
     fn confirm_quit_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('y') if !control => {
+            KeyCode::Enter | KeyCode::Char('y') if !control => {
                 self.modal = Modal::None;
                 vec![Action::Quit {
                     cancel: self.active_turn(),

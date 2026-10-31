@@ -6,6 +6,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Debug-only offline PTY fixtures; inert in release builds.
+test-provider = []
+
 [dependencies]
 clap.workspace = true
 harness-core = { path = "../core" }
@@ -14,11 +18,14 @@ tokio = { workspace = true, features = ["signal"] }
 serde_json.workspace = true
 rustix.workspace = true
 ratatui.workspace = true
-crossterm.workspace = true
+crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
+futures-util.workspace = true
+async-stream.workspace = true
 pulldown-cmark.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+portable-pty = "0.9"
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@
 
 mod ask_cli;
 mod doctor;
+mod tui_cli;
 
 use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
 
@@ -27,9 +28,11 @@ fn command() -> Command {
              implemented in harness-core. This CLI provides headless OpenAI \
              turns with durable sessions and terminal approvals, read-only \
              context inspection, journal inspection, explicit torn-tail \
-             repair and a host capability probe. The terminal UI is planned.\n\n\
+             repair and a host capability probe. With no subcommand, opens the \
+             terminal chat in the current directory. Use harness ask for pipes.\n\n\
              Start with README.md and docs/README.md in the repository.",
         )
+        .args(tui_cli::args())
         .subcommand(ask_cli::command())
         .subcommand(Command::new("sessions").about("List durable sessions as JSON without changing them")
             .arg(Arg::new("data-root").long("data-root").value_name("DIR").value_parser(value_parser!(PathBuf)).help("Private storage [default: $XDG_DATA_HOME/harness or ~/.local/share/harness]")))
@@ -216,16 +219,7 @@ fn main() -> ExitCode {
             Some(("repair", arguments)) => print("harness journal repair", repair(arguments)),
             _ => unreachable!("clap requires a journal subcommand"),
         },
-        _ => match command.print_long_help() {
-            Ok(()) => {
-                println!();
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("harness: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        _ => tui_cli::run(&matches),
     }
 }
 

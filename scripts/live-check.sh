@@ -28,6 +28,14 @@
 set -euo pipefail
 
 provider="${1:-}"
+if [ "$provider" = "tui" ]; then
+  [ "$#" -eq 1 ] || { echo "usage: scripts/live-check.sh tui" >&2; exit 2; }
+  cd "$(dirname "$0")/.."
+  cargo build --locked --quiet -p harness --bin harness
+  bin="${CARGO_TARGET_DIR:-target}/debug/harness"
+  case "$bin" in /*) ;; *) bin="$(pwd)/$bin" ;; esac
+  exec cargo run --locked --quiet -p harness --example tui_smoke -- "$bin"
+fi
 if [ "$provider" = "switch" ]; then
   shift
   auth="${HARNESS_LIVE_SWITCH_AUTH:-codex}"
@@ -92,6 +100,7 @@ if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ]; then
   echo "usage: scripts/live-check.sh openai [--auth codex|api-key]" >&2
   echo "       scripts/live-check.sh anthropic" >&2
   echo "       scripts/live-check.sh ask" >&2
+  echo "       scripts/live-check.sh tui" >&2
   echo "       scripts/live-check.sh switch [--auth codex|api-key]" >&2
   exit 2
 fi

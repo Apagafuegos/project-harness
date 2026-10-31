@@ -293,11 +293,15 @@ fn hint(hint: Option<&harness_core::tools::RecoveryHint>) -> String {
 
 fn status_text(app: &App) -> String {
     let model = current_model(app);
-    // The sourced catalog limit is known only for the model the session was
-    // opened with; a later switch needs a catalog the shell has not supplied.
-    let limit = (model == app.info.model)
-        .then_some(app.info.context_limit)
-        .flatten();
+    let limit = app
+        .catalog
+        .limits(&model)
+        .and_then(|limits| limits.context_tokens.map(u64::from))
+        .or_else(|| {
+            (model == app.info.model)
+                .then_some(app.info.context_limit)
+                .flatten()
+        });
     let phase = app
         .view()
         .map(|view| phase_name(view.phase))
