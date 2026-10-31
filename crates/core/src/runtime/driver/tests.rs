@@ -1958,7 +1958,7 @@ async fn uncertain_invocation_waits_for_the_user_through_the_handle() {
 /// A turn run through a handle over a v1 journal continues it as v2: a v1
 /// prefix, a v2 suffix and one unbroken checksum chain.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn a_turn_appended_to_a_v1_journal_is_written_as_v2() {
+async fn a_turn_appended_to_a_v1_journal_is_written_as_v3() {
     let _awake = Awake::new();
     let examples =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/rfcs/001/examples");
@@ -1986,7 +1986,7 @@ async fn a_turn_appended_to_a_v1_journal_is_written_as_v2() {
             max_output_tokens: None,
         },
     );
-    let provider = Arc::new(ScriptedProvider::new([reply("answered as v2")]));
+    let provider = Arc::new(ScriptedProvider::new([reply("answered as v3")]));
     let handle = SessionHandle::launch(
         root.clone(),
         session.clone(),
@@ -2027,14 +2027,14 @@ async fn a_turn_appended_to_a_v1_journal_is_written_as_v2() {
         (inspection, versions)
     });
     assert_eq!(inspection.diagnostic, None, "the chain verifies");
-    let v2_records = live.snapshot.sequence() + 1 - v1_records;
-    assert_eq!(v2_records, 3, "opening, inference and response commits");
+    let v3_records = live.snapshot.sequence() + 1 - v1_records;
+    assert_eq!(v3_records, 3, "opening, inference and response commits");
     let mut expected = vec![1; v1_records as usize];
-    expected.extend(std::iter::repeat_n(2, v2_records as usize));
+    expected.extend(std::iter::repeat_n(3, v3_records as usize));
     assert_eq!(versions, expected);
     assert_eq!(
         inspection.versions,
-        [(1, v1_records), (2, v2_records)].into()
+        [(1, v1_records), (3, v3_records)].into()
     );
 }
 

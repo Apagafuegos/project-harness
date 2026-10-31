@@ -72,7 +72,8 @@ active turn, timers, and a requested cancel.
 | `CompactionProposed` | `CompactionToken`, `Result<Box<CompactionPreview>, CompactionError>` | Driver summary strategy; stale tokens/epochs are dropped |
 
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
-`SelectHead { head }`, `SwitchModel { model, policy }` and
+`SelectHead { head }`, `SwitchModel { model, policy }`,
+`SetContextControl { turn_id, mode }` (see [context controls](#context-controls)),
 `ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)), and
 `SubmitApproval { approval_id, plan_digest, decision, remember }`. `RequestId`, `CommitToken`,
 `InferenceId`, `TimerId` and `CompactionToken` are `u64` values local to one runtime and never
@@ -112,8 +113,10 @@ fragments itself.
 the assistant entry will carry, which RFC-001 gives the provider request.
 
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
-`Resolved { invocation_id, ack }`, `HeadSelected { ack }` or
-`ModelSwitched { ack, preview }` or `ApprovalSubmitted { approval_id, ack }` (decision durable).
+`Resolved { invocation_id, ack }`, `HeadSelected { ack }`,
+`ModelSwitched { ack, preview }`, `ContextControlSet { ack, turn_id, mode }` or
+`ApprovalSubmitted { approval_id, ack }` (decision durable), with the matching
+post-ack `EventKind::ContextControlSet { turn_id, mode }`.
 `Rejection` is `Busy`, `RecoveryRequired`,
 `ResolutionRequired`, `Faulted`, `NotActive`, `StaleCommand` or `Invalid(code)`.
 Compaction adds `Accepted::{CompactionPreviewed, CompactionCommitted,
@@ -398,6 +401,26 @@ Invalid requests (`head_unchanged`, `unknown_head`,
 command and `inspect_context(None, Some(model))` build a pure portability preview;
 the command rejects unsupported loss before any write. Reports include native
 state loss and required media/tool incompatibilities, plus the target budget.
+
+### Context controls
+
+`SetContextControl { turn_id, mode }` needs an idle session for the same reasons
+and returns the same `Busy`, `RecoveryRequired`, `ResolutionRequired` and
+`Faulted` refusals. It appends exactly one `context_control` entry at the current
+head, moves the head to it, and replies
+`Accepted::ContextControlSet { ack, turn_id, mode }`; after the acknowledgement
+it emits `EventKind::ContextControlSet`. The core validates the target through
+the same function storage uses (`SessionSnapshot::control_error`), so semantic
+refusals are `Invalid(code)` before any write: `context_control_unfinished_turn`,
+`context_control_not_ancestral`, `context_control_noop` and
+`context_control_covered`, plus `head_inside_tool_exchange`. A storage rejection
+of a core-built control would be a core bug and faults the runtime.
+
+There is no durable command receipt, exactly as for `SwitchModel`. A retry after
+success is refused as `context_control_noop` and writes nothing, which is the
+deduplication a control needs; a later different mode appends another entry.
+`mode: "default"` is the undo, and it is always recorded when it changes the
+effective mode. See [decision 0025](decisions/0025-context-controls.md).
 
 ## Cancellation
 
@@ -845,6 +868,8 @@ events that follow.
 
 ## Not implemented yet
 
+- Compaction that skips pinned turns (m6-02); this step refuses any controlled
+  span instead. Client keys for controls (m6-03).
 - General configuration-update commands. Remember is the implemented
   configuration-change path; summary generation/commit and automatic compaction
   are implemented in m4-06.

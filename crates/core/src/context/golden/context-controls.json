@@ -1,0 +1,167 @@
+{
+  "identity": {
+    "session_id": "019a0000-0000-7000-8000-000000000004",
+    "journal_sequence": 13,
+    "head": "019a0000-0000-7000-8000-000000004053",
+    "model": {
+      "provider_instance": "mock-default",
+      "model": "scripted-text"
+    },
+    "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
+    "builder_version": 5,
+    "projection_version": 4
+  },
+  "fingerprint": "2cb5474cfc37bb933714087db8faed8ce3eb2f2d98d19eeae31842cf52987976",
+  "instructions": {
+    "status": "empty"
+  },
+  "included": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004a1",
+      "kind": "user",
+      "estimated_tokens": 8,
+      "opaque_bytes": 0,
+      "blocks": [],
+      "pinned": true
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004a3",
+      "kind": "assistant",
+      "estimated_tokens": 7,
+      "opaque_bytes": 0,
+      "blocks": [
+        {
+          "part": "block",
+          "index": 0,
+          "kind": "text",
+          "estimated_tokens": 7,
+          "opaque_bytes": 0
+        }
+      ],
+      "pinned": true
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004c1",
+      "kind": "user",
+      "estimated_tokens": 7,
+      "opaque_bytes": 0,
+      "blocks": []
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004c3",
+      "kind": "assistant",
+      "estimated_tokens": 11,
+      "opaque_bytes": 0,
+      "blocks": [
+        {
+          "part": "block",
+          "index": 0,
+          "kind": "text",
+          "estimated_tokens": 11,
+          "opaque_bytes": 0
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004b1",
+      "part": "entry",
+      "reason": "user_excluded",
+      "summary_id": null
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-0000000004b3",
+      "part": "entry",
+      "reason": "user_excluded",
+      "summary_id": null
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000004050",
+      "part": "entry",
+      "reason": "context_control_marker",
+      "summary_id": null
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000004051",
+      "part": "entry",
+      "reason": "context_control_marker",
+      "summary_id": null
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000004052",
+      "part": "entry",
+      "reason": "context_control_marker",
+      "summary_id": null
+    },
+    {
+      "entry_id": "019a0000-0000-7000-8000-000000004053",
+      "part": "entry",
+      "reason": "context_control_marker",
+      "summary_id": null
+    }
+  ],
+  "summaries": [],
+  "controls": [
+    {
+      "turn_id": "019a0000-0000-7000-8000-0000000004a0",
+      "mode": "pinned",
+      "control_entry_id": "019a0000-0000-7000-8000-000000004050"
+    },
+    {
+      "turn_id": "019a0000-0000-7000-8000-0000000004b0",
+      "mode": "excluded",
+      "control_entry_id": "019a0000-0000-7000-8000-000000004051"
+    }
+  ],
+  "totals": {
+    "estimator": {
+      "method": "heuristic",
+      "version": "bytes4-flat-media-v1",
+      "parameters": {
+        "audio_tokens": 2000,
+        "file_tokens": 4000,
+        "image_tokens": 1600,
+        "text_bytes_per_token": 4
+      }
+    },
+    "estimated_instructions": 0,
+    "estimated_user": 15,
+    "estimated_assistant_text": 18,
+    "estimated_tool_calls": 0,
+    "estimated_tool_results": 0,
+    "estimated_summaries": 0,
+    "estimated_media": 0,
+    "estimated_total": 33,
+    "opaque_provider_state_bytes": 0
+  },
+  "budget": {
+    "status": "known",
+    "limits": {
+      "context_tokens": 128000,
+      "max_output_tokens": null
+    },
+    "context_tokens": 128000,
+    "deductions": {
+      "output_reserve": 4096,
+      "tool_headroom": 8192,
+      "safety_margin": 4096
+    },
+    "usable_tokens": 111616,
+    "estimated_tokens": 33,
+    "headroom_tokens": 111583,
+    "overflow_tokens": 0,
+    "compaction_trigger_permille": 850,
+    "compaction_threshold_tokens": 94874,
+    "unestimated_opaque_bytes": 0
+  },
+  "reported_usage": null,
+  "portability": [],
+  "preview": null,
+  "flags": {
+    "budget_unknown": false,
+    "overflow": false,
+    "compaction_recommended": false,
+    "preview": false
+  }
+}

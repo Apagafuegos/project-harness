@@ -17,12 +17,13 @@ use crate::context::{
     ContextBuilder, ContextError, ContextReport, Projection, SessionConfiguration,
 };
 use crate::session::{
-    AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, Entry, EntryId,
-    EntryPayload, ExecutionUncertain, HeadChange, HeadReason, InvocationId, JournalEvent,
-    MAX_COUNTER, ModelChanged, ModelError, ModelErrorCode, ModelRef, Portability, Provenance,
-    RecoveryResolved, Resolution, ResponseOutcome, ResultCode, RuntimeState, SessionSnapshot,
-    StateChanged, ToolMetadata, ToolResult, ToolResultEntry, ToolStatus, TurnFinished, TurnId,
-    TurnOutcome, TurnStarted, UnresolvedInvocation, UserMessage, codec, store,
+    AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, ContextControl,
+    ContextMode, Digest, Entry, EntryId, EntryPayload, ExecutionUncertain, HeadChange, HeadReason,
+    InvocationId, JournalEvent, MAX_COUNTER, ModelChanged, ModelError, ModelErrorCode, ModelRef,
+    Portability, Provenance, RecoveryResolved, Resolution, ResponseOutcome, ResultCode,
+    RuntimeState, SessionSnapshot, StateChanged, ToolMetadata, ToolResult, ToolResultEntry,
+    ToolStatus, TurnFinished, TurnId, TurnOutcome, TurnStarted, UnresolvedInvocation, UserMessage,
+    codec, store,
 };
 
 use super::{
@@ -128,6 +129,7 @@ enum Waiter {
     Resolved(InvocationId),
     HeadSelected,
     ModelSwitched(Box<crate::context::PreviewReport>),
+    ContextControlSet { turn_id: TurnId, mode: ContextMode },
     ApprovalSubmitted(crate::session::ApprovalId),
     CompactionCommitted(EntryId),
 }
@@ -495,6 +497,9 @@ impl Runtime {
             Command::SelectHead { head } => self.select_head(request, head, env),
             Command::SwitchModel { model, policy } => {
                 self.switch_model(request, model, policy, env)
+            }
+            Command::SetContextControl { turn_id, mode } => {
+                self.set_context_control(request, turn_id, mode, env)
             }
             Command::ResolveUncertain {
                 invocation_id,
@@ -888,6 +893,47 @@ impl Runtime {
         self.persist(
             advancing(&snapshot, entries, Vec::new()),
             waiting(request, Waiter::ModelSwitched(preview)),
+            None,
+            env,
+        );
+        None
+    }
+
+    /// Append one `context_control` at the current head while idle. Storage's
+    /// rules are checked here first through the same shared function, so a
+    /// refusal carries storage's code and writes nothing; a commit that storage
+    /// would reject is therefore a core bug, not a client error.
+    fn set_context_control(
+        &mut self,
+        request: RequestId,
+        turn_id: TurnId,
+        mode: ContextMode,
+        env: &mut dyn Env,
+    ) -> Option<Result<Accepted, Rejection>> {
+        if let Err(rejection) = self.idle_check() {
+            return Some(Err(rejection));
+        }
+        let snapshot = self.snapshot().clone();
+        if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
+            return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
+        }
+        if let Err(code) = snapshot.control_error(snapshot.head(), &turn_id, mode) {
+            return Some(Err(Rejection::Invalid(code)));
+        }
+        let entries = chain(
+            &snapshot,
+            vec![(
+                None,
+                EntryPayload::ContextControl(ContextControl {
+                    turn_id: turn_id.clone(),
+                    mode,
+                }),
+            )],
+            env,
+        );
+        self.persist(
+            advancing(&snapshot, entries, Vec::new()),
+            waiting(request, Waiter::ContextControlSet { turn_id, mode }),
             None,
             env,
         );
@@ -1330,6 +1376,17 @@ impl Runtime {
                     Accepted::ModelSwitched {
                         ack: ack.clone(),
                         preview,
+                    }
+                }
+                Waiter::ContextControlSet { turn_id, mode } => {
+                    self.emit(EventKind::ContextControlSet {
+                        turn_id: turn_id.clone(),
+                        mode,
+                    });
+                    Accepted::ContextControlSet {
+                        ack: ack.clone(),
+                        turn_id,
+                        mode,
                     }
                 }
                 Waiter::ApprovalSubmitted(approval_id) => Accepted::ApprovalSubmitted {

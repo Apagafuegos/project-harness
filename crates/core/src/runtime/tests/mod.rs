@@ -2,6 +2,7 @@
 //! to a `JournalStore` with the test-build oracle on; any rejection fails.
 
 mod compaction;
+mod controls;
 mod model;
 pub(crate) mod pipeline;
 mod random;
@@ -1060,6 +1061,9 @@ fn normalized(finished: &Finished) -> Vec<String> {
                     } => format!("Resolved({invocation_id}, {})", ack(a)),
                     Accepted::HeadSelected { ack: a } => format!("HeadSelected({})", ack(a)),
                     Accepted::ModelSwitched { ack: a, .. } => format!("ModelSwitched({})", ack(a)),
+                    Accepted::ContextControlSet {
+                        ack: a, turn_id, ..
+                    } => format!("ContextControlSet({turn_id}, {})", ack(a)),
                     Accepted::ApprovalSubmitted {
                         approval_id,
                         ack: a,
@@ -1125,6 +1129,7 @@ fn shape(commit: &Commit) -> String {
             EntryPayload::ToolResult(r) => format!("result({:?})", r.result.status).to_lowercase(),
             EntryPayload::ModelChanged(_) => "model_changed".into(),
             EntryPayload::Compaction(_) => "compaction".into(),
+            EntryPayload::ContextControl(_) => "context_control".into(),
         })
         .collect();
     if commit.head.reason == HeadReason::Navigate {

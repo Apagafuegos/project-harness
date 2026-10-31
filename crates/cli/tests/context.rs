@@ -16,8 +16,8 @@ fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// A private data root holding the compaction fixture and its artifacts.
-fn fixture() -> (tempfile::TempDir, PathBuf, SessionId) {
+/// A private data root holding one RFC-001 fixture and its artifacts.
+fn fixture(name: &str) -> (tempfile::TempDir, PathBuf, SessionId) {
     let examples = repository().join("docs/rfcs/001/examples");
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
@@ -26,8 +26,10 @@ fn fixture() -> (tempfile::TempDir, PathBuf, SessionId) {
         root.put_artifact(&fs::read(entry.unwrap().path()).unwrap())
             .unwrap();
     }
-    let journal = fs::read(examples.join("compaction.jsonl")).unwrap();
-    let session: SessionId = "019a0000-0000-7000-8000-000000000003".parse().unwrap();
+    let journal = fs::read(examples.join(format!("{name}.jsonl"))).unwrap();
+    let first: serde_json::Value =
+        serde_json::from_slice(journal.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    let session: SessionId = serde_json::from_value(first["record"]["session_id"].clone()).unwrap();
     fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -48,7 +50,7 @@ fn harness(arguments: &[&str]) -> Output {
 
 #[test]
 fn prints_the_golden_report_of_the_compaction_fixture() {
-    let (_temp, root, session) = fixture();
+    let (_temp, root, session) = fixture("compaction");
     let root = root.to_str().unwrap();
     let session = session.to_string();
     let output = harness(&["context", root, &session, "--context-tokens", "128000"]);
@@ -87,8 +89,39 @@ fn prints_the_golden_report_of_the_compaction_fixture() {
 }
 
 #[test]
+fn prints_the_golden_report_of_the_context_controls_fixture() {
+    let (_temp, root, session) = fixture("context-controls");
+    let root = root.to_str().unwrap();
+    let session = session.to_string();
+    let output = harness(&["context", root, &session, "--context-tokens", "128000"]);
+    assert!(output.status.success(), "{output:?}");
+    let golden = fs::read_to_string(
+        repository().join("crates/core/src/context/golden/context-controls.json"),
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), golden);
+
+    // The report shows the excluded turn and the effective controls.
+    let output = harness(&["context", root, &session]);
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reasons: Vec<_> = report["excluded"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|exclusion| exclusion["reason"].as_str().unwrap())
+        .collect();
+    assert!(reasons.contains(&"user_excluded"), "{reasons:?}");
+    assert!(reasons.contains(&"context_control_marker"), "{reasons:?}");
+    let controls = report["controls"].as_array().unwrap();
+    assert_eq!(controls.len(), 2);
+    assert_eq!(controls[0]["mode"], "pinned");
+    assert_eq!(controls[1]["mode"], "excluded");
+}
+
+#[test]
 fn refuses_a_locked_session_at_once_and_reports_bad_input() {
-    let (_temp, path, session) = fixture();
+    let (_temp, path, session) = fixture("compaction");
     let root = path.to_str().unwrap();
     let id = session.to_string();
     let store =

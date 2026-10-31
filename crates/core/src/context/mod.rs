@@ -70,7 +70,7 @@ pub use report::*;
 pub const PROJECTION_VERSION: u32 = 4;
 
 /// Version of the report and its checks. Bump it when report fields change.
-pub const BUILDER_VERSION: u32 = 4;
+pub const BUILDER_VERSION: u32 = 5;
 
 #[cfg(test)]
 mod tests;

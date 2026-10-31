@@ -66,6 +66,7 @@ pub(crate) fn record_artifacts(root: &DataRoot, record: &Record, state: &State) 
                         manifest(root, compaction, state)?;
                     }
                     EntryPayload::ModelChanged(_) => (),
+                    EntryPayload::ContextControl(_) => (),
                 }
             }
             for event in &commit.events {

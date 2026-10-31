@@ -489,8 +489,9 @@ impl App {
                 .and_then(|id| self.view()?.snapshot.entry(id))
                 .map(|stored| entry_preview(&stored.entry.payload))
                 .unwrap_or_else(|| "recorded instructions".into());
+            let pin = if item.pinned { " pinned" } else { "" };
             rows.push(Line::raw(format!(
-                " {:?} {id} ~{} tokens: {text}",
+                " {:?} {id} ~{} tokens{pin}: {text}",
                 item.kind, item.estimated_tokens
             )));
             for block in &item.blocks {

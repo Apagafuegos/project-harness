@@ -118,16 +118,16 @@ journal commands below for repair; catalog discovery never initiates recovery.
 
 ## Record versions
 
-Each record carries its own `version`. Readers accept versions 1 and 2
+Each record carries its own `version`. Readers accept versions 1, 2 and 3
 (`SUPPORTED_VERSIONS`) and validate every record against its own version's
-bundled schema. Writers write only version 2 (`CURRENT_VERSION`), including
-when they append to a session created under v1. A v1 journal therefore
-continues as a v1 prefix and a v2 suffix, one unbroken checksum chain; the
-tail-repair commit is an ordinary v2 commit. Opening never rewrites a record.
+bundled schema. Writers write only version 3 (`CURRENT_VERSION`), including
+when they append to a session created under v1 or v2. A v1 journal therefore
+continues as a v1 prefix and a v3 suffix, one unbroken checksum chain; the
+tail-repair commit is an ordinary v3 commit. Opening never rewrites a record.
 
 | Rule | Error code |
 | --- | --- |
-| `version` is not the integer 1 or 2 (`0`, `3`, `"2"`, `2.0`, missing) | `unsupported_version` |
+| `version` is not the integer 1, 2 or 3 (`0`, `4`, `"2"`, `2.0`, missing) | `unsupported_version` |
 | A record's shape is not that of its own version | `schema_violation` |
 | A record's version is lower than the previous record's | `version_regression` |
 | A writer is handed a record whose version is not `CURRENT_VERSION` | `write_version` |
@@ -152,6 +152,18 @@ v2 records:
 | `effects` are not in the order listed above, so one set has two byte forms | `effects_not_canonical` |
 | A `trusted_fs` intent declares more than `read` and `filesystem_mutation`, or a `bubblewrap` intent lacks `process` | `effects_backend_mismatch` |
 
+v3 adds one entry kind and relaxes one v2 field; it adds no required key to a
+v2 payload:
+
+| Change | v3 value | Read from v1/v2 as |
+| --- | --- | --- |
+| `entry.payload.kind` | gains `context_control` | no such entry exists |
+| `compaction.model` | optional; **absent** means no model was used | always present |
+
+`null` is not a spelling of "no model": a v3 compaction either names its model
+or omits the field. Every writer in this step still records a model; the
+rolling summary keeps doing so, and model-free strategies arrive in m6-04.
+
 The schema accepts any code matching the pattern, so readers keep codes they do
 not know. `ResultCode` names the ones this build writes: `tools_unavailable`,
 `cancelled` and `process_restart`. An intent's `effects` of `None` mean it was
@@ -161,6 +173,38 @@ with the plan artifact it does not read. The context projection leaves out
 `code` and the fingerprint, so a v1 and a v2 copy of the same entries project
 identically. A v1 record carrying a v2 field, or a v2 record missing one, is a
 `schema_violation`.
+
+## Context controls
+
+A `context_control` entry records one finished turn's effective mode on the
+branch: `default`, `pinned` or `excluded`. Its payload names the target turn;
+the entry's own `turn_id` is `null`, because a control is a branch marker rather
+than dialogue, exactly like `model_changed`. The last control for a turn on the
+selected ancestry wins, controls never alter history, and a control that would
+not change the effective mode is refused instead of recorded. See
+[decision 0025](decisions/0025-context-controls.md).
+
+| Rule | Error code |
+| --- | --- |
+| The session is not idle, or has unresolved work | `session_not_idle` |
+| The entry has a `turn_id` of its own, or its commit starts a turn | `context_control_inside_turn` |
+| The head is inside a tool exchange | `head_inside_tool_exchange` |
+| The target turn is unknown or still unfinished | `context_control_unfinished_turn` |
+| No entry of the target turn is on the control's parent ancestry | `context_control_not_ancestral` |
+| The control does not change the target turn's effective mode | `context_control_noop` |
+| A `pinned` or `excluded` control targets a turn an active summary covers | `context_control_covered` |
+| A compaction's coverage contains a turn pinned at its parent | `compaction_covers_pinned_turn` |
+
+`session_not_idle` covers the tool-exchange case in practice: a pending exchange
+belongs to an open turn. The `head_inside_tool_exchange` check in the branch
+walk stays as the same defense `model_changed` has. Resetting to `default` is
+always accepted, because it is how a control is undone; pinning or excluding a
+turn whose content an active summary already absorbed is refused, because the
+summary text derived from it stays in the projection.
+
+Effective modes are derived state: `BranchFacts` carries them per entry, replay
+rebuilds them, and the test-build oracle compares them with a scanning walk
+after every applied record.
 
 ## Durability and recovery
 
@@ -244,8 +288,10 @@ arguments. Checksums cover the original raw record bytes, never reserialized JSO
 The hash chain, sequences, IDs, ancestry, heads, turn transitions, call/result
 bindings, authorization references and artifact references are validated.
 Compaction replay checks ancestry, whole completed source turns, the two retained
-recent turns, supersession and exact manifest provenance. Generation, pin
-selection, portability previews and context budgets are not implemented.
+recent turns, supersession, exact manifest provenance and that no covered turn is
+pinned. Context-control replay checks the effective-mode rules above. Summary
+generation, compaction-time pin skipping, portability previews and context
+budgets are not storage questions and are not implemented here.
 
 Physical records, including LF, are limited to 8 MiB with bounded reading and
 serialization. Snapshot indexes reside in memory; transaction validation stages

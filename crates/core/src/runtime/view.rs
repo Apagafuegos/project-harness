@@ -314,6 +314,7 @@ impl ClientView {
             | EventKind::Recovered { .. }
             | EventKind::ContextBuilt { .. }
             | EventKind::ModelSwitched { .. }
+            | EventKind::ContextControlSet { .. }
             | EventKind::CompactionPreviewed { .. }
             | EventKind::CompactionCommitted { .. }
             | EventKind::CompactionFailed { .. }

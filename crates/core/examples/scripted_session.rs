@@ -452,6 +452,9 @@ fn print_journal(snapshot: &SessionSnapshot) {
             EntryPayload::ToolResult(r) => format!("result({:?})", r.result.status),
             EntryPayload::ModelChanged(_) => "model_changed".to_owned(),
             EntryPayload::Compaction(_) => "compaction".to_owned(),
+            EntryPayload::ContextControl(c) => {
+                format!("context_control({:?})", c.mode).to_lowercase()
+            }
         };
         lines[stored.sequence as usize - 1].push(kind);
     }

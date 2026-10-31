@@ -7,12 +7,13 @@ use super::{
     projection::ContextItem,
     report::{ContextReport, ExclusionReason, ItemKind, Part},
 };
-use crate::session::{CallId, ContentBlock, EntryId, EntryPayload, StoredEntry};
+use crate::session::{CallId, ContentBlock, ContextMode, EntryId, EntryPayload, StoredEntry};
 
 pub(super) fn check(
     branch: &[&StoredEntry],
     input: &crate::model::ModelInput,
     report: &ContextReport,
+    applied: &super::builder::Controls,
 ) -> Result<(), &'static str> {
     let items = &input.items;
     agrees(items, report)?;
@@ -27,6 +28,7 @@ pub(super) fn check(
         return Err("continuation_disagrees_with_projection");
     }
     complete(branch, report)?;
+    controls(branch, report, applied)?;
     paired(items)
 }
 
@@ -150,6 +152,8 @@ fn complete(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'sta
             ExclusionReason::FailedResponse
                 | ExclusionReason::EmptyResponse
                 | ExclusionReason::ModelChangeMarker
+                | ExclusionReason::ContextControlMarker
+                | ExclusionReason::UserExcluded
                 | ExclusionReason::SupersededSummary
                 | ExclusionReason::CoveredBySummary
         );
@@ -187,6 +191,111 @@ fn complete(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'sta
         match (included, entry_decisions) {
             (true, 1) | (false, 0) => {}
             _ => return Err("duplicate_decision"),
+        }
+    }
+    Ok(())
+}
+
+/// Every effective control, every pin marker and every excluded turn agrees
+/// with the modes applied to this build; control entries are never dialogue.
+fn controls(
+    branch: &[&StoredEntry],
+    report: &ContextReport,
+    applied: &super::builder::Controls,
+) -> Result<(), &'static str> {
+    let positions: HashMap<&EntryId, usize> = branch
+        .iter()
+        .enumerate()
+        .map(|(position, stored)| (&stored.entry.id, position))
+        .collect();
+    // The reported summary names the applied control entry, in ancestral order.
+    let mut last = None;
+    let mut turns = HashSet::new();
+    for item in &report.controls {
+        let stored = branch
+            .iter()
+            .find(|stored| stored.entry.id == item.control_entry_id)
+            .ok_or("control_entry_not_on_branch")?;
+        let EntryPayload::ContextControl(control) = &stored.entry.payload else {
+            return Err("control_entry_not_a_control");
+        };
+        if control.turn_id != item.turn_id || control.mode != item.mode {
+            return Err("control_report_disagrees_with_entry");
+        }
+        if applied.mode(Some(&item.turn_id)) != item.mode
+            || applied.setter(&item.turn_id) != Some(&item.control_entry_id)
+        {
+            return Err("control_report_disagrees_with_fold");
+        }
+        if item.mode.is_default() || !turns.insert(&item.turn_id) {
+            return Err("control_report_disagrees_with_fold");
+        }
+        let position = positions[&item.control_entry_id];
+        if last.is_some_and(|last| last >= position) {
+            return Err("controls_out_of_ancestral_order");
+        }
+        last = Some(position);
+    }
+    // Every applied setter on this branch is reported.
+    for stored in branch {
+        let EntryPayload::ContextControl(control) = &stored.entry.payload else {
+            continue;
+        };
+        let applied_mode = applied.mode(Some(&control.turn_id));
+        if !applied_mode.is_default()
+            && applied.setter(&control.turn_id) == Some(&stored.entry.id)
+            && !report
+                .controls
+                .iter()
+                .any(|item| item.control_entry_id == stored.entry.id)
+        {
+            return Err("unreported_effective_control");
+        }
+    }
+    let sources: HashMap<&EntryId, &StoredEntry> = branch
+        .iter()
+        .map(|stored| (&stored.entry.id, *stored))
+        .collect();
+    for record in &report.included {
+        let Some(id) = &record.entry_id else {
+            if record.pinned {
+                return Err("pinned_without_turn");
+            }
+            continue;
+        };
+        let stored = sources[id];
+        if matches!(stored.entry.payload, EntryPayload::ContextControl(_)) {
+            return Err("control_entry_included");
+        }
+        let mode = applied.mode(stored.entry.turn_id.as_ref());
+        if record.pinned != (mode == ContextMode::Pinned) {
+            return Err("pin_marker_disagrees_with_controls");
+        }
+        if mode == ContextMode::Excluded {
+            return Err("excluded_turn_included");
+        }
+    }
+    for stored in branch {
+        let mode = applied.mode(stored.entry.turn_id.as_ref());
+        let excluded_decision = |reason: ExclusionReason| {
+            report.excluded.iter().any(|exclusion| {
+                exclusion.entry_id == stored.entry.id
+                    && exclusion.part == Part::Entry
+                    && exclusion.reason == reason
+            })
+        };
+        if mode == ContextMode::Excluded && !excluded_decision(ExclusionReason::UserExcluded) {
+            return Err("excluded_entry_without_decision");
+        }
+        if matches!(stored.entry.payload, EntryPayload::ContextControl(_))
+            && !excluded_decision(ExclusionReason::ContextControlMarker)
+        {
+            return Err("undecided_control_entry");
+        }
+        if excluded_decision(ExclusionReason::ContextControlMarker)
+            && !matches!(stored.entry.payload, EntryPayload::ContextControl(_))
+        {
+            return Err("invalid_exclusion");
         }
     }
     Ok(())

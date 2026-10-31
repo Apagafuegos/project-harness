@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use harness_core::{
     runtime::{PartialBlock, RuntimeView},
     session::{
-        ApprovalId, CallId, ContentBlock, Decision, EntryId, EntryPayload, JournalEvent, ModelRef,
-        Portability, ToolStatus, TurnId, TurnOutcome,
+        ApprovalId, CallId, ContentBlock, ContextMode, Decision, EntryId, EntryPayload,
+        JournalEvent, ModelRef, Portability, ToolStatus, TurnId, TurnOutcome,
     },
 };
 use pulldown_cmark::{CodeBlockKind, Event as MarkdownEvent, Options, Parser, Tag, TagEnd};
@@ -160,17 +160,34 @@ pub(crate) fn project(
                 ));
                 rows.push(Line::default());
             }
+            EntryPayload::ContextControl(control) => {
+                let action = match control.mode {
+                    ContextMode::Pinned => "Pinned",
+                    ContextMode::Excluded => "Excluded",
+                    ContextMode::Default => "Reset",
+                };
+                rows.push(Line::styled(
+                    format!("{action} turn {}", turn_label(&control.turn_id)),
+                    accent_style(),
+                ));
+                rows.push(Line::default());
+            }
             EntryPayload::Compaction(compaction) => {
                 rows.push(Line::styled(
                     "── compaction summary ──────────────────────",
                     accent_style(),
                 ));
+                let model = compaction
+                    .model
+                    .as_ref()
+                    .map(model_name)
+                    .unwrap_or_else(|| "no model".into());
                 rows.push(Line::styled(
                     format!(
                         "  {} · {} entries covered · {}",
                         bounded(&compaction.strategy, 40),
                         compaction.covered_entry_ids.len(),
-                        model_name(&compaction.model)
+                        model
                     ),
                     dim_style(),
                 ));
@@ -472,6 +489,19 @@ fn model_name(model: &ModelRef) -> String {
         bounded(&model.provider_instance, 40),
         bounded(&model.model, 60)
     )
+}
+
+/// The last eight characters of a turn's identity, enough to tell turns apart
+/// in one line without a full UUID.
+fn turn_label(turn: &TurnId) -> String {
+    turn.to_string()
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
 }
 
 fn label_style() -> Style {

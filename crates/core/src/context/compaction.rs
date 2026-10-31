@@ -31,6 +31,10 @@ pub enum NotEligible {
     /// A cancelled, interrupted or failed turn blocks contiguous coverage.
     #[error("non_completed_turn")]
     NonCompletedTurn,
+    /// The span would contain a turn a control pinned or excluded. Interim:
+    /// m6-02 replaces this refusal with skipping pinned turns.
+    #[error("context_controls_in_span")]
+    ContextControlsInSpan,
     /// The supplied head does not exist.
     #[error("unknown_head")]
     UnknownHead,
@@ -133,6 +137,28 @@ pub fn select_span(
                 }
             }
         }
+    }
+    // Interim (m6-02 replaces this with skipping pinned turns): compaction
+    // never absorbs a turn the user pinned or excluded. Controls are folded
+    // over this ancestry only, so a sibling's control never applies.
+    let mut controls = BTreeMap::new();
+    for stored in &branch {
+        if let EntryPayload::ContextControl(control) = &stored.entry.payload {
+            if control.mode.is_default() {
+                controls.remove(&control.turn_id);
+            } else {
+                controls.insert(control.turn_id.clone(), control.mode);
+            }
+        }
+    }
+    if branch[start..end].iter().any(|stored| {
+        stored
+            .entry
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn| controls.contains_key(turn))
+    }) {
+        return Err(NotEligible::ContextControlsInSpan);
     }
     // Do not count audit markers or summary entries as new dialogue.
     let new_dialogue = branch
@@ -321,6 +347,7 @@ impl CompactionError {
                 NotEligible::UnresolvedWork => "unresolved_work",
                 NotEligible::NothingNewSinceSummary => "nothing_new_since_summary",
                 NotEligible::NonCompletedTurn => "non_completed_turn",
+                NotEligible::ContextControlsInSpan => "context_controls_in_span",
                 NotEligible::UnknownHead => "unknown_head",
                 NotEligible::InvalidConfig => "invalid_compaction",
             },
@@ -465,7 +492,7 @@ impl RollingSummary {
                 bytes: manifest_bytes.len() as u64,
             },
             summary,
-            model: summary_model,
+            model: Some(summary_model),
             configuration_fingerprint: snapshot.configuration().sha256.clone(),
         };
         let entry = Entry {

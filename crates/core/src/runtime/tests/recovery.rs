@@ -252,7 +252,7 @@ recovery!(
 
 /// The interrupted-execution fixture: a completed `read` proposal with an
 /// execution intent and no result.
-fn fixture() -> Driver {
+pub(super) fn fixture() -> Driver {
     fixture_prefix(usize::MAX)
 }
 
@@ -331,14 +331,14 @@ fn versions(d: &Driver) -> Vec<u64> {
 }
 
 #[test]
-fn recovery_over_a_v1_turn_answers_its_calls_as_v2() {
+fn recovery_over_a_v1_turn_answers_its_calls_as_v3() {
     // The v1 prefix ends in `processing`: the proposal, and no intent.
     scenario_from(
         || fixture_prefix(4),
         |d| {
             d.settle();
             assert!(idle(d));
-            assert_eq!(versions(d), [1, 1, 1, 1, 2]);
+            assert_eq!(versions(d), [1, 1, 1, 1, 3]);
             let snapshot = d.runtime.snapshot();
             let ancestry = snapshot.ancestry(snapshot.head()).unwrap();
             let [.., proposal, answer] = &ancestry[..] else {
@@ -347,7 +347,7 @@ fn recovery_over_a_v1_turn_answers_its_calls_as_v2() {
             let (EntryPayload::AssistantResponse(response), EntryPayload::ToolResult(result)) =
                 (&proposal.entry.payload, &answer.entry.payload)
             else {
-                panic!("a v1 response answered by a v2 result")
+                panic!("a v1 response answered by a v3 result")
             };
             assert_eq!(response.projection_fingerprint, None, "v1 has none");
             let result = &result.result;
@@ -361,10 +361,10 @@ fn recovery_over_a_v1_turn_answers_its_calls_as_v2() {
 }
 
 #[test]
-fn recovery_over_a_v1_intent_records_v2_and_unknown_effects() {
+fn recovery_over_a_v1_intent_records_v3_and_unknown_effects() {
     scenario_from(fixture, |d| {
         d.settle();
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 2], "execution_uncertain is v2");
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 3], "execution_uncertain is v3");
         let [invocation] = &d.runtime.snapshot().unresolved_invocations()[..] else {
             panic!("one invocation waits")
         };
@@ -372,7 +372,7 @@ fn recovery_over_a_v1_intent_records_v2_and_unknown_effects() {
         let request = resolve(d, observed(ToolStatus::Succeeded, "read"));
         d.accepted(request);
         assert!(idle(d));
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 2, 2]);
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 3, 3]);
         let [result] = &results(d)[..] else {
             panic!("one result")
         };

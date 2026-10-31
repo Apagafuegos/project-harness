@@ -14,8 +14,9 @@ use super::{
 use crate::{
     model::ModelInput,
     session::{
-        ArtifactRef, AssistantResponse, CallId, Compaction, ContentBlock, EntryId, EntryPayload,
-        ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry, ToolResultEntry, UserMessage,
+        ArtifactRef, AssistantResponse, CallId, Compaction, ContentBlock, ContextMode, EntryId,
+        EntryPayload, ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry, ToolResultEntry,
+        TurnId, UserMessage,
     },
     tools::ToolDefinition,
 };
@@ -117,6 +118,11 @@ impl<'a> ContextBuilder<'a> {
                 .model_at(head)
                 .map_err(|_| ContextError::UnknownHead)?,
         );
+        // Effective controls are folded once, over the selected head's
+        // ancestry. A prefix rebuilt for a continuation uses the same fold: a
+        // control appended after a response still changes what that response's
+        // prefix projects to, so the existing prefix comparison sees it.
+        let controls = Controls::fold(&branch);
         // Build required prefixes oldest first. Every continuation's parent
         // precedes it, so a fingerprint is computed once, without recursion or
         // an exponential re-walk of earlier continuation-only responses.
@@ -127,13 +133,18 @@ impl<'a> ContextBuilder<'a> {
             {
                 let parent = stored.entry.parent_id.clone();
                 if !prefixes.contains_key(&parent) {
-                    let prefix =
-                        self.build_inner(snapshot, parent.as_ref(), Some(model), &prefixes)?;
+                    let prefix = self.build_inner(
+                        snapshot,
+                        parent.as_ref(),
+                        Some(model),
+                        &prefixes,
+                        &controls,
+                    )?;
                     prefixes.insert(parent, prefix.projection.fingerprint);
                 }
             }
         }
-        self.build_inner(snapshot, head, model_override, &prefixes)
+        self.build_inner(snapshot, head, model_override, &prefixes, &controls)
     }
 
     fn build_inner(
@@ -142,6 +153,7 @@ impl<'a> ContextBuilder<'a> {
         head: Option<&EntryId>,
         model_override: Option<&ModelRef>,
         prefixes: &BTreeMap<Option<EntryId>, crate::session::Digest>,
+        controls: &Controls,
     ) -> Result<BuiltContext, ContextError> {
         if !(1..=1000).contains(&self.config.compaction_trigger_permille) {
             return Err(ContextError::InvalidConfig("compaction_trigger_permille"));
@@ -172,6 +184,7 @@ impl<'a> ContextBuilder<'a> {
             stop_portable: Vec::new(),
             become_portable: Vec::new(),
             opaque_at_head: 0,
+            pinned: false,
         };
         let instructions = match self.configuration.instructions() {
             None => InstructionsReport::Absent,
@@ -183,12 +196,25 @@ impl<'a> ContextBuilder<'a> {
             let entry = &stored.entry;
             let id = &entry.id;
             if let Some(summary) = plan.starts.get(id) {
+                // A summary is not dialogue and belongs to no turn, even when
+                // its first covered entry is in a pinned one.
+                let pinned = walk.pinned;
+                walk.pinned = false;
                 walk.summary(summary)?;
+                walk.pinned = pinned;
             }
             if let EntryPayload::AssistantResponse(response) = &entry.payload
                 && response.outcome == ResponseOutcome::Completed
             {
                 latest_completed = Some((id, response));
+            }
+            // Whole-turn controls are decided before summary replacement: an
+            // excluded turn's entries are all reported as the user's choice.
+            let mode = controls.mode(entry.turn_id.as_ref());
+            walk.pinned = mode == ContextMode::Pinned;
+            if mode == ContextMode::Excluded {
+                walk.exclude(id, Part::Entry, ExclusionReason::UserExcluded, None);
+                continue;
             }
             let replaced = plan
                 .superseded_by
@@ -218,6 +244,9 @@ impl<'a> ContextBuilder<'a> {
                 EntryPayload::ToolResult(result) => walk.tool_result(id, result)?,
                 EntryPayload::ModelChanged(_) => {
                     walk.exclude(id, Part::Entry, ExclusionReason::ModelChangeMarker, None)
+                }
+                EntryPayload::ContextControl(_) => {
+                    walk.exclude(id, Part::Entry, ExclusionReason::ContextControlMarker, None)
                 }
                 // An active summary that no other covers: its item was placed
                 // at its first covered entry, which precedes it.
@@ -424,6 +453,7 @@ impl<'a> ContextBuilder<'a> {
             included: walk.included,
             excluded: walk.excluded,
             summaries: plan.summaries(self.estimator),
+            controls: controls.report_on(&branch),
             totals,
             budget,
             reported_usage,
@@ -436,7 +466,7 @@ impl<'a> ContextBuilder<'a> {
                 preview: model_override.is_some(),
             },
         };
-        check::check(&branch, &input, &report).map_err(ContextError::Invariant)?;
+        check::check(&branch, &input, &report, controls).map_err(ContextError::Invariant)?;
         Ok(BuiltContext {
             projection: Projection {
                 head: head.cloned(),
@@ -553,6 +583,75 @@ impl<'a> Plan<'a> {
     }
 }
 
+/// Effective whole-turn controls, folded over the selected ancestry only. A
+/// sibling branch's controls never apply. The last control for a turn wins, and
+/// a reset removes it.
+pub(super) struct Controls {
+    /// Non-default mode per turn.
+    modes: BTreeMap<TurnId, ContextMode>,
+    /// The control entry setting each turn's mode, with its branch position.
+    set_by: BTreeMap<TurnId, (EntryId, usize)>,
+}
+
+impl Controls {
+    pub(super) fn fold(branch: &[&StoredEntry]) -> Self {
+        let mut modes = BTreeMap::new();
+        let mut set_by = BTreeMap::new();
+        for (position, stored) in branch.iter().enumerate() {
+            let EntryPayload::ContextControl(control) = &stored.entry.payload else {
+                continue;
+            };
+            if control.mode.is_default() {
+                modes.remove(&control.turn_id);
+                set_by.remove(&control.turn_id);
+            } else {
+                modes.insert(control.turn_id.clone(), control.mode);
+                set_by.insert(control.turn_id.clone(), (stored.entry.id.clone(), position));
+            }
+        }
+        Self { modes, set_by }
+    }
+
+    pub(super) fn mode(&self, turn: Option<&TurnId>) -> ContextMode {
+        turn.and_then(|turn| self.modes.get(turn).copied())
+            .unwrap_or_default()
+    }
+
+    /// The control entry that sets `turn`'s applied mode, if it has one.
+    pub(super) fn setter(&self, turn: &TurnId) -> Option<&EntryId> {
+        self.modes.contains_key(turn).then(|| &self.set_by[turn].0)
+    }
+
+    /// One report per controlled turn whose effective control entry is on
+    /// `branch`, ordered by that entry. A prefix build sees the head's modes
+    /// but cannot name a control entry it does not contain, so those turns are
+    /// omitted from its report; the head build always contains every setter.
+    fn report_on(&self, branch: &[&StoredEntry]) -> Vec<ControlReport> {
+        let positions: BTreeMap<&EntryId, usize> = branch
+            .iter()
+            .enumerate()
+            .map(|(position, stored)| (&stored.entry.id, position))
+            .collect();
+        let mut reports: Vec<(usize, ControlReport)> = self
+            .set_by
+            .iter()
+            .filter_map(|(turn, (entry, _))| {
+                let position = *positions.get(entry)?;
+                Some((
+                    position,
+                    ControlReport {
+                        turn_id: turn.clone(),
+                        mode: *self.modes.get(turn)?,
+                        control_entry_id: entry.clone(),
+                    },
+                ))
+            })
+            .collect();
+        reports.sort_by_key(|(position, _)| *position);
+        reports.into_iter().map(|(_, report)| report).collect()
+    }
+}
+
 #[derive(Default)]
 struct Counts {
     instructions: u64,
@@ -592,6 +691,8 @@ struct Walk<'a> {
     become_portable: Vec<PortabilityLoss>,
     /// Opaque bytes the projection would carry under the head's model.
     opaque_at_head: u64,
+    /// Whether the entry being decided belongs to a pinned turn.
+    pinned: bool,
 }
 
 impl Walk<'_> {
@@ -666,6 +767,8 @@ impl Walk<'_> {
     }
 
     fn push(&mut self, item: ContextItem, record: IncludedItem) {
+        let mut record = record;
+        record.pinned = self.pinned && record.entry_id.is_some();
         self.items.push(item);
         self.included.push(record);
     }
@@ -706,6 +809,7 @@ impl Walk<'_> {
                 opaque_bytes: 0,
                 blocks: Vec::new(),
                 provenance: None,
+                pinned: false,
             },
         );
         Ok(InstructionsReport::Included {
@@ -740,6 +844,7 @@ impl Walk<'_> {
                 opaque_bytes: 0,
                 blocks: Vec::new(),
                 provenance: None,
+                pinned: false,
             },
         );
         Ok(())
@@ -824,6 +929,7 @@ impl Walk<'_> {
                 opaque_bytes: opaque,
                 blocks,
                 provenance: None,
+                pinned: false,
             },
         );
         Ok(())
@@ -886,6 +992,7 @@ impl Walk<'_> {
                 opaque_bytes: 0,
                 blocks: Vec::new(),
                 provenance: Some(result.result.metadata.provenance),
+                pinned: false,
             },
         );
         Ok(())
@@ -906,6 +1013,7 @@ impl Walk<'_> {
                 opaque_bytes: 0,
                 blocks: Vec::new(),
                 provenance: None,
+                pinned: false,
             },
         );
         Ok(())

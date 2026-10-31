@@ -8,6 +8,7 @@ use super::pipeline::{configuration, outcome};
 use super::*;
 use crate::context::{ContextBuilder, ContextItem, ModelLimits};
 use crate::model::NativeContinuation;
+use crate::session::ContextMode;
 use std::sync::atomic::Ordering;
 
 /// Seeds run by default. Set `RUNTIME_SEED` to rerun one seed, or
@@ -268,7 +269,7 @@ fn script(rng: &mut Rng) -> std::collections::VecDeque<ProviderEvent> {
 }
 
 fn random_command(d: &mut Driver, rng: &mut Rng, issued: &mut Vec<(CommandId, String)>) {
-    let command = match rng.below(10) {
+    let command = match rng.below(12) {
         0..=3 => {
             let prompt = rng.pick(&["hello", "use tools", "again"]).to_string();
             let (id, prompt) = match rng.below(10) {
@@ -325,6 +326,29 @@ fn random_command(d: &mut Driver, rng: &mut Rng, issued: &mut Vec<(CommandId, St
                 _ => Some(rng.pick(&entries).clone()),
             };
             Command::SelectHead { head }
+        }
+        // Idle-only whole-turn controls: accepted, no-ops, unfinished and
+        // off-branch targets all reach the core, which must stay consistent.
+        9 => {
+            let turns: Vec<_> = d
+                .runtime
+                .snapshot()
+                .turns()
+                .map(|(id, _)| id.clone())
+                .collect();
+            let turn_id = if turns.is_empty() {
+                DeterministicEnv::new(0xffc).turn_id()
+            } else {
+                rng.pick(&turns).clone()
+            };
+            Command::SetContextControl {
+                turn_id,
+                mode: *rng.pick(&[
+                    ContextMode::Default,
+                    ContextMode::Pinned,
+                    ContextMode::Excluded,
+                ]),
+            }
         }
         _ => Command::SwitchModel {
             policy: *rng.pick(&[

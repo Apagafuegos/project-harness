@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+mod controls;
 mod versions;
 
 fn at() -> Timestamp {
@@ -553,20 +554,29 @@ fn mixed_live_history_equals_replay_including_deduplicated_commands() {
 
 #[test]
 fn j01_all_specification_fixtures_round_trip_and_replay() {
-    for name in ["branching", "interrupted-execution", "compaction"] {
+    // v1 fixtures stay v1; the v3 fixture exercises controls and the optional
+    // compaction model.
+    for (name, version) in [
+        ("branching", 1),
+        ("interrupted-execution", 1),
+        ("compaction", 1),
+        ("context-controls", 3),
+    ] {
         let (_temp, root, id) = fixture(name);
         for line in source(name)
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
         {
             let (mut record, _) = codec::decode(line).unwrap();
-            assert_eq!(record.version, 1, "{name}");
-            assert!(matches!(
-                codec::encode(&record),
-                Err(StoreError::Invalid("write_version"))
-            ));
-            // Rewritten as v2, a record round-trips unless it holds an
-            // intent: v1 intents lack the effects v2 requires.
+            assert_eq!(record.version, version, "{name}");
+            if version != CURRENT_VERSION {
+                assert!(matches!(
+                    codec::encode(&record),
+                    Err(StoreError::Invalid("write_version"))
+                ));
+            }
+            // Rewritten as the current version, a record round-trips unless it
+            // holds an intent: v1 intents lack the effects v2 requires.
             record.version = CURRENT_VERSION;
             let intent = matches!(&record.payload, RecordPayload::Commit(commit)
                 if commit.events.iter().any(|e| matches!(e, JournalEvent::ExecutionIntent(_))));
@@ -594,7 +604,7 @@ fn j01_all_specification_fixtures_round_trip_and_replay() {
         );
         assert_eq!(
             inspection.versions,
-            [(1, records(&source(name)).len() as u64)].into()
+            [(version, records(&source(name)).len() as u64)].into()
         );
         assert_eq!(
             snapshot.requires_recovery(),
@@ -690,7 +700,7 @@ fn j01_invalid_complete_records_fail_closed_without_losing_valid_prefix() {
                     json!("reasoning_summary")
             }),
         ),
-        ("version", Box::new(|r| r[8]["version"] = json!(3))),
+        ("version", Box::new(|r| r[8]["version"] = json!(4))),
         ("sequence", Box::new(|r| r[8]["seq"] = json!(100))),
         ("unknown_field", Box::new(|r| r[8]["extra"] = json!(true))),
         (
@@ -2025,7 +2035,7 @@ fn failed_turns_do_not_displace_the_two_recent_completed_turns_in_compaction() {
                 source_manifest: manifest,
                 supersedes: vec![],
                 summary: "must retain this completed turn".into(),
-                model: snapshot.header().initial_model.clone(),
+                model: Some(snapshot.header().initial_model.clone()),
                 configuration_fingerprint: snapshot.configuration().sha256.clone(),
             }),
         }],
@@ -2114,7 +2124,12 @@ fn append_fixture(name: &str) -> (tempfile::TempDir, Arc<DataRoot>, JournalStore
 #[test]
 fn reopened_branch_facts_and_indexes_equal_the_live_snapshot() {
     let mut cases = vec![];
-    for name in ["branching", "compaction", "interrupted-execution"] {
+    for name in [
+        "branching",
+        "compaction",
+        "interrupted-execution",
+        "context-controls",
+    ] {
         cases.push((name.to_owned(), append_fixture(name)));
     }
     for workload in [Workload::PlainTurns, Workload::ToolTurns] {

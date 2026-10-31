@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::{config::ModelLimits, estimate::EstimatorInfo};
-use crate::session::{Digest, EntryId, ModelRef, Provenance, ResponseId, SessionId, Usage};
+use crate::session::{
+    ContextMode, Digest, EntryId, ModelRef, Provenance, ResponseId, SessionId, TurnId, Usage,
+};
 
 /// Accounts for every entry on one branch for one projection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +28,11 @@ pub struct ContextReport {
     pub excluded: Vec<Exclusion>,
     /// Every compaction summary on the branch that no later one supersedes.
     pub summaries: Vec<SummaryReport>,
+    /// Effective non-default controls on the branch, in ancestral order, by
+    /// the position of the control entry that sets each turn's mode. Omitted
+    /// when no control applies, so a history without controls keeps its bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<ControlReport>,
     /// Estimated tokens by category, and opaque bytes.
     pub totals: Totals,
     /// The budget under the projection model's limits.
@@ -112,6 +119,12 @@ pub struct IncludedItem {
     /// `user_acknowledged_unknown`. Omitted for other items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+    /// The item belongs to a turn whose effective mode is `pinned`. Omitted
+    /// when false, so a projection without pins keeps its bytes. The
+    /// projection itself is unchanged: pinning changes no item, so it changes
+    /// no fingerprint.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 /// Which part of an entry a decision is about.
@@ -188,6 +201,23 @@ pub enum ExclusionReason {
     SupersededSummary,
     /// An entry replaced by a summary.
     CoveredBySummary,
+    /// Every entry of a turn the user excluded, by a `context_control`.
+    UserExcluded,
+    /// A `context_control` entry; it selects a turn's mode, not dialogue.
+    ContextControlMarker,
+}
+
+/// One turn whose effective mode is not `default`, on this branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlReport {
+    /// The controlled turn.
+    pub turn_id: TurnId,
+    /// Its effective mode: `pinned` or `excluded`.
+    pub mode: ContextMode,
+    /// The control entry that sets it, the last one for this turn before the
+    /// head.
+    pub control_entry_id: EntryId,
 }
 
 /// One excluded entry, block or continuation.

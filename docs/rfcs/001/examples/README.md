@@ -1,13 +1,14 @@
 # RFC-001 serialization examples
 
-These v1 JSONL journals use real exact-byte SHA-256 checksums. Storage tests now
-decode, round-trip and semantically replay all three with their artifacts. They
-remain specification fixtures, not proof of an agent runtime or sandbox.
+These JSONL journals use real exact-byte SHA-256 checksums. Storage tests decode,
+round-trip and semantically replay all four with their artifacts. They remain
+specification fixtures, not proof of an agent runtime or sandbox.
 
-The examples stay v1 and remain valid: readers accept v1 and v2 records, and
-nothing rewrites a v1 record. Appending to one of these journals continues it
-with v2 records on the same checksum chain; the storage and runtime tests do
-that rather than keeping a mixed example here.
+The first three stay v1 and remain valid: readers accept v1 to v3 records, and
+nothing rewrites an older record. Appending to one of those journals continues
+it with v3 records on the same checksum chain; the storage and runtime tests do
+that rather than keeping a mixed example here. The fourth is v3 and exercises
+the v3-only entry kind.
 
 - [Branching](branching.jsonl): a completed first exchange followed by two sibling
   user branches. The later turns deliberately end before inference. Navigation
@@ -19,10 +20,14 @@ that rather than keeping a mixed example here.
 - [Compaction](compaction.jsonl): three completed turns and a rolling summary
   covering the first turn while retaining the two recent turns. Its manifest
   binds exact source entries and checksums. The originals remain in the journal.
+- [Context controls](context-controls.jsonl): three completed turns, then four
+  `context_control` v3 entries: turn 1 pinned, turn 2 excluded, turn 3 pinned
+  and then reset to `default`. Every turn stays in history; only projection
+  changes, and the control entries are not dialogue.
 
-The [v1 schema](../schema/session-v1.schema.json) checks their envelope and
-payload shapes; the [v2 schema](../schema/session-v2.schema.json) checks records
-written since.
+The [v1](../schema/session-v1.schema.json), [v2](../schema/session-v2.schema.json)
+and [v3](../schema/session-v3.schema.json) schemas each check one record
+version's envelope and payload shapes.
 The RFC adds checksum, role, ancestry, head, state, authorization, and recovery
 semantics. JSON Schema alone cannot validate those relationships.
 

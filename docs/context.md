@@ -8,8 +8,11 @@ Milestone 4 step 01a adds tool definitions, inference options and validated
 native continuation selection ([decision 0014](decisions/0014-model-seam.md)).
 Milestone 4 steps 05–06 add rolling summaries, manual preview/commit/cancel,
 inspection diffs and idle-only automatic triggering
-([decision 0019](decisions/0019-compaction.md)). Both native wire adapters are
-implemented in `harness-providers`; see [providers](providers.md).
+([decision 0019](decisions/0019-compaction.md)). Milestone 6 step 01 folds durable
+whole-turn pins and exclusions into the projection and report
+([decision 0025](decisions/0025-context-controls.md)); compaction still refuses a
+controlled span until m6-02. Both native wire adapters are implemented in
+`harness-providers`; see [providers](providers.md).
 
 ## Three layers
 
@@ -63,6 +66,9 @@ the closed enum `ExclusionReason`.
 | Assistant response, failed | Excluded, with all its parts | `failed_response` |
 | Tool result | Included as a `tool_result` item with its `provenance`, directly after its call | — |
 | `model_changed` | Excluded from dialogue; it decides the model | `model_change_marker` |
+| `context_control` | Excluded from dialogue; it sets its target turn's mode | `context_control_marker` |
+| Any entry of a turn whose effective mode is `excluded` | Excluded, whole turn including tool groups | `user_excluded` |
+| Any entry of a turn whose effective mode is `pinned` | Included as usual, with `pinned: true` in the report | — |
 | Compaction summary listed in a later summary's `supersedes` | Excluded | `superseded_summary` |
 | Entry covered by a summary that is not superseded | Excluded | `covered_by_summary` |
 | Compaction summary otherwise | Included as a `summary` item at the position of its first covered entry | — |
@@ -106,6 +112,18 @@ Notes:
   code through the text, which leads with it. A result written as v1 or as v2
   therefore projects identically, and the code did not need a projection
   version.
+- **Controls.** A `context_control` entry names one finished turn and appends
+  the mode it should have: `default`, `pinned` or `excluded`. Effective modes
+  come from the fold of the controls on the **selected ancestry**; the last
+  control for a turn wins, and a sibling's control never applies. An excluded
+  turn is left out whole, before summary replacement, so a tool call and its
+  result are always excluded together and a turn both excluded and covered
+  still reports `user_excluded` (its entries remain named in
+  `summaries[].covered_entry_ids`). A pinned turn is included exactly as before;
+  pinning changes what the report says and nothing that is sent. The control
+  entry itself is a marker, never dialogue. The fold used for a continuation's
+  rebuilt prefix is the head's fold, so excluding an earlier turn invalidates a
+  later native continuation through the existing prefix rule.
 - **Siblings.** Entries off the selected branch never appear, in either list.
   RFC-001's `other_branch` reason is not used; inspect another branch by
   passing its head.
@@ -232,9 +250,10 @@ label every number: `estimated_*` (from the named estimator), `*_bytes`
 | `identity` | `session_id`, `journal_sequence`, `head`, `model`, configuration digest, `builder_version`, `projection_version` |
 | `fingerprint` | The projection's fingerprint |
 | `instructions` | `absent`, `empty` or `included` |
-| `included` | One record per projection item, in order: `entry_id` (`null` for instructions), `kind`, `estimated_tokens`, `opaque_bytes`, for assistant items each included `block`/`continuation` part, and for tool results their `provenance` (omitted for other items) |
+| `included` | One record per projection item, in order: `entry_id` (`null` for instructions), `kind`, `estimated_tokens`, `opaque_bytes`, for assistant items each included `block`/`continuation` part, for tool results their `provenance`, and `pinned: true` for items of a pinned turn (omitted when false) |
 | `excluded` | Per entry, block or continuation, in branch order: `entry_id`, `part` (`entry`, `block` with `index`, or `continuation`), `reason`, `summary_id`, and `effective_summary` under nested summaries |
 | `summaries` | Each summary that no later one supersedes: covered entry IDs, superseded IDs, `included`, estimate |
+| `controls` | Effective non-`default` modes on the branch, in ancestral order, by the position of the control entry that sets each: `turn_id`, `mode`, `control_entry_id`. Omitted when empty |
 | `totals` | `estimator` (method, version, parameters); estimated instructions, user text, assistant text, tool calls, tool results, summaries, media and total; `opaque_provider_state_bytes` |
 | `budget` | `known` (limits, each deduction, usable, estimated, headroom, overflow, trigger, threshold) or `unknown` (reason) |
 | `reported_usage` | Latest completed response's provider usage, or `null` |
@@ -251,8 +270,11 @@ one part decision; nothing from another branch appears; only summary reasons
 carry a `summary_id` or `effective_summary`, each names a summary on the
 branch, and they differ;
 every included call has exactly one included result directly after its
-response, and every result has its call. A violation is
-`ContextError::Invariant(code)`, a builder bug. The core faults on it.
+response, and every result has its call; every reported control names a control
+entry on the branch that sets the applied mode, every included item's `pinned`
+marker matches that mode, and every entry of an excluded turn has its
+`user_excluded` decision. A violation is `ContextError::Invariant(code)`, a
+builder bug. The core faults on it.
 
 ## Fingerprint
 
@@ -265,7 +287,9 @@ is off; a test fails if it is ever enabled. Items carry entry IDs, so identical
 text on different branches has different fingerprints.
 
 Only the logical projection is hashed, never the report, response IDs,
-continuation or deadline. Tools and inference options are hashed. The same snapshot branch, head, model and configuration give the same
+continuation or deadline. Tools and inference options are hashed; a pin is not,
+because it changes no item. Excluding a turn removes items, so it changes the
+fingerprint; a control that changes nothing sent leaves it as it was. The same snapshot branch, head, model and configuration give the same
 fingerprint on any machine and after any reopen. Entries are immutable; rebuilding an earlier head gives the same fingerprint
 when current instructions, tools and options are unchanged.
 
@@ -278,6 +302,9 @@ responses with nothing to project, and adds `empty_response`,
 `provenance` to `tool_result` items and to their report records. Version 4
 adds tools/options to the fingerprint and selects a single validated continuation
 outside assistant items; builder version 4 checks/accounts for that selection.
+Builder version 5 adds `controls`, the `pinned` marker and the
+`user_excluded`/`context_control_marker` reasons; the projection version stays 4
+because no item changed.
 
 ## Integration
 
@@ -325,7 +352,10 @@ current turn. A rolling span includes prior active summary coverage and explicit
 supersedes applicable ancestor summaries. Sibling summaries never apply.
 `NotEligible` explains empty history, only recent turns, unresolved work, no new
 dialogue since a summary, a non-completed turn barrier, an unknown head or invalid
-policy. Pins are not implemented and have no exclusion policy yet.
+policy. It also refuses a span that would contain a turn whose effective mode is
+`pinned` or `excluded` (`context_controls_in_span`). That refusal is interim:
+m6-02 replaces it with skipping pinned turns, and until then automatic
+compaction behaves like any other `NotEligible` trigger.
 
 The optional session configuration object is independently shape-checked:
 
@@ -394,7 +424,8 @@ for pre-C1 budget checking, pending-start deduplication, events and failure code
 ## Not implemented
 
 - Real tokenizers (estimates remain explicitly heuristic).
-- Pinning and alternative strategies (Milestone 6).
+- Compaction that skips pinned turns instead of refusing a controlled span
+  (m6-02), and alternative strategies (m6-04).
 
 ## Tests
 

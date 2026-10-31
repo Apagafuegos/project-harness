@@ -233,6 +233,99 @@ fn golden_compaction_places_the_summary_at_its_first_covered_entry() {
 }
 
 #[test]
+fn golden_context_controls_pin_and_exclude_whole_turns() {
+    let fixture = Fixture::new("context-controls");
+    let built = fixture.build(None);
+    golden("context-controls", &built.report);
+    // The fixture's control entries have four-digit identities.
+    let control = |suffix: &str| -> EntryId {
+        format!("019a0000-0000-7000-8000-00000000{suffix}")
+            .parse()
+            .unwrap()
+    };
+    let report = &built.report;
+    // Turn 1 is pinned, turn 2 is excluded, turn 3 is back to default, and
+    // the two controls for turn 3 are markers only.
+    assert_eq!(
+        included_ids(report),
+        [
+            Some(id("4a1")),
+            Some(id("4a3")),
+            Some(id("4c1")),
+            Some(id("4c3"))
+        ]
+    );
+    assert_eq!(
+        report
+            .included
+            .iter()
+            .map(|item| item.pinned)
+            .collect::<Vec<_>>(),
+        [true, true, false, false]
+    );
+    let excluded: Vec<_> = report
+        .excluded
+        .iter()
+        .map(|e| (e.entry_id.clone(), e.part, e.reason))
+        .collect();
+    assert_eq!(
+        excluded,
+        [
+            (id("4b1"), Part::Entry, ExclusionReason::UserExcluded),
+            (id("4b3"), Part::Entry, ExclusionReason::UserExcluded),
+            (
+                control("4050"),
+                Part::Entry,
+                ExclusionReason::ContextControlMarker
+            ),
+            (
+                control("4051"),
+                Part::Entry,
+                ExclusionReason::ContextControlMarker
+            ),
+            (
+                control("4052"),
+                Part::Entry,
+                ExclusionReason::ContextControlMarker
+            ),
+            (
+                control("4053"),
+                Part::Entry,
+                ExclusionReason::ContextControlMarker
+            ),
+        ]
+    );
+    assert_eq!(
+        report.controls,
+        [
+            ControlReport {
+                turn_id: "019a0000-0000-7000-8000-0000000004a0".parse().unwrap(),
+                mode: ContextMode::Pinned,
+                control_entry_id: control("4050"),
+            },
+            ControlReport {
+                turn_id: "019a0000-0000-7000-8000-0000000004b0".parse().unwrap(),
+                mode: ContextMode::Excluded,
+                control_entry_id: control("4051"),
+            }
+        ]
+    );
+    // Excluding a turn changes what is sent, so it changes the fingerprint;
+    // pinning changes only the report.
+    let mut journal = Journal::new();
+    journal.exchange("one", "first");
+    journal.exchange("two", "second");
+    let plain = journal.build().projection.fingerprint;
+    let turn = journal.turn_of(&journal.snapshot().head().cloned().unwrap());
+    journal.control(&turn, ContextMode::Pinned);
+    assert_eq!(journal.build().projection.fingerprint, plain);
+    journal.control(&turn, ContextMode::Excluded);
+    assert_ne!(journal.build().projection.fingerprint, plain);
+    // The golden's own fingerprint is over the two turns left in the request.
+    assert_ne!(built.projection.fingerprint, plain);
+}
+
+#[test]
 fn golden_interrupted_execution_excludes_the_unanswered_call() {
     let fixture = Fixture::new("interrupted-execution");
     let built = fixture.build(None);
@@ -611,6 +704,32 @@ impl Journal {
         [user, assistant]
     }
 
+    /// A `context_control` entry at the current head, while idle.
+    fn control(&mut self, turn: &TurnId, mode: ContextMode) -> EntryId {
+        self.append(
+            vec![(
+                None,
+                EntryPayload::ContextControl(ContextControl {
+                    turn_id: turn.clone(),
+                    mode,
+                }),
+            )],
+            vec![],
+        );
+        self.head().unwrap()
+    }
+
+    /// The turn a user or assistant entry belongs to.
+    fn turn_of(&self, entry: &EntryId) -> TurnId {
+        self.snapshot()
+            .entry(entry)
+            .unwrap()
+            .entry
+            .turn_id
+            .clone()
+            .unwrap()
+    }
+
     fn switch_model(&mut self, model: ModelRef) -> EntryId {
         self.append(
             vec![(
@@ -665,7 +784,7 @@ impl Journal {
                     source_manifest: manifest,
                     supersedes,
                     summary: summary.into(),
-                    model: snapshot.model_at(snapshot.head()).unwrap().clone(),
+                    model: Some(snapshot.model_at(snapshot.head()).unwrap().clone()),
                     configuration_fingerprint: snapshot.configuration().sha256.clone(),
                 }),
             )],
@@ -866,15 +985,16 @@ fn responses_with_nothing_to_project_are_accounted_for_without_an_item() {
     });
     let snapshot = journal.snapshot();
     let branch = snapshot.ancestry(snapshot.head()).unwrap();
+    let applied = super::builder::Controls::fold(&branch);
     assert_eq!(
-        super::check::check(&branch, &built.projection.input, &twice),
+        super::check::check(&branch, &built.projection.input, &twice, &applied),
         Err("duplicate_decision")
     );
     // Dropping one part decision leaves the response incompletely decided.
     let mut partial = built.report.clone();
     partial.excluded.pop();
     assert_eq!(
-        super::check::check(&branch, &built.projection.input, &partial),
+        super::check::check(&branch, &built.projection.input, &partial, &applied),
         Err("incomplete_part_decisions")
     );
 }
@@ -1452,7 +1572,7 @@ fn media_blocks_use_flat_estimates() {
 /// v2 added fields the model never sees: the same entries written as v1 or
 /// as v2 build byte-identical reports, fingerprints and items.
 #[test]
-fn entries_written_as_v1_or_v2_project_identically() {
+fn entries_written_before_v3_project_identically() {
     let mut journal = Journal::new();
     journal.user(vec![text("use tools")]);
     let first = CallId::new();
@@ -1468,16 +1588,20 @@ fn entries_written_as_v1_or_v2_project_identically() {
         .path()
         .join("sessions")
         .join(format!("{session}.jsonl"));
-    let v2: Vec<Value> = fs::read(path)
+    let v3: Vec<Value> = fs::read(path)
         .unwrap()
         .split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_slice::<Value>(l).unwrap()["record"].clone())
         .collect();
-    assert!(v2.iter().all(|r| r["version"] == 2));
-    // Give the v2 responses a fingerprint too, so every new field is set.
-    let mut with_fingerprints = v2.clone();
-    let mut v1 = v2.clone();
+    assert!(v3.iter().all(|r| r["version"] == 3));
+    // Give the responses a fingerprint too, so every v2 field is set.
+    let mut with_fingerprints = v3.clone();
+    let mut v1 = v3.clone();
+    let mut v2 = v3.clone();
+    for record in &mut v2 {
+        record["version"] = json!(2);
+    }
     for (v2, v1) in with_fingerprints.iter_mut().zip(&mut v1) {
         v1["version"] = json!(1);
         let (Some(Value::Array(new)), Some(Value::Array(old))) = (
@@ -1529,7 +1653,7 @@ fn entries_written_as_v1_or_v2_project_identically() {
             .unwrap()
     };
     let built = journal.build();
-    for records in [&v2, &with_fingerprints, &v1] {
+    for records in [&v3, &v2, &with_fingerprints, &v1] {
         let rebuilt = build(records);
         assert_eq!(
             serde_json::to_string_pretty(&rebuilt.report).unwrap(),
@@ -1560,6 +1684,7 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
     let branch = snapshot.ancestry(snapshot.head()).unwrap();
     let built = journal.build();
     let items = &built.projection.input.items;
+    let applied = super::builder::Controls::fold(&branch);
     let check = |items: &[ContextItem], report: &ContextReport| {
         super::check::check(
             &branch,
@@ -1568,6 +1693,7 @@ fn invariant_checks_reject_incomplete_foreign_and_unpaired_reports() {
                 ..built.projection.input.clone()
             },
             report,
+            &applied,
         )
     };
     assert_eq!(check(items, &built.report), Ok(()));
@@ -1714,8 +1840,9 @@ fn context_build_benchmark() {
         std::hint::black_box(fingerprint(input));
     });
     let branch_entries = snapshot.ancestry(snapshot.head()).unwrap();
+    let applied = super::builder::Controls::fold(&branch_entries);
     let checking = time(&|| {
-        super::check::check(&branch_entries, input, &built.report).unwrap();
+        super::check::check(&branch_entries, input, &built.report, &applied).unwrap();
     });
     eprintln!(
         "context build over {branch} entries: median {:?}, min {:?}, max {:?} \
@@ -1765,6 +1892,239 @@ fn prefix_mismatch(built: &BuiltContext) {
             .iter()
             .any(|e| e.part == Part::Continuation
                 && e.reason == ExclusionReason::ContinuationPrefixMismatch)
+    );
+}
+
+#[test]
+fn a_pin_marks_its_turn_without_changing_the_projection() {
+    let mut journal = Journal::new();
+    let first = journal.exchange("one", "first");
+    let turn = journal.turn_of(&first[0]);
+    let before = journal.build();
+    assert!(!before.report.included.iter().any(|item| item.pinned));
+    assert!(before.report.controls.is_empty());
+
+    journal.control(&turn, ContextMode::Pinned);
+    let pinned = journal.build();
+    // Pinning changes what the report says, not what is sent.
+    assert_eq!(pinned.projection.input.items, before.projection.input.items);
+    assert_eq!(pinned.projection.fingerprint, before.projection.fingerprint);
+    assert!(pinned.report.included.iter().all(|item| item.pinned));
+    let [control] = &pinned.report.controls[..] else {
+        panic!("one effective control")
+    };
+    assert_eq!(control.turn_id, turn);
+    assert_eq!(control.mode, ContextMode::Pinned);
+    assert!(matches!(
+        pinned.report.excluded.as_slice(),
+        [Exclusion {
+            reason: ExclusionReason::ContextControlMarker,
+            part: Part::Entry,
+            summary_id: None,
+            effective_summary: None,
+            ..
+        }]
+    ));
+
+    // A reset is another control, and restores the original bytes exactly.
+    journal.control(&turn, ContextMode::Default);
+    let reset = journal.build();
+    assert_eq!(reset.projection.input, before.projection.input);
+    assert_eq!(reset.projection.fingerprint, before.projection.fingerprint);
+    assert!(!reset.report.included.iter().any(|item| item.pinned));
+    assert!(reset.report.controls.is_empty());
+}
+
+#[test]
+fn controls_apply_to_whole_turns_of_the_selected_ancestry() {
+    let mut journal = Journal::new();
+    let first = journal.exchange("one", "first");
+    let second = journal.exchange("two", "second");
+    let third = journal.exchange("three", "third");
+    let (a, b, c) = (
+        journal.turn_of(&first[0]),
+        journal.turn_of(&second[0]),
+        journal.turn_of(&third[0]),
+    );
+    let pin_a = journal.control(&a, ContextMode::Pinned);
+    let exclude_b = journal.control(&b, ContextMode::Excluded);
+    journal.control(&c, ContextMode::Pinned);
+    journal.control(&c, ContextMode::Default);
+    let built = journal.build();
+    // Only turns A and C are sent; B's user message and response are both out.
+    assert_eq!(
+        included_ids(&built.report),
+        [
+            Some(first[0].clone()),
+            Some(first[1].clone()),
+            Some(third[0].clone()),
+            Some(third[1].clone())
+        ]
+    );
+    assert_eq!(
+        built
+            .report
+            .included
+            .iter()
+            .map(|item| item.pinned)
+            .collect::<Vec<_>>(),
+        [true, true, false, false]
+    );
+    // Every entry of the excluded turn is out, as one entry-level decision.
+    let decisions: Vec<_> = built
+        .report
+        .excluded
+        .iter()
+        .filter(|e| [&second[0], &second[1]].contains(&&e.entry_id))
+        .map(|e| (e.entry_id.clone(), e.part, e.reason))
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            (
+                second[0].clone(),
+                Part::Entry,
+                ExclusionReason::UserExcluded
+            ),
+            (
+                second[1].clone(),
+                Part::Entry,
+                ExclusionReason::UserExcluded
+            ),
+        ]
+    );
+    assert_eq!(
+        built.report.controls,
+        [
+            ControlReport {
+                turn_id: a.clone(),
+                mode: ContextMode::Pinned,
+                control_entry_id: pin_a,
+            },
+            ControlReport {
+                turn_id: b.clone(),
+                mode: ContextMode::Excluded,
+                control_entry_id: exclude_b,
+            }
+        ]
+    );
+    // The pinned turn is included, and the reset control leaves no trace in
+    // the effective summary.
+    assert!(built.report.controls.iter().all(|item| item.turn_id != c));
+}
+
+#[test]
+fn a_control_on_a_sibling_branch_never_applies() {
+    let mut journal = Journal::new();
+    let first = journal.exchange("one", "first");
+    let turn = journal.turn_of(&first[0]);
+    let user = first[0].clone();
+    // A sibling branch forked before the control. Only the shared user entry
+    // of the pinned turn is on it.
+    journal.navigate(Some(user.clone()));
+    journal.exchange("sibling", "reply");
+    journal.control(&turn, ContextMode::Pinned);
+    let sibling = journal.build();
+    assert_eq!(
+        sibling
+            .report
+            .included
+            .iter()
+            .map(|item| (item.entry_id.clone(), item.pinned))
+            .collect::<Vec<_>>(),
+        [
+            (Some(user.clone()), true),
+            (
+                Some(sibling.report.included[1].entry_id.clone().unwrap()),
+                false
+            ),
+            (
+                Some(sibling.report.included[2].entry_id.clone().unwrap()),
+                false
+            )
+        ]
+    );
+    assert_eq!(sibling.report.controls.len(), 1);
+    // The first branch does not see it.
+    journal.navigate(Some(first[1].clone()));
+    let built = journal.build();
+    assert!(!built.report.included.iter().any(|item| item.pinned));
+    assert!(built.report.controls.is_empty());
+    assert!(
+        !built
+            .report
+            .excluded
+            .iter()
+            .any(|e| e.reason == ExclusionReason::ContextControlMarker)
+    );
+}
+
+#[test]
+fn excluding_a_turn_never_splits_a_tool_group() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("use tools")]);
+    let call_id = CallId::new();
+    journal.respond(
+        Response::completed(vec![text("Let me look."), call(&call_id, "read")])
+            .finish(FinishReason::ToolCalls),
+    );
+    journal.answer();
+    journal.respond(Response::completed(vec![text("Done.")]));
+    let turn = journal.turn_of(&journal.snapshot().head().unwrap().clone());
+    journal.control(&turn, ContextMode::Excluded);
+    let built = journal.build();
+    assert!(
+        built.projection.input.items.is_empty(),
+        "the whole turn is out"
+    );
+    let reasons = reasons(&built.report);
+    assert!(
+        reasons
+            .iter()
+            .any(|(part, reason)| *part == Part::Entry && *reason == ExclusionReason::UserExcluded)
+    );
+    // The proposal, its result and the final response are all excluded as the
+    // user's choice; no orphan-call reason is invented.
+    assert!(!reasons.iter().any(|(_, reason)| matches!(
+        reason,
+        ExclusionReason::OrphanToolCall
+            | ExclusionReason::FailedResponse
+            | ExclusionReason::EmptyResponse
+    )));
+    assert_eq!(
+        reasons
+            .iter()
+            .filter(|(_, reason)| *reason == ExclusionReason::UserExcluded)
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn excluding_a_turn_invalidates_a_continuation_bound_to_the_old_prefix() {
+    let mut journal = Journal::new();
+    let first = journal.exchange("one", "first");
+    let turn = journal.turn_of(&first[0]);
+    journal.user(vec![text("two")]);
+    let artifact = journal.root.put_artifact(b"continuation").unwrap();
+    journal.respond(Response {
+        continuation: Some(artifact),
+        ..Response::completed(vec![text("second")])
+    });
+    assert!(journal.build().projection.input.continuation.is_some());
+    journal.control(&turn, ContextMode::Excluded);
+    let built = journal.build();
+    // The control is folded over the head's ancestry, so the rebuilt prefix
+    // no longer matches. The existing rule drops the continuation; no
+    // control-specific branch exists.
+    prefix_mismatch(&built);
+    assert!(
+        !built
+            .projection
+            .input
+            .items
+            .iter()
+            .any(|item| item.entry_id() == Some(&first[0]))
     );
 }
 

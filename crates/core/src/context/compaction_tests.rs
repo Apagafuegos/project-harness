@@ -3,6 +3,7 @@ use super::*;
 use crate::{
     context::compaction::*,
     model::{scripted::*, *},
+    session::ContextMode,
 };
 
 #[tokio::test]
@@ -303,6 +304,61 @@ fn selection_closed_reasons_and_retained_window() {
 }
 
 #[test]
+fn controlled_turns_are_refused_in_the_span_and_ignored_in_the_retained_window() {
+    // Interim m6-01: compaction refuses a span holding a controlled turn.
+    for mode in [ContextMode::Pinned, ContextMode::Excluded] {
+        let mut journal = Journal::new();
+        let first = journal.exchange("one", "first");
+        journal.exchange("two", "second");
+        journal.exchange("three", "third");
+        journal.exchange("four", "fourth");
+        let turn = journal.turn_of(&first[0]);
+        journal.control(&turn, mode);
+        assert_eq!(
+            select_span(
+                &journal.snapshot(),
+                journal.head().as_ref(),
+                &CompactionConfig::default()
+            ),
+            Err(NotEligible::ContextControlsInSpan),
+            "{mode:?}"
+        );
+        assert_eq!(
+            CompactionError::NotEligible(NotEligible::ContextControlsInSpan).code(),
+            "context_controls_in_span"
+        );
+
+        // A controlled turn inside the retained window does not change the span.
+        let mut journal = Journal::new();
+        for (prompt, reply) in [
+            ("one", "first"),
+            ("two", "second"),
+            ("three", "third"),
+            ("four", "fourth"),
+        ] {
+            journal.exchange(prompt, reply);
+        }
+        let last_turn = journal.turn_of(&journal.snapshot().head().cloned().unwrap());
+        journal.control(&last_turn, mode);
+        let selected = select_span(
+            &journal.snapshot(),
+            journal.head().as_ref(),
+            &CompactionConfig::default(),
+        )
+        .unwrap();
+        let expected: Vec<_> = journal
+            .snapshot()
+            .ancestry(journal.head().as_ref())
+            .unwrap()[..4]
+            .iter()
+            .map(|stored| stored.entry.id.clone())
+            .collect();
+        assert_eq!(selected.covered_entry_ids, expected, "{mode:?}");
+        assert!(selected.supersedes.is_empty());
+    }
+}
+
+#[test]
 fn noncompleted_turn_is_a_contiguous_barrier() {
     let mut journal = Journal::new();
     journal.user(vec![text("failed")]);
@@ -399,13 +455,8 @@ async fn storage_acceptance_normal_and_rolling() {
         panic!()
     };
     assert_eq!(
-        c.model,
-        journal
-            .configuration
-            .compaction()
-            .summary_model
-            .clone()
-            .unwrap()
+        c.model.as_ref(),
+        journal.configuration.compaction().summary_model.as_ref()
     );
     assert_eq!(c.source_fingerprint, Digest::of(&first.manifest_bytes));
     assert_eq!(first.binding.source_fingerprint, c.source_fingerprint);

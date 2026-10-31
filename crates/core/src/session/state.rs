@@ -162,6 +162,17 @@ impl SessionSnapshot {
     pub fn requires_recovery(&self) -> bool {
         self.0.active_turn.is_some() || self.0.has_unresolved()
     }
+    /// Why a `context_control` for `turn` with `mode` at `head` would be
+    /// invalid, as its stable code. Storage and the runtime share this check,
+    /// so a command and a hand-written record never disagree.
+    pub(crate) fn control_error(
+        &self,
+        head: Option<&EntryId>,
+        turn: &TurnId,
+        mode: ContextMode,
+    ) -> std::result::Result<(), &'static str> {
+        self.0.control_error(head, turn, mode)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,6 +198,8 @@ pub(crate) struct BranchFacts {
     pending: Arc<[CallRef]>,
     /// Model in effect at this entry.
     model: ModelRef,
+    /// Effective non-default mode of each controlled turn after this entry.
+    controls: OrdMap<TurnId, ContextMode>,
 }
 /// Internal ordered key for a call; the public `CallRef` is not `Ord`.
 type CallKey = (EntryId, CallId);
@@ -282,6 +295,7 @@ impl State {
             root: Arc::new(BranchFacts {
                 pending: Arc::from([]),
                 model: header.initial_model.clone(),
+                controls: OrdMap::new(),
             }),
             unresolved: OrdSet::new(),
             invocation_by_call: OrdMap::new(),
@@ -729,6 +743,18 @@ impl State {
                 )?;
                 self.compaction(entry, compaction)?;
             }
+            EntryPayload::ContextControl(control) => {
+                self.idle()?;
+                require(
+                    entry.turn_id.is_none() && starts.is_empty(),
+                    "context_control_inside_turn",
+                )?;
+                if let Err(code) =
+                    self.control_error(entry.parent_id.as_ref(), &control.turn_id, control.mode)
+                {
+                    return Err(StoreError::Invalid(code));
+                }
+            }
         }
         Ok(())
     }
@@ -1074,6 +1100,80 @@ impl State {
         Ok(())
     }
 
+    /// The effective non-default mode of every controlled turn reachable from
+    /// `head`, as `Step` computes it. The builder folds the same rule.
+    fn controls_at(&self, head: Option<&EntryId>) -> Result<&OrdMap<TurnId, ContextMode>> {
+        Ok(&self.facts(head)?.controls)
+    }
+    /// Entries of `turn` on the ancestry of `head` that an active summary covers.
+    /// An active summary is one no other summary on this ancestry supersedes,
+    /// exactly as the builder's `Plan` counts them.
+    fn covered_by_active_summary(&self, ancestry: &[&StoredEntry], turn: &TurnId) -> bool {
+        let superseded: BTreeSet<&EntryId> = ancestry
+            .iter()
+            .filter_map(|stored| match &stored.entry.payload {
+                EntryPayload::Compaction(compaction) => Some(compaction.supersedes.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let covered: BTreeSet<&EntryId> = ancestry
+            .iter()
+            .filter_map(|stored| match &stored.entry.payload {
+                EntryPayload::Compaction(compaction) if !superseded.contains(&stored.entry.id) => {
+                    Some(compaction.covered_entry_ids.iter())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        ancestry.iter().any(|stored| {
+            stored.entry.turn_id.as_ref() == Some(turn) && covered.contains(&stored.entry.id)
+        })
+    }
+
+    /// Why a `context_control` would be invalid, as its stable code; `Ok` when
+    /// it would be accepted. The runtime calls this before persisting, so its
+    /// rejection carries the code storage uses.
+    pub(crate) fn control_error(
+        &self,
+        head: Option<&EntryId>,
+        turn: &TurnId,
+        mode: ContextMode,
+    ) -> std::result::Result<(), &'static str> {
+        if !self
+            .turns
+            .get(turn)
+            .is_some_and(|info| info.outcome.is_some())
+        {
+            return Err("context_control_unfinished_turn");
+        }
+        let ancestry = self.ancestry(head).map_err(|_| "unknown_head_or_parent")?;
+        if !ancestry
+            .iter()
+            .any(|stored| stored.entry.turn_id.as_ref() == Some(turn))
+        {
+            return Err("context_control_not_ancestral");
+        }
+        let effective = self
+            .controls_at(head)
+            .map_err(|_| "unknown_head_or_parent")?
+            .get(turn)
+            .copied()
+            .unwrap_or_default();
+        if effective == mode {
+            return Err("context_control_noop");
+        }
+        // Pinning content a summary already absorbed would promise that the
+        // turn is kept verbatim. Excluding it would promise the same: the
+        // summary text derived from it stays in the projection. Only a reset
+        // is always recorded, because it is how a control is undone.
+        if !mode.is_default() && self.covered_by_active_summary(&ancestry, turn) {
+            return Err("context_control_covered");
+        }
+        Ok(())
+    }
+
     fn compaction(&self, entry: &Entry, compaction: &Compaction) -> Result<()> {
         require(
             compaction.source_fingerprint == compaction.source_manifest.sha256
@@ -1123,6 +1223,17 @@ impl State {
                         .all(|e| compaction.covered_entry_ids.contains(&e.entry.id)),
                     "compaction_splits_turn",
                 )?;
+            }
+        }
+        // A pinned turn is kept verbatim on this ancestry (RFC-001 6.1), so no
+        // summary may absorb it. Decision 9: the effective mode at the
+        // compaction's parent decides.
+        let controls = &self.facts(entry.parent_id.as_ref())?.controls;
+        for id in &compaction.covered_entry_ids {
+            if let Some(turn) = &self.entries[id].entry.turn_id
+                && controls.get(turn) == Some(&ContextMode::Pinned)
+            {
+                return Err(StoreError::Invalid("compaction_covers_pinned_turn"));
             }
         }
         for id in &compaction.supersedes {
@@ -1195,6 +1306,7 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
             Ok(Arc::new(BranchFacts {
                 pending,
                 model: parent.model.clone(),
+                controls: parent.controls.clone(),
             }))
         }
         EntryPayload::ToolResult(result) => {
@@ -1205,17 +1317,33 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
             Ok(Arc::new(BranchFacts {
                 pending: Arc::from(&parent.pending[1..]),
                 model: parent.model.clone(),
+                controls: parent.controls.clone(),
             }))
         }
         EntryPayload::UserMessage(_) | EntryPayload::Compaction(_) => {
             require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
             Ok(parent.clone())
         }
+        EntryPayload::ContextControl(control) => {
+            require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
+            let mut controls = parent.controls.clone();
+            if control.mode.is_default() {
+                controls.remove(&control.turn_id);
+            } else {
+                controls.insert(control.turn_id.clone(), control.mode);
+            }
+            Ok(Arc::new(BranchFacts {
+                pending: parent.pending.clone(),
+                model: parent.model.clone(),
+                controls,
+            }))
+        }
         EntryPayload::ModelChanged(change) => {
             require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
             Ok(Arc::new(BranchFacts {
                 pending: parent.pending.clone(),
                 model: change.model.clone(),
+                controls: parent.controls.clone(),
             }))
         }
     }
@@ -1321,6 +1449,19 @@ impl State {
         }
         Ok(&self.header.initial_model)
     }
+    fn walked_controls(&self, head: Option<&EntryId>) -> Result<OrdMap<TurnId, ContextMode>> {
+        let mut controls = OrdMap::new();
+        for stored in self.ancestry(head)? {
+            if let EntryPayload::ContextControl(control) = &stored.entry.payload {
+                if control.mode.is_default() {
+                    controls.remove(&control.turn_id);
+                } else {
+                    controls.insert(control.turn_id.clone(), control.mode);
+                }
+            }
+        }
+        Ok(controls)
+    }
     fn walked_pending(&self, head: Option<&EntryId>) -> Result<Vec<CallRef>> {
         let mut pending = Vec::new();
         for stored in self.ancestry(head)? {
@@ -1349,7 +1490,8 @@ impl State {
                 }
                 EntryPayload::UserMessage(_)
                 | EntryPayload::ModelChanged(_)
-                | EntryPayload::Compaction(_) => {
+                | EntryPayload::Compaction(_)
+                | EntryPayload::ContextControl(_) => {
                     require(pending.is_empty(), "head_inside_tool_exchange")?;
                 }
             }
@@ -1383,6 +1525,11 @@ impl State {
                 self.model_at(head).unwrap(),
                 self.walked_model_at(head).unwrap(),
                 "model at {head:?}"
+            );
+            assert_eq!(
+                self.controls_at(head).unwrap(),
+                &self.walked_controls(head).unwrap(),
+                "controls at {head:?}"
             );
         }
         assert!(self.branch.keys().eq(self.entries.keys()));

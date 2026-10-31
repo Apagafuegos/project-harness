@@ -185,10 +185,25 @@ pub struct Compaction {
     pub supersedes: Vec<EntryId>,
     /// Summary.
     pub summary: String,
-    /// Model.
-    pub model: ModelRef,
+    /// Model that generated the summary; v3 only. `None` means no model was
+    /// used, as for a deterministic strategy, and is encoded by omitting the
+    /// field rather than writing null. Readers of v1 and v2 always see `Some`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
     /// Configuration fingerprint.
     pub configuration_fingerprint: Digest,
+}
+
+/// Persisted context-control fields: a durable, append-only statement of the
+/// mode one finished turn has on the branch it is appended to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextControl {
+    /// The finished turn this control applies to. The entry's own `turn_id`
+    /// stays `None`: a control is not dialogue.
+    pub turn_id: TurnId,
+    /// The effective mode this control sets for that turn.
+    pub mode: ContextMode,
 }
 
 /// Persisted entry fields.
@@ -521,6 +536,8 @@ pub enum EntryPayload {
     ModelChanged(ModelChanged),
     /// Compaction.
     Compaction(Compaction),
+    /// Context control.
+    ContextControl(ContextControl),
 }
 
 /// Persisted RecordPayload variants.
@@ -619,6 +636,27 @@ pub enum FinishReason {
     OutputLimit,
     /// Refusal.
     Refusal,
+}
+
+/// One turn's effective context mode on a branch. The last control for a turn
+/// in the selected ancestry wins; `default` is the absence of a control.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMode {
+    /// Included by the normal inclusion rules.
+    #[default]
+    Default,
+    /// Kept verbatim: included by the normal rules and never summarized.
+    Pinned,
+    /// Left out of the request; still recorded, reported and displayed.
+    Excluded,
+}
+
+impl ContextMode {
+    /// Whether this is the mode a turn has with no control in effect.
+    pub fn is_default(self) -> bool {
+        self == Self::Default
+    }
 }
 
 /// Persisted Portability values.

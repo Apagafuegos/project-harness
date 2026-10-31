@@ -390,6 +390,45 @@ async fn streamed_answer_renders_markdown_and_status() {
 }
 
 #[tokio::test]
+async fn context_control_entries_render_a_one_line_marker() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("done")]).await;
+    let turn = recorded.start("first").await;
+    recorded.wait_finished(&turn).await;
+    for (mode, marker) in [
+        (ContextMode::Pinned, "Pinned turn"),
+        (ContextMode::Excluded, "Excluded turn"),
+        (ContextMode::Default, "Reset turn"),
+    ] {
+        let accepted = tokio::time::timeout(
+            DEADLINE,
+            recorded.handle.command(Command::SetContextControl {
+                turn_id: turn.clone(),
+                mode,
+            }),
+        )
+        .await
+        .expect("control deadline")
+        .expect("control accepted");
+        assert!(matches!(accepted, Accepted::ContextControlSet { .. }));
+        recorded
+            .pump(|view| {
+                let snapshot = &view.snapshot;
+                snapshot
+                    .entry(snapshot.head().unwrap())
+                    .is_some_and(|stored| {
+                        matches!(&stored.entry.payload,
+                        EntryPayload::ContextControl(control) if control.mode == mode)
+                    })
+            })
+            .await;
+        let screen = text(&render(&mut recorded.app(), 100, 60));
+        assert!(screen.contains(marker), "{marker} missing: {screen}");
+    }
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
 async fn approval_modal_captures_a_d_r_and_esc() {
     let fixture = Fixture::new(false);
     let mut recorded = fixture

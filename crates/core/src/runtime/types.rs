@@ -269,6 +269,14 @@ pub enum Command {
         /// Explicit omission policy; callers should default to `Reject`.
         policy: crate::session::Portability,
     },
+    /// Durably set one finished turn's context mode at the current head while
+    /// idle. One `context_control` entry is appended; undo is another control.
+    SetContextControl {
+        /// The finished turn on this head's ancestry.
+        turn_id: TurnId,
+        /// Its effective mode: `default`, `pinned` or `excluded`.
+        mode: crate::session::ContextMode,
+    },
     /// State what happened to an invocation whose outcome is unknown. Only
     /// accepted while the runtime awaits resolution.
     ResolveUncertain {
@@ -623,6 +631,15 @@ pub enum Accepted {
         /// Classified target preview, with metadata only for every affected part.
         preview: Box<PreviewReport>,
     },
+    /// The `context_control` entry is durable.
+    ContextControlSet {
+        /// Its acknowledgement.
+        ack: CommitAck,
+        /// The controlled turn.
+        turn_id: TurnId,
+        /// Its newly effective mode.
+        mode: crate::session::ContextMode,
+    },
 }
 
 /// Why a command was refused. Refused commands change nothing.
@@ -703,6 +720,13 @@ pub enum EventKind {
     ModelSwitched {
         /// Classified target preview.
         preview: Box<PreviewReport>,
+    },
+    /// A context control is durable. The durable entry and `Committed` follow.
+    ContextControlSet {
+        /// The controlled turn.
+        turn_id: TurnId,
+        /// Its newly effective mode.
+        mode: crate::session::ContextMode,
     },
     /// A commit is durable. One per `Persisted`.
     Committed {

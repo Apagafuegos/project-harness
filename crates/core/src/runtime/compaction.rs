@@ -248,7 +248,7 @@ impl Runtime {
         }
         if c.strategy != RollingSummary::NAME
             || c.strategy_version != RollingSummary::VERSION
-            || Some(&c.model) != self.configuration.compaction().summary_model.as_ref()
+            || c.model.as_ref() != self.configuration.compaction().summary_model.as_ref()
         {
             return Err("policy_fingerprint");
         }
