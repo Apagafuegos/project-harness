@@ -10,9 +10,9 @@
 //!
 //! See `docs/decisions/0023-tui-model.md`.
 
-mod navigation;
 mod inspector;
 mod inspector_shell;
+mod navigation;
 mod render;
 pub mod runtime;
 pub mod runtime_nav;
