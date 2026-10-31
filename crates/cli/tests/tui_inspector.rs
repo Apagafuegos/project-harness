@@ -67,6 +67,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(scripts: Vec<Script>, automatic: bool) -> Self {
+        Self::with_capacity(scripts, automatic, 64).await
+    }
+    async fn with_capacity(scripts: Vec<Script>, automatic: bool, event_capacity: usize) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = Arc::new(DataRoot::open(temp.path().join("state"), true).unwrap());
         let workspace = temp.path().join("workspace");
@@ -80,7 +83,10 @@ impl Fixture {
                 .unwrap(),
             )
             .unwrap();
-        let mut config = DriverConfig::default();
+        let mut config = DriverConfig {
+            event_capacity,
+            ..Default::default()
+        };
         for name in ["session", "other", "summary"] {
             config.runtime.context.catalog.insert(
                 model(name),
@@ -248,7 +254,7 @@ fn pages(app: &mut App) -> String {
 /// Compare every panel with a fresh client of exactly that authoritative view.
 #[tokio::test]
 async fn lag_reset_mid_stream_replaces_transcript_inspector_and_branch_tree() {
-    let f = Fixture::new(
+    let f = Fixture::with_capacity(
         vec![
             reply("old answer"),
             Script::new([
@@ -258,10 +264,15 @@ async fn lag_reset_mid_stream_replaces_transcript_inspector_and_branch_tree() {
             ]),
         ],
         false,
+        1,
     )
     .await;
     f.turn("old question").await;
-    let old_view = f.handle.view().await.unwrap();
+    let mut subscription = f.handle.subscribe();
+    let Some(SubscriptionItem::Reset(old_client)) = subscription.next().await else {
+        panic!("initial reset required")
+    };
+    let old_view = old_client.view().clone();
     let old_report = f.handle.inspect_context(None, None).await.unwrap();
     f.handle
         .command(Command::StartTurn {
@@ -276,7 +287,13 @@ async fn lag_reset_mid_stream_replaces_transcript_inspector_and_branch_tree() {
         v.partial.as_ref().is_some_and(|p| !p.blocks.is_empty())
     })
     .await;
-    let new_view = f.handle.view().await.unwrap();
+    // Do not consume events during the turn: the capacity-one broadcast must
+    // overflow, and the production Subscription must supply a coherent reset.
+    let Some(SubscriptionItem::Reset(new_client)) = subscription.next().await else {
+        panic!("lag must produce a reset")
+    };
+    let new_view = new_client.view().clone();
+    assert!(new_view.partial.is_some());
     let new_report = f.handle.inspect_context(None, None).await.unwrap();
     assert_ne!(
         old_report.identity.journal_sequence,
