@@ -111,6 +111,12 @@ impl ModelCatalog {
             .map(|info| info.capabilities.clone())
             .unwrap_or_default()
     }
+
+    /// Every configured model with its metadata, ordered by provider instance
+    /// and then model name. Read-only; clients use it to offer model choices.
+    pub fn iter(&self) -> impl Iterator<Item = (&ModelRef, &ModelInfo)> {
+        self.models.iter()
+    }
 }
 
 /// Runtime configuration of the context builder. Not persisted; a report
@@ -376,5 +382,48 @@ impl SessionConfiguration {
     /// The `instructions` field, or `None` when it is absent.
     pub fn instructions(&self) -> Option<&[Instruction]> {
         self.instructions.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod catalog_iter_tests {
+    use super::*;
+
+    fn model(instance: &str, name: &str) -> ModelRef {
+        ModelRef {
+            provider_instance: instance.into(),
+            model: name.into(),
+        }
+    }
+
+    #[test]
+    fn iter_lists_every_model_in_instance_then_name_order() {
+        let limits = |tokens| ModelLimits {
+            context_tokens: Some(tokens),
+            max_output_tokens: None,
+        };
+        let catalog = ModelCatalog::new()
+            .with(model("openai-codex", "gpt-b"), limits(2))
+            .with(model("anthropic", "claude"), limits(3))
+            .with(model("openai-codex", "gpt-a"), limits(1));
+        let listed: Vec<_> = catalog
+            .iter()
+            .map(|(model, info)| {
+                (
+                    model.provider_instance.as_str(),
+                    model.model.as_str(),
+                    info.limits.context_tokens,
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("anthropic", "claude", Some(3)),
+                ("openai-codex", "gpt-a", Some(1)),
+                ("openai-codex", "gpt-b", Some(2)),
+            ]
+        );
+        assert_eq!(ModelCatalog::new().iter().count(), 0);
     }
 }

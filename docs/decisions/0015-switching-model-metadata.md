@@ -116,3 +116,10 @@ adapter's tests.
 
 `harness ask` exposes the policy as `--switch-policy reject|omit-optional`
 (ADR 0020 amendment).
+
+## Amendment (M5): enumerating the catalog
+
+`ModelCatalog::iter()` lists every configured model with its metadata, in
+`ModelRef` order (provider instance, then model). It's read-only and doesn't
+change how limits or capabilities are resolved. The TUI's model pickers use it
+over the merged catalog that the shared wiring builds.
