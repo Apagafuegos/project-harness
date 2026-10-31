@@ -1,12 +1,14 @@
 # Provider transport, adapters and the router (M4 steps 02–04, 07)
 
 `harness-providers` is the shared HTTP/SSE and credential boundary for adapters.
-It depends on `harness-core`; core does not depend on it. Both native adapters
-are implemented: the OpenAI Responses adapter
+It depends on `harness-core`; core does not depend on it. Both native wire
+formats are implemented: the OpenAI Responses adapter
 ([ADR 0016](decisions/0016-provider-transport.md),
 [ADR 0017](decisions/0017-openai-adapter.md)) and the Anthropic Messages adapter
 ([ADR 0018](decisions/0018-anthropic-adapter.md)), plus the router that selects
-between them per request.
+between them per request. The Messages adapter serves two endpoint profiles: Anthropic
+itself and DeepSeek's Anthropic-compatible API
+([ADR 0024](decisions/0024-deepseek-profile.md)).
 
 ## Adapter use
 
@@ -62,11 +64,13 @@ headers, and no secret in errors, events or logs. OpenAI behavior is unchanged.
 let provider: Arc<dyn ModelProvider> = Arc::new(
     Router::new()
         .with("openai-codex", Arc::new(openai))
-        .with("anthropic", Arc::new(anthropic)),
+        .with("anthropic", Arc::new(anthropic))
+        .with("deepseek", Arc::new(deepseek)),
 );
 let mut catalog = ModelCatalog::new();
 openai::extend_catalog(&mut catalog, Profile::ChatGptCodex, "openai-codex");
-anthropic::extend_catalog(&mut catalog, "anthropic");
+anthropic::extend_catalog(&mut catalog, anthropic::Profile::Anthropic, "anthropic");
+anthropic::extend_catalog(&mut catalog, anthropic::Profile::DeepSeek, "deepseek");
 ```
 
 `harness_providers::Router` implements `ModelProvider` by dispatching each
@@ -92,9 +96,9 @@ to its owner).
   instances can serve the same model name with different accounts, and mixing
   them would replay one account's native state under another's identity.
 - One catalog covers every registered instance: `openai::extend_catalog` and
-  `anthropic::extend_catalog` add each adapter's sourced rows to a single
-  `ModelCatalog`, because a session that may switch needs limits for every
-  instance it can reach. Core's `ModelCatalog` is not iterable, so the adapters
+  `anthropic::extend_catalog` (once per Messages profile) add each adapter's
+  sourced rows to a single `ModelCatalog`, because a session that may switch
+  needs limits for every instance it can reach. Core's `ModelCatalog` is not iterable, so the adapters
   add their own rows instead of the router merging catalogs.
 - The Echo adapter's public conformance cases run through the router
   (`conformance_cases_pass_through_the_router`, the same eleven cases as without
@@ -218,14 +222,61 @@ ADR 0018 holds the request mapping, the complete event table, the thinking and
 signature replay rules, the error refinements, the credential scheme, the
 catalog sources and the live check.
 
+## DeepSeek profile of the Messages adapter
+
+`anthropic::AnthropicMessages` carries an explicit `Profile`
+(`Profile::Anthropic` or `Profile::DeepSeek`) chosen at construction:
+`from_env()` reads `ANTHROPIC_API_KEY`, `deepseek_from_env()` reads
+`DEEPSEEK_API_KEY`, and `with_profile` builds either over an explicit transport.
+The profile fixes the endpoint, the credential variable and scheme, the headers,
+which documented request controls the backend accepts, whether a thinking block
+needs a signature, and the native-state schema. There is no second adapter and no
+provider branch in the request or event mapping.
+
+- Endpoint `https://api.deepseek.com/anthropic/v1/messages`; the key is sent as
+  `x-api-key` (DeepSeek also accepts `Authorization: Bearer`). No
+  `anthropic-version` and no `anthropic-beta`: DeepSeek documents both as ignored
+  and this profile sends neither.
+- Thinking is on by default. A configured `ReasoningEffort` becomes
+  `thinking: {"type":"enabled"}` plus `output_config.effort`
+  (`low`/`medium`/`high`; DeepSeek also accepts its own wider set and ignores
+  `budget_tokens`). Requests that replay a thinking block add nothing: DeepSeek
+  documents no `thinking.block_binding` control, so the Anthropic
+  preserved-thinking beta and control are never sent from this profile.
+- A thinking block is documented as supported and never as signed, so this
+  profile accepts an unsigned block on both the stream and the replay path, while
+  the Anthropic profile still rejects one. State is stored under
+  `deepseek.messages.thinking.v1`; owner and schema each prevent cross-profile
+  replay. `redacted_thinking` is not in DeepSeek's vocabulary: it is neither
+  stored nor replayed.
+- `service_tier` stays mapped (documented as ignored); `is_error` and
+  `cache_control` are ignored by DeepSeek and harmless as sent.
+- Usage is the closing `message_delta` snapshot, which is the last
+  `UsageUpdated`; `cache_creation_input_tokens` is always 0. A start-up timeout
+  can arrive as an unnamed `data` frame holding only an object with `error`, which
+  maps to a coded `provider_failure` instead of a malformed-stream guess.
+- `anthropic::catalog(Profile::DeepSeek, instance)` supplies
+  `deepseek-flash` and `deepseek-v4-pro` (1M context, 384K maximum output, thinking
+  and tools; images on `deepseek-flash` only, user-side only). Unknown models are
+  text-plus-tools.
+- `scripts/live-check.sh deepseek` is the opt-in real check: one streamed turn
+  with a tool round trip and one follow-up turn that replays the stored thinking
+  block, against `HARNESS_LIVE_DEEPSEEK_MODEL` (default `deepseek-flash`). With no
+  `DEEPSEEK_API_KEY` it prints `live deepseek: skipped (no DEEPSEEK_API_KEY)` and
+  exits **77**.
+
+ADR 0024 holds the control list, the signature behavior, the catalog sources and
+the date read.
+
 ## Offline tests
 
 `cargo test -p harness-providers --locked` runs only local fixture reads and
 loopback servers. It includes the crate-private Echo SSE adapter with eleven
 public core conformance cases, the OpenAI adapter's complete 17-case conformance
-manifest on both profiles, and the Anthropic adapter's complete 17-case manifest
-over hand-written fixtures. No real `~/.codex/auth.json` is opened, no Anthropic
-credential is read, and no test reaches the external network.
+manifest on both profiles, and the Messages adapter's complete 17-case manifest
+over hand-written fixtures on both of its profiles (Anthropic and DeepSeek). No
+real `~/.codex/auth.json` is opened, no Anthropic or DeepSeek credential is read,
+and no test reaches the external network.
 The [M4 acceptance](milestone-4-acceptance.md) adds terminal-success dispatch,
 cumulative-usage replacement and multimodal/native replay through reopen for
 both real adapters, plus the deterministic `provider_session` tour.

@@ -20,7 +20,7 @@ use harness_core::{
     },
     tools::ToolDefinition,
 };
-use harness_providers::anthropic::{AnthropicMessages, LIVE_CHECK_MODEL, catalog, info};
+use harness_providers::anthropic::{AnthropicMessages, LIVE_CHECK_MODEL, Profile, catalog, info};
 use serde_json::json;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(180);
@@ -143,7 +143,7 @@ fn main() {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| LIVE_CHECK_MODEL.to_owned());
-    let limit = info(&model)
+    let limit = info(Profile::Anthropic, &model)
         .map(|metadata| {
             format!(
                 "context={} max_output={}",
@@ -159,7 +159,7 @@ fn main() {
         })
         .unwrap_or_else(|| "context=unknown max_output=unknown".into());
     // The catalog the application would configure, built from the same table.
-    let _ = catalog("anthropic");
+    let _ = catalog(Profile::Anthropic, "anthropic");
     println!("live anthropic: model={model} {limit}");
 
     let adapter = match AnthropicMessages::from_env() {

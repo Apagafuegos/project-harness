@@ -448,7 +448,7 @@ impl Fixture {
         };
         let mut catalog = ModelCatalog::new();
         openai::extend_catalog(&mut catalog, Profile::ChatGptCodex, OPENAI);
-        anthropic::extend_catalog(&mut catalog, ANTHROPIC);
+        anthropic::extend_catalog(&mut catalog, anthropic::Profile::Anthropic, ANTHROPIC);
         catalog.insert(
             text_only.clone(),
             ModelInfo {

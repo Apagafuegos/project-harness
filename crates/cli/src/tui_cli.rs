@@ -74,7 +74,9 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
         .expect("default")
         .as_str();
     let codex = args.get_one::<String>("auth").expect("default") == "codex";
-    if provider_name == "anthropic" && args.value_source("auth") == Some(ValueSource::CommandLine) {
+    if !wiring::openai_auth_applies(provider_name)
+        && args.value_source("auth") == Some(ValueSource::CommandLine)
+    {
         return Err((2, "auth_not_applicable".into()));
     }
     let selected = wiring::provider_instance(provider_name, codex);

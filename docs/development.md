@@ -74,6 +74,7 @@ subcommand. Both stdin and stdout must be terminals; otherwise it exits 2 with
 harness --data-root /absolute/private/state
 harness --provider openai --auth codex --model gpt-6.1-sol
 harness --provider anthropic --model claude-sonnet-5-5
+harness --provider deepseek --model deepseek-flash
 harness sessions
 harness --session SESSION_ID
 ```
@@ -371,7 +372,8 @@ workspace, data root, auth profile and summary policy. The saved model is used
 unless `--provider` or `--model` explicitly requests a switch. Switches default
 to reject; `--switch-policy omit-optional` permits reported native-state loss,
 never required media/tool incompatibilities. `--provider anthropic` uses
-`ANTHROPIC_API_KEY`, not consumer subscription credentials.
+`ANTHROPIC_API_KEY` and `--provider deepseek` uses `DEEPSEEK_API_KEY`, never
+consumer subscription credentials.
 Imported policies with remembered grants or different approval defaults are refused.
 Uncertain side effects require explicit resolution through the runtime API; this
 minimal client never guesses, replays tools or automatically repairs a torn tail.

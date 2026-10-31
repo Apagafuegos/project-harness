@@ -10,7 +10,7 @@ use harness_core::{
     },
 };
 use harness_providers::{
-    anthropic::{self, AnthropicMessages},
+    anthropic::{self, AnthropicMessages, Profile as MessagesProfile},
     openai::{self, OpenAiResponses, Profile},
     router::Router,
 };
@@ -324,9 +324,13 @@ fn project_instructions(workspace: &std::path::Path) -> Result<Option<String>, S
     }
 }
 
-/// Provider instance for the Anthropic adapter. One account, one owner of
+/// Provider instance for the Anthropic Messages adapter. One account, one owner of
 /// native state.
 pub const ANTHROPIC: &str = "anthropic";
+/// DeepSeek's Anthropic-compatible Messages endpoint, `DEEPSEEK_API_KEY`. It is
+/// its own instance because it is its own account and its own native-state
+/// owner: thinking written by one instance is never replayed to the other.
+pub const DEEPSEEK: &str = "deepseek";
 /// OpenAI's two authentication profiles are separate instances: subscription
 /// state must never be replayed to the API-key endpoint, or the reverse.
 pub const CODEX: &str = "openai-codex";
@@ -399,8 +403,20 @@ pub fn providers(selected: &str, codex_hint: bool) -> Result<Providers, Provider
         codex_hint,
     ) {
         Ok(Some(adapter)) => {
-            anthropic::extend_catalog(&mut catalog, ANTHROPIC);
+            anthropic::extend_catalog(&mut catalog, MessagesProfile::Anthropic, ANTHROPIC);
             router.register(ANTHROPIC, Arc::new(adapter));
+        }
+        Ok(None) => {}
+        Err(code) => return Err(code),
+    }
+    match skip_or_fail(
+        AnthropicMessages::deepseek_from_env(),
+        selected == DEEPSEEK,
+        codex_hint,
+    ) {
+        Ok(Some(adapter)) => {
+            anthropic::extend_catalog(&mut catalog, MessagesProfile::DeepSeek, DEEPSEEK);
+            router.register(DEEPSEEK, Arc::new(adapter));
         }
         Ok(None) => {}
         Err(code) => return Err(code),
@@ -419,14 +435,24 @@ pub fn providers(selected: &str, codex_hint: bool) -> Result<Providers, Provider
 pub fn provider_instance(provider: &str, codex: bool) -> &'static str {
     match provider {
         "anthropic" => ANTHROPIC,
+        "deepseek" => DEEPSEEK,
         _ if codex => CODEX,
         _ => API_KEY,
     }
+}
+/// Whether `--auth` selects this provider's authentication.
+///
+/// Only the OpenAI instances take it; the Messages profiles each read their own
+/// API-key variable, so an explicit `--auth` with them is a usage error rather
+/// than a silently ignored flag.
+pub fn openai_auth_applies(provider: &str) -> bool {
+    provider == "openai"
 }
 /// New-session defaults; never silently applied to a continued session.
 pub fn default_model(provider: &str, codex: bool) -> &'static str {
     match (provider, codex) {
         ("anthropic", _) => "claude-sonnet-5-5",
+        ("deepseek", _) => anthropic::DEEPSEEK_LIVE_CHECK_MODEL,
         (_, true) => openai::LIVE_CHECK_MODEL,
         _ => "gpt-5.5",
     }

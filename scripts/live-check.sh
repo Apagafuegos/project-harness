@@ -3,6 +3,7 @@
 #
 #   scripts/live-check.sh openai [--auth codex|api-key]
 #   scripts/live-check.sh anthropic
+#   scripts/live-check.sh deepseek
 #   scripts/live-check.sh ask
 #   scripts/live-check.sh switch [--auth codex|api-key]
 #
@@ -15,6 +16,12 @@
 # login). Without that variable the check is skipped and exits 77, so a caller
 # can tell "skipped" from "passed" (0) and "failed" (1). The model comes from
 # HARNESS_LIVE_ANTHROPIC_MODEL, defaulting to claude-haiku-5-5.
+#
+# DeepSeek uses DEEPSEEK_API_KEY on its Anthropic-compatible endpoint (M6
+# decision 10) and follows the same skip rule: without the variable it exits 77.
+# The model comes from HARNESS_LIVE_DEEPSEEK_MODEL, defaulting to deepseek-flash.
+# It runs one streamed turn with a tool round trip and one follow-up turn that
+# replays the stored thinking block.
 #
 # `switch` proves mid-session switching in one durable session. With
 # ANTHROPIC_API_KEY it runs OpenAI -> Anthropic -> OpenAI with a tool round trip;
@@ -96,9 +103,10 @@ if [ "$provider" = "ask" ]; then
   fi
   exit 0
 fi
-if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ]; then
+if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ] && [ "$provider" != "deepseek" ]; then
   echo "usage: scripts/live-check.sh openai [--auth codex|api-key]" >&2
   echo "       scripts/live-check.sh anthropic" >&2
+  echo "       scripts/live-check.sh deepseek" >&2
   echo "       scripts/live-check.sh ask" >&2
   echo "       scripts/live-check.sh tui" >&2
   echo "       scripts/live-check.sh switch [--auth codex|api-key]" >&2
@@ -118,6 +126,18 @@ if [ "$provider" = "anthropic" ]; then
     exit 77
   fi
   exec cargo run --locked --quiet -p harness-providers --example live_anthropic
+fi
+
+if [ "$provider" = "deepseek" ]; then
+  if [ "$#" -gt 0 ]; then
+    echo "deepseek takes no arguments" >&2
+    exit 2
+  fi
+  if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+    echo "live deepseek: skipped (no DEEPSEEK_API_KEY)"
+    exit 77
+  fi
+  exec cargo run --locked --quiet -p harness-providers --example live_deepseek
 fi
 
 auth="${HARNESS_LIVE_OPENAI_AUTH:-codex}"

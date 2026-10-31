@@ -14,7 +14,7 @@ use harness_core::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{STATE_SCHEMA, models, preserved};
+use super::{Profile, models, preserved};
 use crate::native_id::native_call_id;
 
 /// Artifact bytes permitted for this request, keyed by exact reference.
@@ -48,9 +48,11 @@ impl Reads {
     }
 }
 
-/// Read exactly the artifacts request building consumes: user images and
-/// same-owner thinking state this adapter wrote. Nothing else is fetched.
+/// Read exactly the artifacts request building consumes for `profile`: user
+/// images and same-owner thinking state this adapter wrote. Nothing else is
+/// fetched.
 pub(crate) async fn collect(
+    profile: Profile,
     input: &ModelInput,
     artifacts: &ArtifactSource,
 ) -> Result<Reads, ModelError> {
@@ -68,7 +70,7 @@ pub(crate) async fn collect(
                     owner,
                     schema,
                     artifact,
-                } if owner == &input.model && schema == STATE_SCHEMA => artifact,
+                } if owner == &input.model && schema == profile.state_schema() => artifact,
                 _ => continue,
             };
             if !wanted.contains(reference) {
@@ -111,9 +113,13 @@ impl Message {
     }
 }
 
-/// Build the JSON body for one Messages request.
-pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelError> {
-    let capabilities = models::capabilities(&input.model.model);
+/// Build the JSON body for one Messages request on `profile`.
+pub(crate) fn build(
+    profile: Profile,
+    input: &ModelInput,
+    reads: &Reads,
+) -> Result<Value, ModelError> {
+    let capabilities = models::capabilities(profile, &input.model.model);
     if !input.tools.is_empty() && !capabilities.tools {
         return Err(unsupported("the model does not accept tool definitions"));
     }
@@ -125,7 +131,7 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
     if input.options.max_output_tokens == 0 {
         return Err(invalid("max_output_tokens must be positive"));
     }
-    let options = provider_options(input)?;
+    let options = provider_options(profile, input)?;
     let mut messages = Vec::new();
     let mut calls = Vec::new();
     for item in &input.items {
@@ -136,7 +142,7 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
                 Message::push("user", blocks, &mut messages);
             }
             ContextItem::Assistant { content, .. } => {
-                let blocks = assistant_blocks(content, input, reads, &mut calls)?;
+                let blocks = assistant_blocks(profile, content, input, reads, &mut calls)?;
                 Message::push("assistant", blocks, &mut messages);
             }
             ContextItem::ToolResult {
@@ -182,11 +188,12 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
         );
     }
     if let Some(effort) = input.options.reasoning_effort {
-        // Current models use adaptive thinking; depth is `output_config.effort`.
-        // `type: "enabled"` with `budget_tokens` is rejected on the 4.7+ family,
-        // and `type: "disabled"` is rejected by the always-on models, so the
-        // adapter only ever asks for adaptive thinking.
-        body.insert("thinking".into(), json!({"type": "adaptive"}));
+        // Anthropic's current family accepts only adaptive thinking; DeepSeek
+        // documents `enabled`/`disabled`. `type: "enabled"` with `budget_tokens`
+        // is rejected on the 4.7+ family, and `type: "disabled"` is rejected by
+        // the always-on models, so the profile decides the one type it sends and
+        // neither profile ever sends a token budget.
+        body.insert("thinking".into(), json!({"type": profile.thinking_type()}));
         let effort = match effort {
             ReasoningEffort::Low => "low",
             ReasoningEffort::Medium => "medium",
@@ -195,10 +202,13 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
         body.insert("output_config".into(), json!({"effort": effort}));
     }
     if let Some(tier) = options.service_tier {
+        // DeepSeek documents `service_tier` as ignored; both profiles keep one
+        // provider option and one field name, and the field cannot change any
+        // DeepSeek model's behavior.
         body.insert("service_tier".into(), json!(tier));
     }
     let mut body = Value::Object(body);
-    if replays_thinking(&body) {
+    if profile.drops_failing_thinking_blocks() && replays_thinking(&body) {
         // Preserved thinking binds a block to the exact prefix that produced it
         // (system, tools, and every earlier message). Compaction replaces
         // earlier turns with a summary and the kept turns keep their thinking,
@@ -216,7 +226,7 @@ pub(crate) fn build(input: &ModelInput, reads: &Reads) -> Result<Value, ModelErr
             .cloned()
             .unwrap_or_else(|| {
                 let mut thinking = Map::new();
-                thinking.insert("type".into(), json!("adaptive"));
+                thinking.insert("type".into(), json!(profile.thinking_type()));
                 thinking
             });
         thinking.insert("block_binding".into(), preserved::drop_block());
@@ -257,12 +267,13 @@ struct Options {
 
 const SERVICE_TIERS: [&str; 2] = ["auto", "standard_only"];
 
-fn provider_options(input: &ModelInput) -> Result<Options, ModelError> {
+fn provider_options(profile: Profile, input: &ModelInput) -> Result<Options, ModelError> {
     let mut options = Options::default();
     for (namespace, value) in &input.options.provider_options {
         if namespace != "anthropic" {
             return Err(unsupported(&format!(
-                "provider option namespace {namespace} is not supported by the Anthropic adapter"
+                "provider option namespace {namespace} is not supported by the {} adapter",
+                profile.label()
             )));
         }
         let Some(object) = value.as_object() else {
@@ -352,6 +363,7 @@ fn user_blocks(
 
 /// Assistant content becomes text, `tool_use` blocks and replayed thinking.
 fn assistant_blocks(
+    profile: Profile,
     content: &[ContentBlock],
     input: &ModelInput,
     reads: &Reads,
@@ -388,13 +400,16 @@ fn assistant_blocks(
                 artifact,
             } => {
                 // The core already scopes state to the request's owner; a
-                // foreign owner is skipped, never recovered.
+                // foreign owner is skipped, never recovered. The schema is the
+                // second half of the same guarantee: state written under the
+                // other profile's schema is never replayed here.
                 if owner != &input.model {
                     continue;
                 }
-                if schema != STATE_SCHEMA {
+                if schema != profile.state_schema() {
                     return Err(unsupported(&format!(
-                        "native state schema {schema} is not supported by the Anthropic adapter"
+                        "native state schema {schema} is not supported by the {} adapter",
+                        profile.label()
                     )));
                 }
                 let bytes = reads
@@ -403,15 +418,23 @@ fn assistant_blocks(
                 let value: Value = serde_json::from_slice(bytes)
                     .map_err(|_| invalid("native state is not a JSON content block"))?;
                 let kind = value.get("type").and_then(Value::as_str);
-                // Exact native shape: `thinking` keeps its signature and
-                // `redacted_thinking` keeps its opaque `data`. Anything else is
-                // not a block this adapter wrote.
+                // Exact native shape: `thinking` keeps whatever the provider
+                // returned, and `redacted_thinking` keeps its opaque `data`.
+                // Anything else is not a block this adapter wrote. A signature
+                // is required only where the profile documents one, and a
+                // signature that is present must still be a string.
+                let signature_ok = match value.get("signature") {
+                    None => !profile.requires_thinking_signature(),
+                    Some(signature) => signature.is_string(),
+                };
                 let valid = match kind {
                     Some("thinking") => {
-                        value.get("thinking").is_some_and(Value::is_string)
-                            && value.get("signature").is_some_and(Value::is_string)
+                        value.get("thinking").is_some_and(Value::is_string) && signature_ok
                     }
-                    Some("redacted_thinking") => value.get("data").is_some_and(Value::is_string),
+                    Some("redacted_thinking") => {
+                        profile.supports_redacted_thinking()
+                            && value.get("data").is_some_and(Value::is_string)
+                    }
                     _ => false,
                 };
                 if !valid {

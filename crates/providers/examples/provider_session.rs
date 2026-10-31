@@ -126,7 +126,11 @@ async fn main() {
         Profile::Platform,
         "openai",
     );
-    anthropic::extend_catalog(&mut config.runtime.context.catalog, "anthropic");
+    anthropic::extend_catalog(
+        &mut config.runtime.context.catalog,
+        anthropic::Profile::Anthropic,
+        "anthropic",
+    );
     let handle = SessionHandle::create(
         root,
         SessionId::new(),

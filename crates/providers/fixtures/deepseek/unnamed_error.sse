@@ -1,0 +1,9 @@
+# Hand-written from DeepSeek's streaming section: when waiting for generation to
+# start times out, the service may send an unnamed `data` frame holding only an
+# error object, with no SSE event name and no top-level `type`, and then close
+# the connection. There is no `message_start` in that case.
+status: 200
+header: content-type: text/event-stream
+---
+data: {"error":{"message":"Upstream request timed out"}}
+

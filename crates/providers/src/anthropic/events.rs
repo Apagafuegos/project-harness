@@ -1,5 +1,5 @@
 //! Native Messages events. Raw thinking is private replay data, never display text.
-use super::{Counters, STATE_SCHEMA};
+use super::{Counters, Profile};
 use crate::sse::SseEvent;
 use harness_core::{
     model::{ProviderEvent, ProviderOutcome},
@@ -19,6 +19,7 @@ struct Block {
 }
 /// Response-local state; native indices preserve content order.
 pub(crate) struct Mapper {
+    profile: Profile,
     started: bool,
     finished: bool,
     blocks: BTreeMap<u32, Block>,
@@ -27,8 +28,9 @@ pub(crate) struct Mapper {
     counters: Arc<Counters>,
 }
 impl Mapper {
-    pub(crate) fn new(counters: Arc<Counters>) -> Self {
+    pub(crate) fn new(counters: Arc<Counters>, profile: Profile) -> Self {
         Self {
+            profile,
             started: false,
             finished: false,
             blocks: BTreeMap::new(),
@@ -55,7 +57,25 @@ impl Mapper {
     pub(crate) fn push(&mut self, event: &SseEvent) -> Result<Vec<ProviderEvent>, ModelError> {
         let v: Value =
             serde_json::from_str(&event.data).map_err(|_| malformed("invalid event JSON"))?;
-        let kind = field(&v, "type")?;
+        let Some(kind) = v.get("type").and_then(Value::as_str) else {
+            // DeepSeek documents a start-up timeout as an unnamed `data` frame
+            // holding only `{"error":{...}}`: no SSE event name and no top-level
+            // `type`. It is a coded failure, never a malformed-stream guess, a
+            // hang, or a silent success.
+            let error = v
+                .get("error")
+                .filter(|error| error.is_object())
+                .ok_or_else(|| malformed("missing event type"))?;
+            if event.event.is_some() || self.finished {
+                return Err(malformed("invalid event lifecycle"));
+            }
+            self.finished = true;
+            return Ok(vec![failed(provider_error(
+                self.profile,
+                Some(error),
+                v.get("retry_after_ms").and_then(Value::as_u64),
+            ))]);
+        };
         if event.event.as_deref().is_some_and(|name| name != kind) || self.finished {
             return Err(malformed("invalid event lifecycle"));
         }
@@ -67,6 +87,7 @@ impl Mapper {
             "error" => {
                 self.finished = true;
                 out.push(failed(provider_error(
+                    self.profile,
                     v.get("error"),
                     v.get("retry_after_ms").and_then(Value::as_u64),
                 )));
@@ -174,10 +195,24 @@ impl Mapper {
             }),
             "thinking" => {
                 field(value, "thinking")?;
-                field(value, "signature")?;
+                // Anthropic requires a signature field here and fills it with a
+                // delta; DeepSeek documents thinking blocks without one, so a
+                // present signature must be a string but a missing one is legal.
+                if self.profile.requires_thinking_signature() {
+                    field(value, "signature")?;
+                } else if let Some(signature) = value.get("signature") {
+                    signature
+                        .as_str()
+                        .ok_or_else(|| malformed("invalid thinking signature"))?;
+                }
+            }
+            "redacted_thinking" if self.profile.supports_redacted_thinking() => {
+                field(value, "data")?;
             }
             "redacted_thinking" => {
-                field(value, "data")?;
+                // Not part of this profile's vocabulary: never store state the
+                // profile would refuse to replay.
+                self.counters.unknown_events.fetch_add(1, Ordering::Relaxed);
             }
             "tool_use" => {
                 let name = field(value, "name")?;
@@ -273,23 +308,20 @@ impl Mapper {
                 }
                 out.push(ProviderEvent::ToolCallReady { block_index: index });
             }
-            Some("thinking" | "redacted_thinking") => {
-                if b.value["type"] == "thinking" && field(&b.value, "signature")?.is_empty() {
+            Some("thinking") => {
+                if self.profile.requires_thinking_signature()
+                    && field(&b.value, "signature")?.is_empty()
+                {
                     return Err(malformed("thinking block has no signature"));
                 }
-                let payload =
-                    serde_json::to_vec(&b.value).map_err(|_| malformed("invalid native block"))?;
-                if payload.len() > MAX_NATIVE_BYTES {
-                    return Err(error(
-                        ModelErrorCode::LimitExceeded,
-                        "native thinking exceeds 256 KiB",
-                    ));
-                }
-                out.push(ProviderEvent::ProviderState {
-                    block_index: index,
-                    schema: STATE_SCHEMA.into(),
-                    payload,
-                });
+                let value = b.value.clone();
+                native_state(self.profile.state_schema(), index, value, out)?;
+            }
+            // State the profile does not document is never stored: it could not
+            // be replayed either, so an empty entry would only cost a turn.
+            Some("redacted_thinking") if self.profile.supports_redacted_thinking() => {
+                let value = b.value.clone();
+                native_state(self.profile.state_schema(), index, value, out)?;
             }
             _ => {}
         }
@@ -329,6 +361,27 @@ impl Mapper {
         Ok(())
     }
 }
+/// Emit one completed native block as owner-scoped replay state.
+fn native_state(
+    schema: &str,
+    index: u32,
+    value: Value,
+    out: &mut Vec<ProviderEvent>,
+) -> Result<(), ModelError> {
+    let payload = serde_json::to_vec(&value).map_err(|_| malformed("invalid native block"))?;
+    if payload.len() > MAX_NATIVE_BYTES {
+        return Err(error(
+            ModelErrorCode::LimitExceeded,
+            "native thinking exceeds 256 KiB",
+        ));
+    }
+    out.push(ProviderEvent::ProviderState {
+        block_index: index,
+        schema: schema.into(),
+        payload,
+    });
+    Ok(())
+}
 fn append(value: &mut Value, key: &str, delta: &str) -> Result<(), ModelError> {
     let mut s = field(value, key)?.to_owned();
     s.push_str(delta);
@@ -359,7 +412,11 @@ pub(crate) fn failed(error: ModelError) -> ProviderEvent {
         continuation: None,
     }
 }
-pub(crate) fn provider_error(value: Option<&Value>, retry: Option<u64>) -> ModelError {
+pub(crate) fn provider_error(
+    profile: Profile,
+    value: Option<&Value>,
+    retry: Option<u64>,
+) -> ModelError {
     let v = value.unwrap_or(&Value::Null);
     let native = v["type"].as_str().unwrap_or("");
     let message = v["message"].as_str().unwrap_or("").to_ascii_lowercase();
@@ -394,6 +451,6 @@ pub(crate) fn provider_error(value: Option<&Value>, retry: Option<u64>) -> Model
         retry_after_ms: retry
             .or_else(|| v["retry_after_ms"].as_u64())
             .or_else(|| v["error"]["retry_after_ms"].as_u64()),
-        ..error(code, "Anthropic request failed")
+        ..error(code, profile.error_message())
     }
 }

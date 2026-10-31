@@ -30,7 +30,7 @@ use tokio::{
 };
 
 use super::{
-    AnthropicMessages, STATE_SCHEMA,
+    AnthropicMessages, Profile, STATE_SCHEMA,
     events::Mapper,
     request::{self, Reads},
 };
@@ -373,13 +373,13 @@ impl CredentialSource for Missing {
     }
 }
 
-fn fixed() -> Fixed {
+fn fixed(secret: &str) -> Fixed {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "x-harness-test",
         client_nonce().parse().expect("run header"),
     );
-    Fixed(Credential::api_key(SENTINEL_SECRET.to_owned(), headers, None).expect("credential"))
+    Fixed(Credential::api_key(secret.to_owned(), headers, None).expect("credential"))
 }
 
 fn transport() -> Transport {
@@ -391,7 +391,8 @@ fn transport() -> Transport {
 }
 
 fn adapter(url: String) -> AnthropicMessages {
-    AnthropicMessages::with_transport(Arc::new(fixed()), transport()).with_endpoint(url)
+    AnthropicMessages::with_transport(Arc::new(fixed(SENTINEL_SECRET)), transport())
+        .with_endpoint(url)
 }
 
 // ------------------------------------------------------- request decoding
@@ -500,13 +501,24 @@ fn options(max_output_tokens: u32) -> InferenceOptions {
     }
 }
 
+/// One manifest row for the Anthropic profile.
 fn case(kind: CaseKind) -> Case {
+    case_with(kind, model(), Profile::Anthropic)
+}
+
+/// One manifest row for `model` on `profile`.
+///
+/// Both profiles share the Messages wire format, so the manifest is built once
+/// and the two profiles differ only in the model, the state schema, the
+/// thinking block the fixture stores and one diagnostic. What each profile
+/// accepts of those bytes is what the tests prove.
+fn case_with(kind: CaseKind, model: ModelRef, profile: Profile) -> Case {
     let mut expected = Expected::default();
     let mut request = ModelRequest {
         response_id: ResponseId::new(),
         artifacts: ArtifactSource::default(),
         input: ModelInput {
-            model: model(),
+            model: model.clone(),
             items: vec![user("Hello")],
             tools: Vec::new(),
             options: options(256),
@@ -626,8 +638,8 @@ fn case(kind: CaseKind) -> Case {
             expected.native.insert(
                 0,
                 NativeMetadata {
-                    schema: STATE_SCHEMA.into(),
-                    bytes: thinking_payload_bytes(),
+                    schema: profile.state_schema().into(),
+                    bytes: thinking_payload_bytes(profile),
                 },
             );
             expected.text.insert(1, "pong".into());
@@ -666,9 +678,10 @@ fn case(kind: CaseKind) -> Case {
             expected.finish_reason = None;
             expected.error = Some(ModelError {
                 code: ModelErrorCode::UnsupportedCapability,
-                message:
-                    "provider option namespace openai is not supported by the Anthropic adapter"
-                        .into(),
+                message: format!(
+                    "provider option namespace openai is not supported by the {} adapter",
+                    profile.label()
+                ),
                 provider_code: None,
                 retry_after_ms: None,
             });
@@ -687,15 +700,18 @@ fn case(kind: CaseKind) -> Case {
     }
 }
 
-/// Exact bytes the mapper stores for the `native_state` thinking block.
-fn thinking_payload_bytes() -> usize {
-    serde_json::to_vec(&json!({
+/// Exact bytes the mapper stores for the `native_state` thinking block of
+/// `profile`: the same thought, with a signature only where the profile
+/// documents one.
+fn thinking_payload_bytes(profile: Profile) -> usize {
+    let mut block = json!({
         "type": "thinking",
         "thinking": "Considering the greeting.",
-        "signature": "sig_fixture_thinking",
-    }))
-    .expect("payload")
-    .len()
+    });
+    if profile.requires_thinking_signature() {
+        block["signature"] = json!("sig_fixture_thinking");
+    }
+    serde_json::to_vec(&block).expect("payload").len()
 }
 
 fn reply_for(fixture: &str) -> Reply {
@@ -808,7 +824,7 @@ fn full_input() -> ModelInput {
 
 #[test]
 fn request_body_is_one_correct_messages_body() {
-    let body = request::build(&full_input(), &Reads::default()).expect("build");
+    let body = request::build(Profile::Anthropic, &full_input(), &Reads::default()).expect("build");
     let expected = json!({
         "model": "claude-sonnet-5-5",
         "max_tokens": 512,
@@ -872,7 +888,7 @@ fn adjacent_same_role_items_merge_and_roles_alternate() {
     let mut input = full_input();
     input.items.push(user("one more"));
     input.items.push(user("and another"));
-    let body = request::build(&input, &Reads::default()).expect("build");
+    let body = request::build(Profile::Anthropic, &input, &Reads::default()).expect("build");
     let messages = body["messages"].as_array().expect("messages");
     for pair in messages.windows(2) {
         assert_ne!(pair[0]["role"], pair[1]["role"], "roles must alternate");
@@ -912,7 +928,7 @@ fn image_input_needs_a_sourced_capability_and_serializes_as_base64() {
         ..full_input()
     };
     let reads = Reads::from_bytes(reference, bytes.to_vec());
-    let body = request::build(&input, &reads).expect("build");
+    let body = request::build(Profile::Anthropic, &input, &reads).expect("build");
     let image = &body["messages"][0]["content"][1];
     assert_eq!(image["type"], json!("image"));
     assert_eq!(image["source"]["type"], json!("base64"));
@@ -929,7 +945,7 @@ fn image_input_needs_a_sourced_capability_and_serializes_as_base64() {
     unknown.model.model = "claude-unknown".into();
     unknown.options.reasoning_effort = None;
     unknown.options.provider_options.clear();
-    let error = request::build(&unknown, &reads).expect_err("capability");
+    let error = request::build(Profile::Anthropic, &unknown, &reads).expect_err("capability");
     assert_eq!(error.code, ModelErrorCode::UnsupportedCapability);
     assert!(error.message.contains("image"), "{}", error.message);
 }
@@ -939,20 +955,20 @@ fn provider_options_are_validated_by_name() {
     let mut input = full_input();
     input.options.provider_options =
         serde_json::from_value(json!({"anthropic": {"nonsense": 1}})).expect("options");
-    let error = request::build(&input, &Reads::default()).expect_err("unknown");
+    let error = request::build(Profile::Anthropic, &input, &Reads::default()).expect_err("unknown");
     assert_eq!(error.code, ModelErrorCode::InvalidRequest);
     assert!(error.message.contains("nonsense"));
 
     input.options.provider_options =
         serde_json::from_value(json!({"openai": {"reasoning_summary": "auto"}})).expect("options");
-    let error = request::build(&input, &Reads::default()).expect_err("foreign");
+    let error = request::build(Profile::Anthropic, &input, &Reads::default()).expect_err("foreign");
     assert_eq!(error.code, ModelErrorCode::UnsupportedCapability);
     assert!(error.message.contains("openai"));
 
     input.options.provider_options =
         serde_json::from_value(json!({"anthropic": {"service_tier": "priority"}}))
             .expect("options");
-    let error = request::build(&input, &Reads::default()).expect_err("tier");
+    let error = request::build(Profile::Anthropic, &input, &Reads::default()).expect_err("tier");
     assert_eq!(error.code, ModelErrorCode::InvalidRequest);
     assert!(error.message.contains("service_tier"));
 }
@@ -1012,7 +1028,7 @@ fn thinking_and_redacted_blocks_replay_verbatim_in_order() {
     let thinking = br#"{"type":"thinking","thinking":"step one","signature":"sig_fixture_replay"}"#;
     let redacted = br#"{"type":"redacted_thinking","data":"opaque-redacted-fixture"}"#;
     let (input, reads) = state_input(thinking, Some((redacted, model())));
-    let body = request::build(&input, &reads).expect("replay");
+    let body = request::build(Profile::Anthropic, &input, &reads).expect("replay");
     let content = body["messages"][1]["content"].as_array().expect("content");
     assert_eq!(
         content[0],
@@ -1040,7 +1056,7 @@ fn thinking_and_redacted_blocks_replay_verbatim_in_order() {
             },
         };
     }
-    let body = request::build(&foreign, &foreign_reads).expect("skip");
+    let body = request::build(Profile::Anthropic, &foreign, &foreign_reads).expect("skip");
     assert_eq!(
         body["messages"][1]["content"],
         json!([{"type": "text", "text": "answer"}])
@@ -1107,14 +1123,14 @@ fn tool_exchange(provider_call_id: Option<&str>) -> (ModelInput, String) {
 #[test]
 fn a_foreign_call_id_stays_paired_across_a_provider_switch() {
     let (input, _) = tool_exchange(Some("call_fixture_1"));
-    let body = request::build(&input, &Reads::default()).expect("foreign id");
+    let body = request::build(Profile::Anthropic, &input, &Reads::default()).expect("foreign id");
     assert_eq!(body["messages"][1]["content"][0]["id"], "call_fixture_1");
     assert_eq!(
         body["messages"][2]["content"][0]["tool_use_id"],
         "call_fixture_1"
     );
     let (input, _) = tool_exchange(Some("toolu_fixture_1"));
-    let body = request::build(&input, &Reads::default()).expect("own id");
+    let body = request::build(Profile::Anthropic, &input, &Reads::default()).expect("own id");
     assert_eq!(body["messages"][1]["content"][0]["id"], "toolu_fixture_1");
 
     for foreign in [
@@ -1126,7 +1142,8 @@ fn a_foreign_call_id_stays_paired_across_a_provider_switch() {
         "x".repeat(65).as_str(),
     ] {
         let (input, harness) = tool_exchange(Some(foreign));
-        let body = request::build(&input, &Reads::default()).expect("substituted id");
+        let body =
+            request::build(Profile::Anthropic, &input, &Reads::default()).expect("substituted id");
         let id = body["messages"][1]["content"][0]["id"]
             .as_str()
             .expect("id")
@@ -1146,7 +1163,7 @@ fn a_foreign_call_id_stays_paired_across_a_provider_switch() {
         // Derived from the harness call id, not from a counter or the request.
         assert_eq!(id, harness);
         assert_eq!(
-            request::build(&input, &Reads::default()).expect("replay"),
+            request::build(Profile::Anthropic, &input, &Reads::default()).expect("replay"),
             body
         );
     }
@@ -1166,7 +1183,7 @@ fn drop_block() -> Value {
 fn preserved_thinking_is_requested_on_an_untouched_replayed_history() {
     let payload = br#"{"type":"thinking","thinking":"step one","signature":"sig_fixture_replay"}"#;
     let (input, reads) = state_input(payload, None);
-    let body = request::build(&input, &reads).expect("replay");
+    let body = request::build(Profile::Anthropic, &input, &reads).expect("replay");
     assert_eq!(
         body,
         json!({
@@ -1254,7 +1271,7 @@ fn preserved_thinking_is_requested_behind_a_summary_and_a_switch() {
             ],
         },
     ];
-    let body = request::build(&input, &reads).expect("replay");
+    let body = request::build(Profile::Anthropic, &input, &reads).expect("replay");
     assert_eq!(
         body,
         json!({
@@ -1292,7 +1309,7 @@ fn preserved_thinking_is_requested_behind_a_summary_and_a_switch() {
 /// (and vice versa).
 #[test]
 fn preserved_thinking_beta_header_follows_the_body_predicate() {
-    let beta = AnthropicMessages::headers(true);
+    let beta = AnthropicMessages::headers(Profile::Anthropic, true);
     assert_eq!(
         beta.get("anthropic-beta")
             .map(|value| value.to_str().unwrap()),
@@ -1302,7 +1319,7 @@ fn preserved_thinking_beta_header_follows_the_body_predicate() {
         super::preserved::BETA,
         "thinking-binding-controls-2026-08-01"
     );
-    let plain = AnthropicMessages::headers(false);
+    let plain = AnthropicMessages::headers(Profile::Anthropic, false);
     assert!(plain.get("anthropic-beta").is_none());
     for headers in [&beta, &plain] {
         assert_eq!(
@@ -1316,7 +1333,7 @@ fn preserved_thinking_beta_header_follows_the_body_predicate() {
     }
     // A body with no replayed block sends neither, which keeps the golden
     // request above (`request_body_is_one_correct_messages_body`) unchanged.
-    let body = request::build(&full_input(), &Reads::default()).expect("build");
+    let body = request::build(Profile::Anthropic, &full_input(), &Reads::default()).expect("build");
     assert!(!request::replays_thinking(&body));
     assert!(body.get("thinking").unwrap().get("block_binding").is_none());
 }
@@ -1329,7 +1346,7 @@ fn a_modified_thinking_payload_is_not_replayable() {
         br#"{"type":"text","text":"not state"}"#.as_slice(),
     ] {
         let (input, reads) = state_input(payload, None);
-        let error = request::build(&input, &reads).expect_err("invalid state");
+        let error = request::build(Profile::Anthropic, &input, &reads).expect_err("invalid state");
         assert_eq!(error.code, ModelErrorCode::InvalidRequest);
     }
 }
@@ -1347,7 +1364,7 @@ fn sse(kind: &str, data: Value) -> SseEvent {
 
 fn new_mapper() -> (Mapper, Arc<super::Counters>) {
     let counters = Arc::new(super::Counters::default());
-    (Mapper::new(counters.clone()), counters)
+    (Mapper::new(counters.clone(), Profile::Anthropic), counters)
 }
 
 fn mapped(
@@ -1684,7 +1701,7 @@ async fn fixture_attribution_ignores_wrong_paths_and_missing_run_headers() {
 fn catalog_rows_match_the_official_models_overview() {
     use harness_core::context::InputMediaKind;
     for name in ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"] {
-        let info = super::info(name).expect("catalogued model");
+        let info = super::info(Profile::Anthropic, name).expect("catalogued model");
         assert_eq!(info.limits.context_tokens, Some(1_000_000), "{name}");
         assert_eq!(info.limits.max_output_tokens, Some(128_000), "{name}");
         assert!(
@@ -1697,9 +1714,9 @@ fn catalog_rows_match_the_official_models_overview() {
         assert!(info.capabilities.reasoning_effort, "{name}");
     }
     assert_eq!(super::LIVE_CHECK_MODEL, "claude-haiku-5-5");
-    assert!(super::info("claude-unknown").is_none());
-    assert!(!super::capabilities("claude-unknown").reasoning_effort);
-    let catalog = super::catalog("anthropic");
+    assert!(super::info(Profile::Anthropic, "claude-unknown").is_none());
+    assert!(!super::capabilities(Profile::Anthropic, "claude-unknown").reasoning_effort);
+    let catalog = super::catalog(Profile::Anthropic, "anthropic");
     assert!(catalog.limits(&model()).is_some());
 }
 
@@ -1737,4 +1754,833 @@ fn env_anthropic_key_selects_the_api_key_header() {
         "secret leaked in stderr"
     );
     assert!(output.status.success(), "credential child failed");
+}
+
+// =========================================================================
+// The DeepSeek profile
+// =========================================================================
+
+/// DeepSeek on the same adapter: its own endpoint, credential, catalog, state
+/// schema and thinking rules.
+///
+/// The wire format is the same Messages API, so the manifest, the fake server
+/// and the decoding helpers above are reused unchanged; only the streams whose
+/// documented shape differs have their own fixture under `fixtures/deepseek/`.
+/// Every assertion here is new: no Anthropic test changed.
+mod deepseek {
+    use super::*;
+
+    use super::super::{
+        DEEPSEEK_ENDPOINT, DEEPSEEK_LIVE_CHECK_MODEL, DEEPSEEK_STATE_SCHEMA,
+        DEFAULT_MAX_OUTPUT_TOKENS, catalog, info,
+    };
+
+    const DEEPSEEK_SENTINEL: &str = "SENTINEL-DEEPSEEK-KEY-TOKEN";
+
+    fn ds_model() -> ModelRef {
+        ModelRef {
+            provider_instance: "deepseek".into(),
+            model: "deepseek-flash".into(),
+        }
+    }
+
+    fn ds_adapter(url: String) -> AnthropicMessages {
+        AnthropicMessages::with_profile(
+            Profile::DeepSeek,
+            Arc::new(fixed(DEEPSEEK_SENTINEL)),
+            transport(),
+        )
+        .with_endpoint(url)
+    }
+
+    /// Fixture text for this profile: its own streams where DeepSeek differs,
+    /// and the shared Messages fixtures where the vocabulary is identical.
+    fn ds_fixture_text(name: &str) -> &'static str {
+        match name {
+            // A thinking block with no signature at all.
+            "native_state" => include_str!("../../fixtures/deepseek/native_state.sse"),
+            // `cache_read_input_tokens` reported, `cache_creation_input_tokens`
+            // always 0, usage from the final `message_delta`.
+            "usage" => include_str!("../../fixtures/deepseek/usage.sse"),
+            // An unnamed `data` frame holding only an error object.
+            "unnamed_error" => include_str!("../../fixtures/deepseek/unnamed_error.sse"),
+            other => fixture_text(other),
+        }
+    }
+
+    fn ds_reply_for(fixture: &str) -> Reply {
+        match fixture {
+            "cancel_setup" | "deadline" | "unsupported_option" => Reply::silent(),
+            "cancel_streaming" | "drop" => Reply::holding(&hold_stream()),
+            other => parse_fixture(ds_fixture_text(other)),
+        }
+    }
+
+    fn ds_factory() -> impl Fn(&str) -> Fixture {
+        move |fixture: &str| {
+            let server = Arc::new(Server::start(ds_reply_for(fixture)));
+            let url = server.url.clone();
+            let observed = Arc::clone(&server);
+            Fixture {
+                provider: Arc::new(ds_adapter(url)),
+                observe: Arc::new(move || observed.observation()),
+            }
+        }
+    }
+
+    /// Body frames of one fixture as (event name, data) pairs.
+    fn ds_frames(fixture: &str) -> Vec<(Option<String>, String)> {
+        let (_, body) = ds_fixture_text(fixture)
+            .split_once("---\n")
+            .expect("fixture separator");
+        body.split("\n\n")
+            .filter(|frame| !frame.trim().is_empty())
+            .map(|frame| {
+                let mut event = None;
+                let mut data = String::new();
+                for line in frame.lines() {
+                    if let Some(name) = line.strip_prefix("event: ") {
+                        event = Some(name.to_owned());
+                    } else if let Some(value) = line.strip_prefix("data: ") {
+                        if !data.is_empty() {
+                            data.push('\n');
+                        }
+                        data.push_str(value);
+                    }
+                }
+                (event, data)
+            })
+            .filter(|(_, data)| !data.is_empty())
+            .collect()
+    }
+
+    fn ds_mapped(
+        fixture: &str,
+    ) -> (
+        Vec<harness_core::model::ProviderEvent>,
+        Arc<crate::anthropic::Counters>,
+    ) {
+        let counters = Arc::new(crate::anthropic::Counters::default());
+        let mut mapper = Mapper::new(counters.clone(), Profile::DeepSeek);
+        let mut out = Vec::new();
+        for (event, data) in ds_frames(fixture) {
+            out.extend(
+                mapper
+                    .push(&SseEvent {
+                        event,
+                        data,
+                        id: None,
+                        retry: None,
+                    })
+                    .expect("maps"),
+            );
+        }
+        (out, counters)
+    }
+
+    // --------------------------------------------------------- conformance
+
+    /// The complete public 17-case manifest, run against the DeepSeek profile
+    /// exactly as it runs against the Anthropic one.
+    #[tokio::test]
+    async fn every_conformance_case_passes_on_deepseek_fixtures() {
+        let manifest: Vec<Case> = CaseKind::ALL
+            .into_iter()
+            .map(|kind| case_with(kind, ds_model(), Profile::DeepSeek))
+            .collect();
+        run(&ds_factory(), &manifest).await.expect("conformance");
+    }
+
+    // ------------------------------------------------------ request bodies
+
+    fn ds_full_input() -> ModelInput {
+        ModelInput {
+            model: ds_model(),
+            ..full_input()
+        }
+    }
+
+    /// A plain turn on the DeepSeek profile: its own model, `enabled` thinking
+    /// instead of `adaptive`, and no Anthropic-only control.
+    #[test]
+    fn a_plain_deepseek_turn_is_one_messages_body() {
+        let body =
+            request::build(Profile::DeepSeek, &ds_full_input(), &Reads::default()).expect("build");
+        let expected = json!({
+            "model": "deepseek-flash",
+            "max_tokens": 512,
+            "stream": true,
+            "system": "You are the harness.\n\nPrefer small diffs.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Read notes.txt"}]},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Reading it."},
+                        {"type": "tool_use", "id": "toolu_fixture_1", "name": "read", "input": {"path": "notes.txt"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_fixture_1",
+                            "content": "status: succeeded\nprovenance: executor\nexit_code: 0\noutput_truncated: false\n\nfile contents",
+                            "is_error": false,
+                        },
+                        {"type": "text", "text": "Summary of earlier conversation:\n\nEarlier."},
+                    ],
+                },
+            ],
+            "tools": [
+                {
+                    "name": "read",
+                    "description": "Read a file from the workspace.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "offset_bytes": {"type": "integer"}},
+                        "required": ["path"],
+                        "additionalProperties": false,
+                    },
+                },
+                {
+                    "name": "bash",
+                    "description": "Run one command.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                        "additionalProperties": false,
+                    },
+                },
+            ],
+            "thinking": {"type": "enabled"},
+            "output_config": {"effort": "medium"},
+            // Documented as ignored by DeepSeek; the option keeps one meaning.
+            "service_tier": "standard_only",
+        });
+        assert_eq!(body, expected);
+    }
+
+    /// The tool loop DeepSeek documents: the assistant's complete content,
+    /// thinking block included, comes back before the matching tool results.
+    #[test]
+    fn a_tool_loop_replays_the_unsigned_thinking_block_verbatim() {
+        let payload = br#"{"type":"thinking","thinking":"The note holds the answer."}"#;
+        let reference = ArtifactRef {
+            sha256: Digest::of(payload),
+            bytes: payload.len() as u64,
+        };
+        let reads = Reads::from_bytes(reference.clone(), payload.to_vec());
+        let call_id = CallId::new();
+        let mut input = ModelInput {
+            model: ds_model(),
+            items: vec![
+                user("Read notes.txt"),
+                ContextItem::Assistant {
+                    entry_id: EntryId::new(),
+                    outcome: harness_core::session::ResponseOutcome::Completed,
+                    content: vec![
+                        ContentBlock::ProviderState {
+                            owner: ds_model(),
+                            schema: DEEPSEEK_STATE_SCHEMA.into(),
+                            artifact: reference,
+                        },
+                        ContentBlock::ToolCall {
+                            call_id: call_id.clone(),
+                            name: "read".into(),
+                            arguments: serde_json::from_value(json!({"path": "notes.txt"}))
+                                .expect("args"),
+                            provider_call_id: Some("toolu_deepseek_1".into()),
+                        },
+                    ],
+                },
+            ],
+            tools: tools(),
+            options: options(256),
+            continuation: None,
+        };
+        input.items.push(ContextItem::ToolResult {
+            entry_id: EntryId::new(),
+            provenance: Provenance::Executor,
+            result: ToolResult {
+                call: CallRef {
+                    response_entry_id: EntryId::new(),
+                    call_id,
+                },
+                invocation_id: None,
+                status: ToolStatus::Succeeded,
+                content: vec![ContentBlock::Text {
+                    text: "file contents".into(),
+                }],
+                metadata: ToolMetadata {
+                    exit_code: Some(0),
+                    duration_ms: Some(3),
+                    output_truncated: false,
+                    provenance: Provenance::Executor,
+                    artifacts: Vec::new(),
+                    code: None,
+                },
+            },
+        });
+        let body = request::build(Profile::DeepSeek, &input, &reads).expect("replay");
+        let content = body["messages"][1]["content"]
+            .as_array()
+            .expect("assistant content");
+        assert_eq!(
+            content[0],
+            json!({"type": "thinking", "thinking": "The note holds the answer."})
+        );
+        assert_eq!(content[1]["type"], json!("tool_use"));
+        assert_eq!(
+            body["messages"][2]["content"][0]["tool_use_id"],
+            json!("toolu_deepseek_1")
+        );
+        // No effort asked for: no thinking object at all, because DeepSeek
+        // already thinks by default, and no binding control in any case.
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert!(!body.to_string().contains("block_binding"));
+    }
+
+    /// The profile keeps images user-side only: `deepseek-flash` accepts them in
+    /// user input, `deepseek-v4-pro` does not process them at all.
+    #[test]
+    fn images_follow_the_deepseek_catalog() {
+        let bytes = b"\x89PNG-fixture";
+        let reference = ArtifactRef {
+            sha256: Digest::of(bytes),
+            bytes: bytes.len() as u64,
+        };
+        let mut input = ModelInput {
+            items: vec![ContextItem::User {
+                entry_id: EntryId::new(),
+                content: vec![
+                    ContentBlock::Text {
+                        text: "What is this?".into(),
+                    },
+                    ContentBlock::Image {
+                        artifact: reference.clone(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+            }],
+            ..ds_full_input()
+        };
+        let reads = Reads::from_bytes(reference, bytes.to_vec());
+        let body = request::build(Profile::DeepSeek, &input, &reads).expect("build");
+        assert_eq!(body["messages"][0]["content"][1]["type"], json!("image"));
+
+        input.model.model = "deepseek-v4-pro".into();
+        let error = request::build(Profile::DeepSeek, &input, &reads).expect_err("capability");
+        assert_eq!(error.code, ModelErrorCode::UnsupportedCapability);
+        assert!(error.message.contains("image"), "{}", error.message);
+    }
+
+    // -------------------------------------------------- dropped controls
+
+    /// The controls DeepSeek does not document are absent, even on a request
+    /// that replays thinking, while the Anthropic profile still sends them.
+    #[test]
+    fn the_profile_drops_the_anthropic_only_controls() {
+        let payload = br#"{"type":"thinking","thinking":"step one"}"#;
+        let (input, reads) = ds_state_input(payload, None);
+        let body = request::build(Profile::DeepSeek, &input, &reads).expect("replay");
+        assert!(request::replays_thinking(&body));
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert!(!body.to_string().contains("block_binding"), "{body}");
+
+        let headers = AnthropicMessages::headers(Profile::DeepSeek, true);
+        assert!(headers.get("anthropic-beta").is_none());
+        // Documented as ignored; the profile leaves it off rather than sending a
+        // version the backend never reads.
+        assert!(headers.get("anthropic-version").is_none());
+        assert_eq!(headers["accept"], "text/event-stream");
+
+        let anthropic = AnthropicMessages::headers(Profile::Anthropic, true);
+        assert!(anthropic.get("anthropic-beta").is_some());
+        assert!(anthropic.get("anthropic-version").is_some());
+        assert_eq!(Profile::DeepSeek.endpoint(), DEEPSEEK_ENDPOINT);
+        assert_eq!(Profile::DeepSeek.credential_variable(), "DEEPSEEK_API_KEY");
+        assert_eq!(Profile::DeepSeek.state_schema(), DEEPSEEK_STATE_SCHEMA);
+    }
+
+    fn ds_state_input(payload: &[u8], extra: Option<(&[u8], ModelRef)>) -> (ModelInput, Reads) {
+        let reference = ArtifactRef {
+            sha256: Digest::of(payload),
+            bytes: payload.len() as u64,
+        };
+        let mut content = vec![
+            ContentBlock::ProviderState {
+                owner: ds_model(),
+                schema: DEEPSEEK_STATE_SCHEMA.into(),
+                artifact: reference.clone(),
+            },
+            ContentBlock::Text {
+                text: "answer".into(),
+            },
+        ];
+        let extra = extra.map(|(bytes, owner)| {
+            let clone = ArtifactRef {
+                sha256: Digest::of(bytes),
+                bytes: bytes.len() as u64,
+            };
+            content.push(ContentBlock::ProviderState {
+                owner,
+                schema: DEEPSEEK_STATE_SCHEMA.into(),
+                artifact: clone.clone(),
+            });
+            (clone, bytes)
+        });
+        let mut reads = Reads::from_bytes(reference, payload.to_vec());
+        if let Some((clone, bytes)) = &extra {
+            reads = reads.with(clone.clone(), (*bytes).to_vec());
+        }
+        (
+            ModelInput {
+                model: ds_model(),
+                items: vec![
+                    user("Hello"),
+                    ContextItem::Assistant {
+                        entry_id: EntryId::new(),
+                        outcome: harness_core::session::ResponseOutcome::Completed,
+                        content,
+                    },
+                ],
+                tools: Vec::new(),
+                options: options(256),
+                continuation: None,
+            },
+            reads,
+        )
+    }
+
+    // ------------------------------------------------------ thinking rules
+
+    /// An unsigned thinking block is a shape DeepSeek documents and Anthropic
+    /// does not: the profile decides, and each keeps its own fixture.
+    #[test]
+    fn an_unsigned_thinking_block_maps_only_on_deepseek() {
+        let frames = [
+            json!({"type":"message_start","message":{"role":"assistant","content":[]}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        let names = [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+        ];
+        let mut deepseek = Mapper::new(
+            Arc::new(crate::anthropic::Counters::default()),
+            Profile::DeepSeek,
+        );
+        let mut emitted = Vec::new();
+        for (name, value) in names.iter().zip(frames.iter()) {
+            emitted.extend(deepseek.push(&sse(name, value.clone())).expect("maps"));
+        }
+        let state = emitted
+            .iter()
+            .find_map(|event| match event {
+                harness_core::model::ProviderEvent::ProviderState {
+                    schema, payload, ..
+                } => Some((schema.clone(), payload.clone())),
+                _ => None,
+            })
+            .expect("unsigned state");
+        assert_eq!(state.0, DEEPSEEK_STATE_SCHEMA);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&state.1).expect("json"),
+            json!({"type": "thinking", "thinking": "hmm"})
+        );
+
+        let mut anthropic = Mapper::new(
+            Arc::new(crate::anthropic::Counters::default()),
+            Profile::Anthropic,
+        );
+        let mut failure = None;
+        for (name, value) in names.iter().zip(frames.iter()) {
+            if let Err(error) = anthropic.push(&sse(name, value.clone())) {
+                failure = Some(error);
+                break;
+            }
+        }
+        assert_eq!(
+            failure
+                .expect("the Anthropic profile requires a signature")
+                .code,
+            ModelErrorCode::MalformedStream
+        );
+    }
+
+    /// Replay follows the same rule: DeepSeek accepts the unsigned payload the
+    /// Anthropic profile refuses.
+    #[test]
+    fn an_unsigned_thinking_payload_replays_only_on_deepseek() {
+        let payload = br#"{"type":"thinking","thinking":"step one"}"#;
+        let (input, reads) = ds_state_input(payload, None);
+        let body = request::build(Profile::DeepSeek, &input, &reads).expect("deepseek");
+        assert_eq!(
+            body["messages"][1]["content"][0],
+            json!({"type": "thinking", "thinking": "step one"})
+        );
+        let mut anthropic_input = input.clone();
+        anthropic_input.model = model();
+        // Move the block to the Anthropic owner and schema, keeping the payload
+        // exactly as DeepSeek wrote it.
+        for item in &mut anthropic_input.items {
+            if let ContextItem::Assistant { content, .. } = item {
+                for block in content.iter_mut() {
+                    if let ContentBlock::ProviderState { owner, schema, .. } = block {
+                        *owner = model();
+                        *schema = STATE_SCHEMA.into();
+                    }
+                }
+            }
+        }
+        let error = request::build(Profile::Anthropic, &anthropic_input, &reads)
+            .expect_err("signature required");
+        assert_eq!(error.code, ModelErrorCode::InvalidRequest);
+    }
+
+    /// `redacted_thinking` is not part of DeepSeek's vocabulary: it is neither
+    /// stored as state nor replayed.
+    #[test]
+    fn redacted_thinking_is_outside_the_deepseek_vocabulary() {
+        let frames = [
+            json!({"type":"message_start","message":{"role":"assistant","content":[]}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        let names = ["message_start", "content_block_start", "content_block_stop"];
+        let counters = Arc::new(crate::anthropic::Counters::default());
+        let mut mapper = Mapper::new(counters.clone(), Profile::DeepSeek);
+        let mut emitted = Vec::new();
+        for (name, value) in names.iter().zip(frames.iter()) {
+            emitted.extend(mapper.push(&sse(name, value.clone())).expect("maps"));
+        }
+        assert!(!emitted.iter().any(|event| matches!(
+            event,
+            harness_core::model::ProviderEvent::ProviderState { .. }
+        )));
+        assert_eq!(counters.unknown_events(), 1);
+
+        let payload = br#"{"type":"redacted_thinking","data":"opaque"}"#;
+        let (input, reads) = ds_state_input(payload, None);
+        let error = request::build(Profile::DeepSeek, &input, &reads).expect_err("not replayable");
+        assert_eq!(error.code, ModelErrorCode::InvalidRequest);
+    }
+
+    // -------------------------------------------------------- error frames
+
+    /// An unnamed `data` frame carrying only an error is a coded failure, never
+    /// a hang or a silent success, and its provider text is not echoed.
+    #[test]
+    fn the_unnamed_error_frame_is_a_coded_failure() {
+        let (events, _) = ds_mapped("unnamed_error");
+        assert_eq!(events.len(), 1, "{events:?}");
+        let harness_core::model::ProviderEvent::Finished {
+            outcome,
+            error: Some(error),
+            ..
+        } = &events[0]
+        else {
+            panic!("terminal failure: {:?}", events);
+        };
+        assert_eq!(*outcome, harness_core::model::ProviderOutcome::Failed);
+        assert_eq!(error.code, ModelErrorCode::ProviderFailure);
+        assert_eq!(error.message, "DeepSeek request failed");
+        assert!(error.provider_code.is_none());
+        assert!(!error.message.contains("timed out"));
+
+        // A frame with neither a type nor an error is still malformed.
+        let mut mapper = Mapper::new(
+            Arc::new(crate::anthropic::Counters::default()),
+            Profile::DeepSeek,
+        );
+        let error = mapper
+            .push(&SseEvent {
+                event: None,
+                data: r#"{"message":"no type"}"#.into(),
+                id: None,
+                retry: None,
+            })
+            .expect_err("malformed");
+        assert_eq!(error.code, ModelErrorCode::MalformedStream);
+    }
+
+    // -------------------------------------------------------------- usage
+
+    /// Usage is the final `message_delta` snapshot, not the `message_start`
+    /// partial one, and never their sum.
+    #[test]
+    fn usage_comes_from_the_final_message_delta() {
+        let (events, _) = ds_mapped("usage");
+        let snapshots: Vec<Usage> = events
+            .iter()
+            .filter_map(|event| match event {
+                harness_core::model::ProviderEvent::UsageUpdated { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshots.len(), 2, "{snapshots:?}");
+        assert_eq!(snapshots[0].output_tokens, Some(1));
+        assert_eq!(
+            snapshots[1],
+            Usage {
+                input_tokens: Some(12),
+                output_tokens: Some(9),
+                cached_input_tokens: Some(4),
+                reasoning_tokens: None,
+            }
+        );
+        assert!(matches!(
+            events.last(),
+            Some(harness_core::model::ProviderEvent::Finished {
+                outcome: harness_core::model::ProviderOutcome::Completed,
+                ..
+            })
+        ));
+    }
+
+    // ------------------------------------------------------ owner scoping
+
+    /// State written by one profile is never replayed by the other, in either
+    /// direction, even when the artifact is readable and the schema matches.
+    #[test]
+    fn state_never_crosses_the_profile_owner_or_schema() {
+        let payload = br#"{"type":"thinking","thinking":"deepseek thought"}"#;
+        let (input, reads) = ds_state_input(payload, None);
+
+        // DeepSeek skips on the owner alone.
+        let mut foreign_owner = input.clone();
+        if let Some(ContextItem::Assistant { content, .. }) = foreign_owner.items.get_mut(1)
+            && let ContentBlock::ProviderState { owner, .. } = &mut content[0]
+        {
+            *owner = model();
+        }
+        let body = request::build(Profile::DeepSeek, &foreign_owner, &reads).expect("skip");
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "text", "text": "answer"}])
+        );
+
+        // DeepSeek refuses the Anthropic schema even for its own owner.
+        let mut wrong_schema = input.clone();
+        if let Some(ContextItem::Assistant { content, .. }) = wrong_schema.items.get_mut(1)
+            && let ContentBlock::ProviderState { schema, .. } = &mut content[0]
+        {
+            *schema = STATE_SCHEMA.into();
+        }
+        let error =
+            request::build(Profile::DeepSeek, &wrong_schema, &reads).expect_err("foreign schema");
+        assert_eq!(error.code, ModelErrorCode::UnsupportedCapability);
+        assert!(error.message.contains(STATE_SCHEMA), "{}", error.message);
+
+        // The reverse: an Anthropic request skips DeepSeek state by owner, and
+        // refuses the DeepSeek schema for its own owner.
+        let mut anthropic = input.clone();
+        anthropic.model = model();
+        let body = request::build(Profile::Anthropic, &anthropic, &reads).expect("skip");
+        assert_eq!(
+            body["messages"][1]["content"],
+            json!([{"type": "text", "text": "answer"}])
+        );
+        if let Some(ContextItem::Assistant { content, .. }) = anthropic.items.get_mut(1)
+            && let ContentBlock::ProviderState { owner, .. } = &mut content[0]
+        {
+            *owner = model();
+        }
+        let error =
+            request::build(Profile::Anthropic, &anthropic, &reads).expect_err("foreign schema");
+        assert_eq!(error.code, ModelErrorCode::UnsupportedCapability);
+        assert!(
+            error.message.contains(DEEPSEEK_STATE_SCHEMA),
+            "{}",
+            error.message
+        );
+
+        // The mapper writes the profile's own schema for the same stream shape.
+        let (events, _) = ds_mapped("native_state");
+        let schema = events
+            .iter()
+            .find_map(|event| match event {
+                harness_core::model::ProviderEvent::ProviderState { schema, .. } => {
+                    Some(schema.clone())
+                }
+                _ => None,
+            })
+            .expect("state");
+        assert_eq!(schema, DEEPSEEK_STATE_SCHEMA);
+    }
+
+    // ------------------------------------------------------------ secrets
+
+    #[tokio::test]
+    async fn the_deepseek_key_is_sent_as_x_api_key_and_never_rendered() {
+        let server = Server::start(parse_fixture(ds_fixture_text("text")));
+        let adapter = ds_adapter(server.url.clone());
+        let rendered = format!("{adapter:?}");
+        assert!(!rendered.contains(DEEPSEEK_SENTINEL), "{rendered}");
+        assert!(rendered.contains("[redacted]"));
+        assert!(rendered.contains("profile: DeepSeek"), "{rendered}");
+        let mut stream = adapter.stream(
+            ModelRequest {
+                response_id: ResponseId::new(),
+                artifacts: ArtifactSource::default(),
+                input: ModelInput {
+                    model: ds_model(),
+                    items: vec![user("Hello")],
+                    tools: Vec::new(),
+                    options: options(128),
+                    continuation: None,
+                },
+            },
+            Default::default(),
+        );
+        let mut events = Vec::new();
+        while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
+            events.push(format!("{event:?}"));
+        }
+        for event in &events {
+            assert!(!event.contains(DEEPSEEK_SENTINEL), "{event}");
+        }
+        let headers = server.header_block();
+        assert!(
+            headers.contains(&format!("x-api-key: {}", DEEPSEEK_SENTINEL.to_lowercase())),
+            "{headers}"
+        );
+        assert!(!headers.contains("authorization"), "{headers}");
+        // The two headers the profile drops stay dropped on the wire.
+        assert!(!headers.contains("anthropic-version"), "{headers}");
+        assert!(!headers.contains("anthropic-beta"), "{headers}");
+        assert!(headers.contains("accept: text/event-stream"), "{headers}");
+        let body = server
+            .submitted
+            .lock()
+            .expect("record")
+            .clone()
+            .expect("the adapter submitted a request");
+        assert!(!body.to_string().contains(DEEPSEEK_SENTINEL));
+        assert!(events.iter().any(|event| event.contains("Finished")));
+    }
+
+    #[test]
+    fn a_missing_deepseek_credential_fails_before_submission() {
+        let adapter =
+            AnthropicMessages::with_profile(Profile::DeepSeek, Arc::new(Missing), transport());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let error = runtime.block_on(async {
+            let mut stream = adapter.stream(
+                ModelRequest {
+                    response_id: ResponseId::new(),
+                    artifacts: ArtifactSource::default(),
+                    input: ModelInput {
+                        model: ds_model(),
+                        items: vec![user("Hello")],
+                        tools: Vec::new(),
+                        options: options(64),
+                        continuation: None,
+                    },
+                },
+                Default::default(),
+            );
+            let event = futures_util::StreamExt::next(&mut stream)
+                .await
+                .expect("terminal");
+            let harness_core::model::ProviderEvent::Finished { error, .. } = event else {
+                panic!("terminal failure");
+            };
+            error.expect("error")
+        });
+        assert_eq!(error.code, ModelErrorCode::Authentication);
+        // The shared fixture credential source names the Anthropic variable; the
+        // profile's own variable is asserted by the child-process test below.
+        assert!(error.message.contains("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn env_deepseek_key_selects_the_api_key_header() {
+        if std::env::var_os("HARNESS_DEEPSEEK_ENV_CHILD").is_some() {
+            let adapter = AnthropicMessages::deepseek_from_env().expect("env key");
+            assert_eq!(adapter.profile(), Profile::DeepSeek);
+            let rendered = format!("{adapter:?}");
+            assert!(rendered.contains(DEEPSEEK_ENDPOINT), "{rendered}");
+            assert!(!rendered.contains(DEEPSEEK_SENTINEL), "{rendered}");
+            let credential = crate::credentials::EnvApiKey::with_scheme(
+                "DEEPSEEK_API_KEY",
+                crate::credentials::CredentialScheme::ApiKeyHeader,
+            )
+            .expect("env key")
+            .credential()
+            .expect("credential");
+            let headers = credential.request_headers();
+            assert_eq!(headers["x-api-key"], DEEPSEEK_SENTINEL);
+            assert!(headers.get("authorization").is_none());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "anthropic::tests::deepseek::env_deepseek_key_selects_the_api_key_header",
+                "--nocapture",
+            ])
+            .env("HARNESS_DEEPSEEK_ENV_CHILD", "1")
+            .env("DEEPSEEK_API_KEY", DEEPSEEK_SENTINEL)
+            .env_remove("ANTHROPIC_API_KEY")
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains(DEEPSEEK_SENTINEL),
+            "secret leaked in stdout"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains(DEEPSEEK_SENTINEL),
+            "secret leaked in stderr"
+        );
+        assert!(output.status.success(), "credential child failed");
+    }
+
+    // ------------------------------------------------------------ catalog
+
+    #[test]
+    fn catalog_rows_match_the_deepseek_models_page() {
+        use harness_core::context::InputMediaKind;
+        for name in ["deepseek-flash", "deepseek-v4-pro"] {
+            let info = info(Profile::DeepSeek, name).expect("catalogued model");
+            assert_eq!(info.limits.context_tokens, Some(1_000_000), "{name}");
+            assert_eq!(info.limits.max_output_tokens, Some(384_000), "{name}");
+            assert!(info.capabilities.tools, "{name}");
+            assert!(info.capabilities.reasoning_effort, "{name}");
+        }
+        let flash = info(Profile::DeepSeek, "deepseek-flash").expect("flash");
+        assert!(
+            flash
+                .capabilities
+                .input_media
+                .contains(&InputMediaKind::Image)
+        );
+        let pro = info(Profile::DeepSeek, "deepseek-v4-pro").expect("pro");
+        assert!(
+            !pro.capabilities
+                .input_media
+                .contains(&InputMediaKind::Image)
+        );
+        assert_eq!(DEEPSEEK_LIVE_CHECK_MODEL, "deepseek-flash");
+        assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 4_096);
+        assert!(info(Profile::DeepSeek, "claude-sonnet-5-5").is_none());
+        let deepseek_catalog = catalog(Profile::DeepSeek, "deepseek");
+        assert!(deepseek_catalog.limits(&ds_model()).is_some());
+        // The two profiles' rows never mix, even under one instance name.
+        assert!(
+            catalog(Profile::DeepSeek, "anthropic")
+                .limits(&model())
+                .is_none()
+        );
+    }
 }

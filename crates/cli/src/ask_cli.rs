@@ -17,9 +17,9 @@ pub fn command() -> Command {
         .long_about("Stream assistant text to stdout; diagnostics go to stderr. Tool approvals use /dev/tty, never stdin. Without a terminal every call is denied. Ctrl-C cancels durably; a second Ctrl-C exits immediately. A continuation that names another --provider or --model switches explicitly under --switch-policy: `reject` (default) refuses any optional native-state loss after printing the portability report, `omit-optional` drops it and prints the same report. Exit codes: 0 completed, 1 turn failure, 2 usage/configuration (including a refused switch), 3 authentication, 130 cancelled.")
         .arg(Arg::new("data-root").long("data-root").value_name("DIR").value_parser(value_parser!(PathBuf)).help("Private storage [default: $XDG_DATA_HOME/harness or ~/.local/share/harness]"))
         .arg(Arg::new("workspace").long("workspace").value_name("DIR").required(true).value_parser(value_parser!(PathBuf)).help("Workspace to authorize (relative paths are resolved)"))
-        .arg(Arg::new("provider").long("provider").value_parser(["openai", "anthropic"]).default_value("openai").help("Provider for a new session, or the switch target on continuation"))
-        .arg(Arg::new("auth").long("auth").value_parser(["codex", "api-key"]).default_value("codex").help("OpenAI authentication; not applicable to --provider anthropic"))
-        .arg(Arg::new("model").long("model").value_name("MODEL").help("Default: gpt-6.1-sol (codex), gpt-5.5 (api-key), claude-sonnet-5-5 (anthropic); saved model on continuation"))
+        .arg(Arg::new("provider").long("provider").value_parser(["openai", "anthropic", "deepseek"]).default_value("openai").help("Provider for a new session, or the switch target on continuation"))
+        .arg(Arg::new("auth").long("auth").value_parser(["codex", "api-key"]).default_value("codex").help("OpenAI authentication; not applicable to --provider anthropic or deepseek"))
+        .arg(Arg::new("model").long("model").value_name("MODEL").help("Default: gpt-6.1-sol (codex), gpt-5.5 (api-key), claude-sonnet-5-5 (anthropic), deepseek-flash (deepseek); saved model on continuation"))
         .arg(Arg::new("summary-model").long("summary-model").value_name("MODEL").help("Independent summary model on the same provider instance; enables automatic compaction"))
         .arg(Arg::new("switch-policy").long("switch-policy").value_parser(["reject", "omit-optional"]).default_value("reject").help("On continuation, whether a model switch may omit optional native state"))
         .arg(Arg::new("session").long("session").value_name("ID").value_parser(|s: &str| s.parse::<SessionId>()).help("Continue an existing durable session"))
@@ -72,7 +72,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         Some(ValueSource::CommandLine)
     );
     let explicit_auth = matches!(args.value_source("auth"), Some(ValueSource::CommandLine));
-    if provider_name == "anthropic" && explicit_auth {
+    if !harness::wiring::openai_auth_applies(provider_name) && explicit_auth {
         eprintln!("error: auth_not_applicable");
         return 2;
     }

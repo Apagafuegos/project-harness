@@ -132,7 +132,11 @@ async fn session(
         );
     }
     if let Some(adapter) = anthropic_adapter {
-        anthropic::extend_catalog(&mut catalog, ANTHROPIC_INSTANCE);
+        anthropic::extend_catalog(
+            &mut catalog,
+            anthropic::Profile::Anthropic,
+            ANTHROPIC_INSTANCE,
+        );
         router.register(ANTHROPIC_INSTANCE, Arc::new(adapter));
     }
     let cross_provider = router.contains(ANTHROPIC_INSTANCE);

@@ -88,8 +88,10 @@ printf 'Now the tests' | harness ask --workspace ~/src/my-project --session SESS
 
 A new session records a built-in instruction plus the workspace's root
 `AGENTS.md`. The default provider is OpenAI through the read-only Codex login
-(`codex login` once); `--provider anthropic` uses `ANTHROPIC_API_KEY`. Press
-Ctrl-K in the TUI for the context inspector and Ctrl-D to quit.
+(`codex login` once); `--provider anthropic` uses `ANTHROPIC_API_KEY`, and
+`--provider deepseek` uses `DEEPSEEK_API_KEY` on DeepSeek's
+Anthropic-compatible endpoint. Press Ctrl-K in the TUI for the context
+inspector and Ctrl-D to quit.
 
 ## Repository
 
