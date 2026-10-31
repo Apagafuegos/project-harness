@@ -174,6 +174,25 @@ impl SessionCommands {
     }
 }
 impl Commands for SessionCommands {
+    // Read-only inspections use the current handle without the navigation
+    // permit, so they never wait behind a handover. The App discards a report
+    // whose head no longer matches its view.
+    fn inspect_context(
+        &self,
+        head: Option<EntryId>,
+        model_override: Option<ModelRef>,
+    ) -> BoxFuture<'static, Result<harness_core::context::ContextReport, InspectError>> {
+        let handle = self.state().handle.clone();
+        Commands::inspect_context(&handle, head, model_override)
+    }
+    fn inspect_preview(
+        &self,
+        id: EntryId,
+    ) -> BoxFuture<'static, Result<harness_core::context::compaction::CompactionPreview, Rejection>>
+    {
+        let handle = self.state().handle.clone();
+        Commands::inspect_preview(&handle, id)
+    }
     fn command(&self, command: Command) -> BoxFuture<'static, Result<Accepted, Rejection>> {
         let order = self.order.clone();
         let state = self.state.clone();

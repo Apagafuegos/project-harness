@@ -11,6 +11,8 @@
 //! See `docs/decisions/0023-tui-model.md`.
 
 mod navigation;
+mod inspector;
+mod inspector_shell;
 mod render;
 pub mod runtime;
 pub mod runtime_nav;
@@ -58,6 +60,17 @@ pub enum Action {
     OpenSession(harness_core::session::SessionId),
     /// Create a session with the current workspace and flags.
     NewSession,
+    /// Read-only projection request, executed asynchronously by the shell.
+    InspectContext {
+        /// Historical head, or the current head.
+        head: Option<harness_core::session::EntryId>,
+        /// Preview only; never switches the session model.
+        model_override: Option<ModelRef>,
+    },
+    /// Read an existing ephemeral compaction proposal by identity, without
+    /// regenerating it. Reserved for clients that retain an ID across resets;
+    /// manual proposals already arrive in the `CompactionPreviewed` reply.
+    InspectPreview(harness_core::session::EntryId),
     /// Leave the client. When `cancel` names a turn, the shell must submit
     /// `Cancel` for it and wait for durable cancellation before restoring the
     /// terminal and exiting.
@@ -131,6 +144,7 @@ impl ResolutionMode {
 /// The pure client model. One instance owns one session's screen.
 pub struct App {
     navigation: navigation::Navigation,
+    inspector: inspector::Inspector,
     info: SessionInfo,
     catalog: harness_core::context::ModelCatalog,
     view: Option<ClientView>,
@@ -159,6 +173,7 @@ impl App {
     pub fn new(info: SessionInfo) -> Self {
         Self {
             navigation: Default::default(),
+            inspector: Default::default(),
             info,
             catalog: Default::default(),
             view: None,
@@ -183,7 +198,7 @@ impl App {
 
     /// Insert bracketed paste atomically; modal input never becomes a command.
     pub fn on_paste(&mut self, text: &str) {
-        if self.navigation_captures_input() {
+        if self.navigation_captures_input() || self.inspector_captures() {
             return;
         }
         let text: String = text
@@ -244,6 +259,7 @@ impl App {
                 if client.apply(&event) != ApplyOutcome::Applied {
                     return;
                 }
+                self.observe_inspector(&event.kind);
                 self.observe(&event.kind);
                 self.rebuild();
             }
@@ -267,6 +283,9 @@ impl App {
         if let Some(actions) = self.navigation_key(key) {
             return actions;
         }
+        if let Some(actions) = self.inspector_key(key) {
+            return actions;
+        }
         match self.modal {
             Modal::Approval { .. } => self.approval_key(key),
             Modal::Uncertain { .. } => self.uncertain_key(key),
@@ -282,6 +301,7 @@ impl App {
     pub fn render(&mut self, frame: &mut Frame) {
         render::draw(self, frame);
         self.render_navigation(frame);
+        self.render_inspector(frame);
     }
 
     fn rebuild(&mut self) {

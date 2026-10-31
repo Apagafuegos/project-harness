@@ -420,7 +420,7 @@ fn model_name(model: &ModelRef) -> String {
 }
 
 /// Wrap every logical line to `width` display cells, preserving span styles.
-fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+pub(super) fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     for line in lines {
         out.extend(wrap_line(line, width));

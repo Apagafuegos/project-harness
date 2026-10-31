@@ -1,5 +1,5 @@
 //! Thin asynchronous terminal shell. The engine remains the only session owner.
-use super::{Action, App};
+use super::{Action, App, inspector_shell};
 use crossterm::{
     cursor::Show,
     event::{DisableBracketedPaste, EnableBracketedPaste, Event},
@@ -8,6 +8,11 @@ use crossterm::{
 };
 use futures_util::{Stream, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use harness_core::runtime::{Accepted, Command, Phase, Rejection, SessionHandle, SubscriptionItem};
+use harness_core::{
+    context::{ContextReport, compaction::CompactionPreview},
+    runtime::InspectError,
+    session::{EntryId, ModelRef},
+};
 use ratatui::{Terminal, backend::Backend};
 use std::{
     io::{self, IsTerminal, Write},
@@ -85,12 +90,46 @@ pub trait Commands {
     fn navigation(&self, _action: Action) -> super::runtime_nav::NavigationFuture {
         Box::pin(async { Err("session navigation unavailable".into()) })
     }
+    /// Read a context projection without blocking the terminal loop.
+    fn inspect_context(
+        &self,
+        _head: Option<EntryId>,
+        _model_override: Option<ModelRef>,
+    ) -> BoxFuture<'static, Result<ContextReport, InspectError>> {
+        Box::pin(async { Err(InspectError::Closed) })
+    }
+    /// Read a live compaction proposal, never regenerate it.
+    fn inspect_preview(
+        &self,
+        _id: EntryId,
+    ) -> BoxFuture<'static, Result<CompactionPreview, Rejection>> {
+        Box::pin(async {
+            Err(Rejection::StalePreview {
+                field: "preview_id",
+            })
+        })
+    }
     /// Optional continuation switch, submitted once recovery reaches idle.
     fn startup(&self) -> Option<Command> {
         None
     }
 }
 impl Commands for SessionHandle {
+    fn inspect_context(
+        &self,
+        head: Option<EntryId>,
+        model_override: Option<ModelRef>,
+    ) -> BoxFuture<'static, Result<ContextReport, InspectError>> {
+        let handle = self.clone();
+        Box::pin(async move { handle.inspect_context(head, model_override).await })
+    }
+    fn inspect_preview(
+        &self,
+        id: EntryId,
+    ) -> BoxFuture<'static, Result<CompactionPreview, Rejection>> {
+        let handle = self.clone();
+        Box::pin(async move { handle.inspect_context_preview(id).await })
+    }
     fn command(&self, command: Command) -> BoxFuture<'static, Result<Accepted, Rejection>> {
         let handle = self.clone();
         Box::pin(async move { handle.command(command).await })
@@ -139,6 +178,7 @@ where
     futures_util::pin_mut!(events, subscriptions, signals);
     let mut pending = FuturesUnordered::new();
     let mut navigation = super::runtime_nav::PendingNavigation::new();
+    let mut inspections = inspector_shell::Inspections::new();
     let mut tick = tokio::time::interval(Duration::from_millis(16));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
@@ -149,6 +189,11 @@ where
     let mut events_open = true;
     let mut signals_open = true;
     loop {
+        if !quitting {
+            for action in app.inspector_refresh() {
+                inspector_shell::dispatch(action, handle, &mut inspections);
+            }
+        }
         if !quitting
             && app.view().is_some_and(|v| {
                 v.phase == Phase::Durable(harness_core::session::RuntimeState::Idle)
@@ -180,14 +225,20 @@ where
                 }
                 dirty = true;
             }
+            inspection = inspections.next(), if !inspections.is_empty() => {
+                inspector_shell::deliver(app, inspection.expect("pending inspection"));
+                dirty = true;
+            }
             reply = pending.next(), if !pending.is_empty() => {
-                match reply.expect("pending command") {
+                let reply = reply.expect("pending command");
+                app.inspector_reply(&reply);
+                match reply {
                     Ok(Accepted::TurnStarted { turn_id, .. }) if quitting => {
                         pending.push(handle.command(Command::Cancel { turn_id }));
                     }
                     Ok(_) if quitting || app.view().is_some_and(|v| v.phase == Phase::Faulted) => {},
                     Ok(accepted) => app.navigation_accepted(&accepted),
-                    Err(error) => app.navigation_rejected(error),
+                    Err(error) => if !app.inspector_rejection(&error) { app.navigation_rejected(error); },
                 }
                 dirty = true;
             }
@@ -201,6 +252,7 @@ where
                         restore();
                         restored = true;
                         quitting = true;
+                        cancel_pending_compaction(handle, &mut pending);
                         if let Some(turn_id) = app.view().and_then(|v| v.active_turn.clone()) {
                             pending.push(handle.command(Command::Cancel { turn_id }));
                         }
@@ -208,7 +260,7 @@ where
                     Some(Signal::Interrupt) if !quitting => {
                         let actions = app.on_key(crossterm::event::KeyEvent::new(
                             crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL));
-                        dispatch(actions, handle, &mut pending, &mut navigation, &mut quitting);
+                        dispatch(actions, handle, &mut pending, &mut navigation, &mut inspections, &mut quitting);
                     }
                     Some(_) => {}
                     None => signals_open = false,
@@ -218,7 +270,7 @@ where
             event = events.next(), if events_open && app.view().is_some() => {
                 match event {
                     Some(Ok(Event::Key(key))) if !quitting => {
-                        dispatch(app.on_key(key), handle, &mut pending, &mut navigation, &mut quitting);
+                        dispatch(app.on_key(key), handle, &mut pending, &mut navigation, &mut inspections, &mut quitting);
                     }
                     Some(Ok(Event::Paste(text))) if !quitting => app.on_paste(&text),
                     Some(Ok(Event::Resize(width, height))) => {
@@ -232,6 +284,7 @@ where
                     None => {
                         events_open = false;
                         quitting = true;
+                        cancel_pending_compaction(handle, &mut pending);
                         if let Some(turn_id) = app.view().and_then(|v| v.active_turn.clone()) {
                             pending.push(handle.command(Command::Cancel { turn_id }));
                         }
@@ -254,11 +307,19 @@ where
 }
 
 type Pending = FuturesUnordered<BoxFuture<'static, Result<Accepted, Rejection>>>;
+fn cancel_pending_compaction(handle: &impl Commands, pending: &mut Pending) {
+    // A pending manual preview (or budget-held start) must be cancelled before
+    // draining replies. Otherwise quit would wait for a stalled summarizer.
+    if !pending.is_empty() {
+        pending.push(handle.command(Command::CancelCompaction));
+    }
+}
 fn dispatch(
     actions: Vec<Action>,
     handle: &impl Commands,
     pending: &mut Pending,
     navigation: &mut super::runtime_nav::PendingNavigation,
+    inspections: &mut inspector_shell::Inspections,
     quitting: &mut bool,
 ) {
     let mut commands = Vec::new();
@@ -268,8 +329,12 @@ fn dispatch(
             action @ (Action::ListSessions | Action::OpenSession(_) | Action::NewSession) => {
                 super::runtime_nav::dispatch(action, handle, navigation)
             }
+            action @ (Action::InspectContext { .. } | Action::InspectPreview(_)) => {
+                inspector_shell::dispatch(action, handle, inspections)
+            }
             Action::Quit { cancel } => {
                 *quitting = true;
+                cancel_pending_compaction(handle, pending);
                 if let Some(turn_id) = cancel {
                     pending.push(handle.command(Command::Cancel { turn_id }));
                 }

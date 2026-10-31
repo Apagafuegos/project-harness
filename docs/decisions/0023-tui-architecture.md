@@ -326,7 +326,7 @@ shell-only; branch/model/edit actions use existing typed engine commands.
 The session picker receives owned `DataRoot::sessions()` rows after a blocking
 scan has finished and released every shared lock. The shell polls navigation
 futures strictly in FIFO order, never concurrently. `SessionCommands` also
-serializes commands, catalog scans and handover with a Tokio mutex, checking a
+serializes commands, catalog scans and handover with a single-permit semaphore, checking a
 fresh engine view under that gate before shutdown. Active turns, recovery,
 uncertainty and faults refuse handover with stable reasons. Bad catalog rows
 and other workspaces are refused before releasing the current writer. No
@@ -368,3 +368,95 @@ serialization, branch re-projection, sibling preservation, busy refusal,
 reject-first reports, explicit omission with no foreign state in the next
 recorded request, required incompatibilities and small/80×24 rendering. No
 engine behavior, provider implementation, dependency or wiring helper is added.
+
+## Part 4 amendment: inspector and compaction (m5-05)
+
+`inspector.rs` owns the pure panel state, rendering, input and typed results.
+The existing approval/recovery/quit modals retain precedence. Ctrl-K toggles
+the inspector; it captures paste and ordinary editor keys while open. PgUp/PgDn
+scrolls the entire report/proposal. Ctrl-C/D keep their existing global behavior.
+No m5-04 picker keys or action names are used.
+
+The only new actions are `InspectContext { head, model_override }` and
+`InspectPreview(EntryId)`; compaction uses the existing `Command` action.
+`App` emits `InspectContext` when its projection identity changes; a manual
+proposal arrives in the `CompactionPreviewed` reply, so the App never needs
+`InspectPreview`. That variant and its `Commands::inspect_preview` method are
+reserved for clients that retain an ID across resets and are covered by a
+direct test asserting a live read and a stale read with no new generation.
+The shell's injectable `Commands` endpoint has read-only inspection methods.
+`inspector_shell.rs` holds the futures and mechanical delivery; the loop selects
+inspection replies alongside commands, keys, subscriptions and ticks, never
+awaiting an inspection inline. One request is scheduled per changed published
+session/sequence/head/model/override identity while open (not per streamed
+text delta). Results are checked against the current identity before display;
+a response for a former head/session/model cannot overwrite the new report.
+These reads and the model chooser neither write storage nor call a provider.
+
+`m` chooses from the **merged wiring catalog** via `ModelCatalog::iter()`
+(decision 14, the separately landed ADR 0015 accessor amendment). The report
+uses `model_override`, explicitly labels the preview and says nothing switched.
+Selecting “Session model” removes the override. There is no `SwitchModel` action
+in this feature. Neither provider lists nor model limits are duplicated here.
+
+Reports show labelled estimated usage/headroom, configured reserves/limits,
+overflow/recommendation/unknown flags, ordered included items, part exclusions,
+estimator identity, configuration and projection fingerprints. Text previews
+use an explicit bounded displayable-content allowlist; native state schemas,
+continuations, portability metadata and opaque payloads are **not** preview
+content. Instructions use a recorded-instructions label (their text is not in
+the report/view), rather than reading their artifact in the App. Tool calls are
+labelled separately within assistant items. Opaque bytes remain bytes, never
+estimated tokens. This is narrower than the existing transcript's schema/size
+placeholder: the inspector never renders even a native schema.
+
+`c` submits `PreviewCompaction`, shows progress and allows Esc cancellation.
+The core retains selection, provider dispatch, independent summary model,
+manifest construction, diff and validation authority. Replies supply manual
+proposals; automatic preview events are informational only, never an Enter
+commit target. The panel shows exact summary text, covered/superseded IDs,
+source/configuration fingerprints and manifest checksums/indices, then the
+core's full category-token diff and fits-budget result. Generating a proposal
+changes no journal bytes. A sufficiently large rendered preview frame arms
+Enter; mere arrival or a clipped tiny pane does not. Enter submits the exact
+preview ID once. Once submitted, commit cannot be cancelled by closing the UI.
+Esc/Ctrl-K discards an unsubmitted proposal or cancels generation; late answers
+cannot revive a closed/cancelled proposal. Quit cancels outstanding generation
+before draining pending replies, avoiding a stalled-summary shutdown deadlock.
+
+`stale_preview` clears the displayed proposal, names the changed field and
+offers `c` for a new one; the UI never silently retries. NotEligible and all
+other compaction errors use the core's stable code. Automatic preview/commit
+notifications appear in the transcript; summary durability already appears
+through its snapshot projection. An open inspector refreshes after that commit.
+Compaction failures also set the banner. `context_budget_exceeded` retains an
+ineligibility reason, or suggests compaction when the rejection has no such
+reason. The associated failure event cannot erase this richer reply diagnostic.
+
+### Offline evidence and mutations
+
+`crates/cli/tests/tui_inspector.rs` adds 16 tests with real JSONL storage and
+ScriptedProvider, including independent summary-model request verification,
+80×24 and tiny TestBackend renders, ordered budget/item/exclusion/fingerprint
+rows, non-switching model overrides, refresh after a committed turn, explicit
+preview-first commitment, rendered summary/manifest/full diff, exact journal
+bytes on preview cancellation and generation cancellation, quit during a
+stalled summary, stale head with retry guidance, zero-provider-call eligibility,
+automatic compaction visibility, budget refusals with and without eligibility,
+slow-inspection key/resize/tick responsiveness, `inspect_context_preview`
+returning a live proposal and then `stale_preview` without regenerating, and an
+opaque payload/schema sentinel under both ordinary and override reports.
+
+Each mutation was applied alone, the named test failed (exit 101), and it was
+reverted before the complete gate:
+
+| Mutation | Test | Failure |
+| --- | --- | --- |
+| Await `inspect_context` inline in the loop | `slow_inspection_never_blocks_keys_resize_or_render_ticks` | loop deadline expired before keys/renders could proceed |
+| Remove the shown-preview Enter guard | `preview_first_requires_a_render_and_explicit_enter` | arrival alone incorrectly authorized commit |
+| Render native schema as the item preview | `opaque_schema_payload_and_portability_sentinel_never_render_in_panel` | opaque state leaked |
+| Ignore `StalePreview` | `loop_stale_preview_names_the_changed_field_and_offers_retry` | no changed-field/retry diagnostic; old proposal remained shown |
+
+No engine/provider behavior, persistence schema, dependency, toolchain or
+transport was changed by this step. The only core accessor in its ancestry is
+the orchestrator's separately reviewed decision-14 change.

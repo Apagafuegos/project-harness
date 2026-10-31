@@ -130,12 +130,48 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
   reasoning summaries. Resize relays out immediately. The status line shows
   phase, model, usage and the catalog's sourced context limit.
 
+### Context inspector and compaction
+
+Ctrl-K opens/closes the read-only context inspector. PgUp/PgDn scrolls its
+included items in projection order, exclusions with reason codes, fingerprints
+and configuration identity. Budgets label used/remaining counts as **estimates**;
+opaque bytes are not tokens. Reports refresh asynchronously when the published
+session/head/sequence/model changes, without waiting in the input loop.
+
+Inside the inspector, `m` opens the merged catalog's model list. Up/Down selects
+and Enter previews that model's context; the panel explicitly says **nothing
+switched**. Select “Session model” to clear the override. This never sends a
+switch command or writes history. Esc dismisses the chooser.
+
+`c` asks the engine for a compaction preview using the independently configured
+`--summary-model`. Progress is visible and Esc cancels generation. An ineligible
+session displays the core's reason without calling a provider. The proposal
+shows the summary, covered/superseded source manifest and provenance, and
+`CompactionDiff` (new coverage, supersession, per-category before/after estimates
+and whether it fits). Scroll to read the full proposal; it may increase tokens.
+Enter commits **only after the preview has been rendered**; Esc discards it
+without changing journal bytes. Ctrl-K also cancels/discards when closing.
+Commit cannot be cancelled once submitted. A `stale_preview` rejection identifies
+the changed binding; press `c` for a new preview, never an automatic retry.
+
+Automatic compaction is visible in the transcript and refreshes an open report.
+Failures show their stable code in the banner; budget refusals retain the core's
+ineligibility reason, or suggest Ctrl-K then `c` when compaction is eligible.
+Approvals and recovery dialogs retain input precedence over the inspector.
+
 SIGTERM/SIGHUP restore the main screen immediately, then perform durable
 shutdown. Panic restoration runs before the panic diagnostic. Faults remain
 visible and Ctrl-D can leave cleanly. A torn journal still requires explicit
 `harness journal inspect` / `repair`; the TUI does not silently repair it.
 
 ### TUI verification
+
+`cargo test -p harness --test tui_inspector` runs 16 offline inspector tests:
+real storage and ScriptedProvider summary requests, pure TestBackend buffers,
+model previews without switching, preview-first commitment, cancellation byte
+identity, stale fields, eligibility, automatic compaction, budget diagnostics,
+slow inspection responsiveness, live/stale preview reads and
+opaque-state/schema sentinel redaction.
 
 `cargo test -p harness --test tui_runtime` exercises the injectable loop with
 TestBackend, scripted input/provider streams, and real storage.
