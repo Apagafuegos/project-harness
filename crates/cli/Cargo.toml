@@ -13,6 +13,9 @@ harness-providers = { path = "../providers" }
 tokio = { workspace = true, features = ["signal"] }
 serde_json.workspace = true
 rustix.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

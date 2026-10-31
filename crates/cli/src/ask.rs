@@ -18,6 +18,8 @@ use harness_core::{
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::text::{bounded, line};
+
 /// Invocation configuration. The caller supplies sourced model metadata in `driver`.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -647,23 +649,6 @@ impl Renderer {
         Ok(())
     }
 }
-fn line(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
-}
-fn bounded(text: &str, max: usize) -> String {
-    let mut s: String = text
-        .chars()
-        .take(max)
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    if text.chars().count() > max {
-        s.push('…');
-    }
-    s
-}
-
 /// Backwards-compatible location of the shared default resolver.
 pub use crate::wiring::default_data_root;
 
