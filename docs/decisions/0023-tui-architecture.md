@@ -313,3 +313,58 @@ method, a generic fault banner for faulted resets, and the documented Enter key
 in quit confirmation. State reduction, approvals, uncertainty and transcript
 projection remain pure. No engine/provider code, journal format, transport or
 workspace crate is added.
+
+## Part 3: session, branch and model navigation (m5-04)
+
+Navigation state, keys and rendering live in `tui/navigation.rs`; durable
+handover and sequential navigation work live in `tui/runtime_nav.rs`. The small
+App/loop hooks preserve the pure-model/thin-shell boundary. Ctrl-O, Ctrl-T and
+Ctrl-L belong to navigation; Ctrl-K and the inspector/compaction action names
+are untouched. `Action::{ListSessions, OpenSession(SessionId), NewSession}` are
+shell-only; branch/model/edit actions use existing typed engine commands.
+
+The session picker receives owned `DataRoot::sessions()` rows after a blocking
+scan has finished and released every shared lock. The shell polls navigation
+futures strictly in FIFO order, never concurrently. `SessionCommands` also
+serializes commands, catalog scans and handover with a Tokio mutex, checking a
+fresh engine view under that gate before shutdown. Active turns, recovery,
+uncertainty and faults refuse handover with stable reasons. Bad catalog rows
+and other workspaces are refused before releasing the current writer. No
+workspace switch, repair, tool retry or policy bypass is introduced.
+
+Idle handover awaits `shutdown`, then calls `wiring::open_session` with the same
+workspace, flags, provider and catalog. Only `session_locked` is retried, exactly
+once after 30 ms, then reported as busy. If opening fails after shutdown, the
+shell attempts to reopen the previous durable session and reports the original
+failure. A replacement view resets the transcript and editor; subscriptions
+follow the new handle and begin with the ordinary engine reset. Explicit
+continuation overrides run through the same idle/recovery-aware switch path as
+startup, never against the previous session's model. Quit drains outstanding
+navigation as well as commands, then the caller shuts down the current handle.
+
+The branch tree derives user nodes and turn heads from immutable snapshot
+entries, ancestry and turns, including sibling branches. Ancestry paths order
+the tree; indentation shows branch depth, `*` identifies the current branch,
+and every turn names its model. Enter submits `SelectHead`. Editing pre-fills
+only the user text and remembers its parent. Send submits `SelectHead(parent)`
+before `StartTurn(edited)` and waits for acceptance; if the parent is already
+selected, the redundant selection is omitted to avoid `head_unchanged`. A
+refusal stops the sequence. No original entry is replaced or hidden.
+
+The model dialog enumerates the wiring catalog through decision 14's read-only
+`ModelCatalog::iter()` (ADR 0015 amendment). It always submits `Reject` first.
+A `PortabilityLoss` reply supplies the classified report directly to App,
+including entry IDs, parts, owners, schemas, byte counts and required
+capabilities, never payloads or artifact reads. Optional omission needs a
+separate `o` confirmation bound to that report's target. Required losses have
+no omission action. Each attempt is still validated by core; stale reports
+cannot authorize a now-required loss. Success uses the existing catalog-aware
+status bar for the new model and budget.
+
+Offline `tui_navigation` tests use real storage, `ScriptedProvider`, TestBackend
+and the production loop. They cover catalog status/workspace refusals, durable
+handover/back/new, writer contention and its one retry, delayed catalog/open
+serialization, branch re-projection, sibling preservation, busy refusal,
+reject-first reports, explicit omission with no foreign state in the next
+recorded request, required incompatibilities and small/80×24 rendering. No
+engine behavior, provider implementation, dependency or wiring helper is added.

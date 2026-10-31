@@ -10,8 +10,10 @@
 //!
 //! See `docs/decisions/0023-tui-model.md`.
 
+mod navigation;
 mod render;
 pub mod runtime;
+pub mod runtime_nav;
 mod transcript;
 
 use std::path::PathBuf;
@@ -50,6 +52,12 @@ pub enum Action {
     /// Submit exactly one core command. The shell reports a rejection in the
     /// app's error banner; the app never retries.
     Command(Command),
+    /// Scan the read-only session catalog.
+    ListSessions,
+    /// Durably hand over to another session in this workspace.
+    OpenSession(harness_core::session::SessionId),
+    /// Create a session with the current workspace and flags.
+    NewSession,
     /// Leave the client. When `cancel` names a turn, the shell must submit
     /// `Cancel` for it and wait for durable cancellation before restoring the
     /// terminal and exiting.
@@ -122,6 +130,7 @@ impl ResolutionMode {
 
 /// The pure client model. One instance owns one session's screen.
 pub struct App {
+    navigation: navigation::Navigation,
     info: SessionInfo,
     catalog: harness_core::context::ModelCatalog,
     view: Option<ClientView>,
@@ -149,6 +158,7 @@ impl App {
     /// `Reset`; until then the screen shows an empty, connecting state.
     pub fn new(info: SessionInfo) -> Self {
         Self {
+            navigation: Default::default(),
             info,
             catalog: Default::default(),
             view: None,
@@ -173,6 +183,9 @@ impl App {
 
     /// Insert bracketed paste atomically; modal input never becomes a command.
     pub fn on_paste(&mut self, text: &str) {
+        if self.navigation_captures_input() {
+            return;
+        }
         let text: String = text
             .chars()
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -251,6 +264,9 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
+        if let Some(actions) = self.navigation_key(key) {
+            return actions;
+        }
         match self.modal {
             Modal::Approval { .. } => self.approval_key(key),
             Modal::Uncertain { .. } => self.uncertain_key(key),
@@ -265,6 +281,7 @@ impl App {
     /// saturating heights and a zero-height pane draws nothing.
     pub fn render(&mut self, frame: &mut Frame) {
         render::draw(self, frame);
+        self.render_navigation(frame);
     }
 
     fn rebuild(&mut self) {
@@ -447,10 +464,12 @@ impl App {
         let text = std::mem::take(&mut self.prompt);
         self.cursor = 0;
         self.scroll = 0;
-        vec![Action::Command(Command::StartTurn {
+        let mut actions = self.navigation_send();
+        actions.push(Action::Command(Command::StartTurn {
             command_id: CommandId::new(),
             content: vec![ContentBlock::Text { text }],
-        })]
+        }));
+        actions
     }
 
     fn interrupt(&mut self) -> Vec<Action> {

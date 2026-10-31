@@ -72,6 +72,19 @@ impl Drop for TerminalGuard {
 pub trait Commands {
     /// Submit one typed command without retries.
     fn command(&self, command: Command) -> BoxFuture<'static, Result<Accepted, Rejection>>;
+    /// Execute an edit's SelectHead before its StartTurn, stopping on refusal.
+    fn sequence(&self, commands: Vec<Command>) -> BoxFuture<'static, Result<Accepted, Rejection>> {
+        super::runtime_nav::sequence(
+            commands
+                .into_iter()
+                .map(|command| self.command(command))
+                .collect(),
+        )
+    }
+    /// Shell-only session navigation, unsupported by a bare engine endpoint.
+    fn navigation(&self, _action: Action) -> super::runtime_nav::NavigationFuture {
+        Box::pin(async { Err("session navigation unavailable".into()) })
+    }
     /// Optional continuation switch, submitted once recovery reaches idle.
     fn startup(&self) -> Option<Command> {
         None
@@ -125,6 +138,7 @@ where
 {
     futures_util::pin_mut!(events, subscriptions, signals);
     let mut pending = FuturesUnordered::new();
+    let mut navigation = super::runtime_nav::PendingNavigation::new();
     let mut tick = tokio::time::interval(Duration::from_millis(16));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut dirty = true;
@@ -149,6 +163,7 @@ where
         }
         if quitting
             && pending.is_empty()
+            && navigation.is_empty()
             && app.view().is_some_and(|v| {
                 v.active_turn.is_none()
                     || v.phase == Phase::Faulted
@@ -170,10 +185,14 @@ where
                     Ok(Accepted::TurnStarted { turn_id, .. }) if quitting => {
                         pending.push(handle.command(Command::Cancel { turn_id }));
                     }
-                    Ok(_) if app.view().is_some_and(|v| v.phase == Phase::Faulted) => {},
-                    Ok(_) => app.clear_error(),
-                    Err(error) => app.set_error(rejection(error)),
+                    Ok(_) if quitting || app.view().is_some_and(|v| v.phase == Phase::Faulted) => {},
+                    Ok(accepted) => app.navigation_accepted(&accepted),
+                    Err(error) => app.navigation_rejected(error),
                 }
+                dirty = true;
+            }
+            result = navigation.next(), if !navigation.is_empty() => {
+                if let Some(replacement) = super::runtime_nav::apply(app, result.expect("pending navigation")) { startup = replacement; }
                 dirty = true;
             }
             signal = signals.next(), if signals_open => {
@@ -189,7 +208,7 @@ where
                     Some(Signal::Interrupt) if !quitting => {
                         let actions = app.on_key(crossterm::event::KeyEvent::new(
                             crossterm::event::KeyCode::Char('c'), crossterm::event::KeyModifiers::CONTROL));
-                        dispatch(actions, handle, &mut pending, &mut quitting);
+                        dispatch(actions, handle, &mut pending, &mut navigation, &mut quitting);
                     }
                     Some(_) => {}
                     None => signals_open = false,
@@ -199,7 +218,7 @@ where
             event = events.next(), if events_open && app.view().is_some() => {
                 match event {
                     Some(Ok(Event::Key(key))) if !quitting => {
-                        dispatch(app.on_key(key), handle, &mut pending, &mut quitting);
+                        dispatch(app.on_key(key), handle, &mut pending, &mut navigation, &mut quitting);
                     }
                     Some(Ok(Event::Paste(text))) if !quitting => app.on_paste(&text),
                     Some(Ok(Event::Resize(width, height))) => {
@@ -223,7 +242,7 @@ where
             }
             _ = tick.tick() => {
                 stats.ticks += 1;
-                if !pending.is_empty() { stats.pending_ticks += 1; }
+                if !pending.is_empty() || !navigation.is_empty() { stats.pending_ticks += 1; }
                 if dirty && !restored {
                     terminal.draw(|frame| app.render(frame)).map_err(|_| io::Error::other("terminal draw failed"))?;
                     stats.frames += 1;
@@ -239,11 +258,16 @@ fn dispatch(
     actions: Vec<Action>,
     handle: &impl Commands,
     pending: &mut Pending,
+    navigation: &mut super::runtime_nav::PendingNavigation,
     quitting: &mut bool,
 ) {
+    let mut commands = Vec::new();
     for action in actions {
         match action {
-            Action::Command(command) => pending.push(handle.command(command)),
+            Action::Command(command) => commands.push(command),
+            action @ (Action::ListSessions | Action::OpenSession(_) | Action::NewSession) => {
+                super::runtime_nav::dispatch(action, handle, navigation)
+            }
             Action::Quit { cancel } => {
                 *quitting = true;
                 if let Some(turn_id) = cancel {
@@ -252,13 +276,18 @@ fn dispatch(
             }
         }
     }
+    if !commands.is_empty() {
+        pending.push(handle.sequence(commands));
+    }
 }
 
-fn rejection(error: Rejection) -> String {
+pub(super) fn rejection(error: Rejection) -> String {
     // Never Debug-format arbitrary provider data or the portability report.
     match error {
         Rejection::Invalid(code) => format!("command rejected: {code}"),
         Rejection::Busy => "command rejected: busy".into(),
+        Rejection::RecoveryRequired => "command rejected: recovery_required".into(),
+        Rejection::ResolutionRequired => "command rejected: resolution_required".into(),
         Rejection::NotActive => "command rejected: not active".into(),
         Rejection::Faulted => "command rejected: runtime fault".into(),
         Rejection::ContextBudgetExceeded { .. } => "context_budget_exceeded".into(),

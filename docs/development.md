@@ -102,6 +102,30 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
 - On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
   selects a resolution, and Enter submits the user's statement. Observed
   success/failure needs text. Nothing reruns the uncertain operation.
+- Ctrl-O opens the session picker; Up/Down selects, Enter opens, `n` creates a
+  session with the current workspace and flags, and Esc closes. Rows show title,
+  model, activity, durable state and catalog status. Busy/unreadable sessions
+  cannot be opened; needs-repair rows direct you to `harness journal repair`.
+  Other workspaces are listed but refused, never silently authorized. Handover
+  requires idle, durably shuts down the old handle and uses the same continuation
+  checks. Listing and opening are sequential; a raced `session_locked` gets one
+  retry after 30 ms, then a busy banner. A failed open attempts to restore the
+  previous session rather than creating a replacement silently.
+- Ctrl-T opens the branch tree. Up/Down selects a turn; Enter selects its head
+  and re-projects the transcript. `*` marks the current branch; rows show prompt
+  titles, branch indentation and models. `e` prefills the prompt for editing;
+  Enter selects the original message's parent, then starts the edited turn as a
+  sibling. An already-selected parent needs no redundant navigation. Original
+  history remains immutable. Core refusals are shown without submitting a later
+  StartTurn after a failed SelectHead.
+- Ctrl-L lists models from the registered providers' merged catalog, including
+  sourced limits and capabilities. Enter always attempts `Reject` first. On
+  portability loss, Up/Down scrolls the classified entry/part/owner/schema/byte
+  report (never native payloads); `o` explicitly confirms omission of optional
+  state. Required incompatibilities cannot be omitted. Esc cancels. Success
+  updates the status model and its catalog budget; busy switching is refused.
+  Navigation captures paste without sending it; approval and uncertainty dialogs
+  retain input precedence. Ctrl-C/Ctrl-D retain their cancellation/quit rules.
 - PageUp/PageDown scroll; Ctrl-Up/Down scroll one line; Ctrl-R toggles expanded
   reasoning summaries. Resize relays out immediately. The status line shows
   phase, model, usage and the catalog's sourced context limit.
@@ -114,7 +138,12 @@ visible and Ctrl-D can leave cleanly. A torn journal still requires explicit
 ### TUI verification
 
 `cargo test -p harness --test tui_runtime` exercises the injectable loop with
-TestBackend, scripted input/provider streams, and real storage. The separate
+TestBackend, scripted input/provider streams, and real storage.
+`cargo test -p harness --test tui_navigation` additionally covers picker status
+refusals, durable session handover/new sessions, one bounded lock retry,
+sequential list/open under injected catalog latency, branch re-projection and
+immutable siblings, busy commands, reject-first switching, explicit optional
+omission and required incompatibilities. The separate
 `tui_recovery` target kills a child after a durable write intent, then resolves
 it through the running app without replay. The separate `tui_pty` target tests
 non-TTY refusal; enabling the default-off `test-provider` feature also runs the

@@ -2,13 +2,12 @@
 use clap::{Arg, ArgMatches, parser::ValueSource};
 use harness::{
     tui::{
-        App, SessionInfo,
         runtime::{self, Signal, TerminalGuard},
+        runtime_nav::SessionCommands,
     },
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    runtime::{Command, SessionHandle},
     session::{ModelRef, Portability, SessionId},
     tools::SandboxConfig,
 };
@@ -111,30 +110,18 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
         driver: providers.driver,
         sandbox: Some(SandboxConfig::default()),
     };
-    let opened = wiring::open_session(&options, providers.provider).await?;
-    let handle = opened.handle;
+    let opened = wiring::open_session(&options, providers.provider.clone()).await?;
+    let warnings = opened.warnings.clone();
+    let commands = SessionCommands::new(opened, options, providers.provider);
     let result = async {
         let mut guard = TerminalGuard::enter().map_err(|_| (2, "terminal_setup_failed".into()))?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
             .map_err(|_| (1, "terminal_io_failure".into()))?;
-        let mut app = App::new(SessionInfo {
-            workspace: options.workspace.clone(),
-            model,
-            context_limit: None,
-        });
-        app.set_catalog(options.driver.runtime.context.catalog.clone());
-        if !opened.warnings.is_empty() {
-            app.set_error(opened.warnings.join("; "));
+        let mut app = commands.app();
+        if !warnings.is_empty() {
+            app.set_error(warnings.join("; "));
         }
-        let mut subscription = handle.subscribe();
-        let commands = ClientCommands {
-            handle: handle.clone(),
-            startup: wiring::continuation_switch(&options)
-                .map(|(model, policy)| Command::SwitchModel { model, policy }),
-        };
-        let subscriptions = async_stream::stream! {
-            while let Some(item) = subscription.next().await { yield item; }
-        };
+        let subscriptions = commands.subscriptions();
         #[cfg(all(feature = "test-provider", debug_assertions))]
         if std::env::var_os("HARNESS_TUI_TEST_PANIC").is_some() {
             panic!("forced TUI panic");
@@ -155,27 +142,8 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
     .await;
     // Also runs after terminal errors. shutdown owns cancellation and joins the
     // tool/storage workers; no process exit can race journal publication.
-    handle.shutdown().await;
+    commands.shutdown().await;
     result
-}
-
-struct ClientCommands {
-    handle: SessionHandle,
-    startup: Option<Command>,
-}
-impl runtime::Commands for ClientCommands {
-    fn command(
-        &self,
-        command: Command,
-    ) -> futures_util::future::BoxFuture<
-        'static,
-        Result<harness_core::runtime::Accepted, harness_core::runtime::Rejection>,
-    > {
-        runtime::Commands::command(&self.handle, command)
-    }
-    fn startup(&self) -> Option<Command> {
-        self.startup.clone()
-    }
 }
 
 fn providers(selected: &str, codex_hint: bool) -> Result<wiring::Providers, wiring::Failure> {
