@@ -13,8 +13,9 @@ read-only restart closure and advisory file-image recovery hints.
 trusted filesystem executor is implemented separately in
 [step 5](decisions/0011-trusted-file-tools.md). Step 7b assembles real file and
 sandbox backends from session policy through the handle. Milestone 4 step 08 adds
-the headless `harness ask` client (decision 0020); the Ratatui client remains
-planned.
+the headless `harness ask` client (decision 0020), and Milestone 5 adds the
+Ratatui client on the same typed API (decision 0023); the core itself gained only
+the read-only session catalog and `ModelCatalog::iter()`.
 Decisions [0004](decisions/0004-pure-runtime-core.md),
 [0005](decisions/0005-provider-stream.md),
 [0006](decisions/0006-context-builder.md) and
@@ -844,10 +845,6 @@ events that follow.
 
 ## Not implemented yet
 
-- Ratatui UI (M5). The headless `harness ask` already streams native provider
-  turns and terminal approvals over real file/sandbox backends.
-  `harness doctor --workspace ... --data-root ...` reports backend availability
-  without starting a session.
 - General configuration-update commands. Remember is the implemented
   configuration-change path; summary generation/commit and automatic compaction
   are implemented in m4-06.

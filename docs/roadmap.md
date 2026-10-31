@@ -3,8 +3,10 @@
 The scaffold, specification artifacts, headless storage (Milestone 1) and the
 headless mock lifecycle with context inspection (Milestone 2), and tools,
 selective security and recovery (Milestone 3), and native providers, rolling
-compaction and headless ask (Milestone 4) are complete within their recorded
-scope; Anthropic live evidence still needs an API key.
+compaction and headless ask (Milestone 4), and the Ratatui terminal client
+(Milestone 5) are complete within their recorded scope. Live Anthropic evidence
+still needs an API key, and the live TUI smoke met the subscription's Codex quota
+limit; both are recorded rather than claimed.
 Later stages have acceptance criteria; they are not implemented features.
 
 ## 0. Foundation and proposed specification — present
@@ -144,12 +146,56 @@ twice in the gate. Known partials/limits:
 - Preserved-thinking transformations are requested but not parsed/reported
   (ADR 0018 amendment); a replay can be dropped by the API after prefix edits.
 
-## 5. Ratatui client
+## 5. Ratatui client — complete
 
-Implement rendering, navigation, streaming, cancellation, approvals, and a
-context inspector over the same headless engine API. Restore terminal state on
-errors/shutdown; handle subscriber lag through coherent snapshots. The TUI must
-not implement provider request building, tool authorization, or execution.
+Plain `harness` opens a terminal client in the current directory. It is a pure
+model plus a thin asynchronous shell over the existing headless engine: the
+client renders, navigates, streams, cancels, asks for approvals and inspects
+context, and the engine still builds every request, authorizes every call and
+runs every tool. Rendering is a width-independent projection of the published
+snapshot plus the live partial response, with minimal Markdown and no syntax
+highlighting. Cancellation and quit are durable: the terminal is restored first,
+then the turn is cancelled and storage is drained.
+
+Navigation covers sessions (Ctrl-O), the branch tree (Ctrl-T) and models
+(Ctrl-L) over the read-only session catalog and the merged, sourced model
+catalog. Handover is idle-only, releases the old writer, retries a raced
+`session_locked` once and restores the previous session when an open fails. A
+branch edit pre-selects the message's parent and starts a sibling; originals are
+never rewritten. Model switches are reject-first, show the classified
+portability report, and omit optional state only after an explicit confirmation.
+
+The context inspector (Ctrl-K) is read-only: budget estimates, included and
+excluded items, fingerprints and configuration identity, plus model previews
+that never switch. Manual compaction is preview-first — Enter commits only the
+exact rendered preview, Esc writes nothing — and automatic compaction appears in
+the transcript and refreshes an open report.
+
+Terminal state is restored on quit, panics, SIGTERM/SIGHUP and any error the
+loop returns; a non-TTY is refused before raw mode is entered. Subscriber lag,
+epoch changes and sequence gaps all arrive as `Reset` and replace every panel
+coherently, including mid-stream.
+
+`crates/cli/tests/tui_boundary.rs` guards the boundary in the gate: no provider
+request building, no tool authorization or execution, no engine workspace or
+sandbox type, and no approval decision outside the modal key handler. The shell
+(`tui_cli.rs`) may use `wiring`; the model and loop may not.
+
+[Milestone 5 acceptance](milestone-5-acceptance.md) maps every criterion and the
+settled decisions to gate tests and records sanitized live evidence. Known
+partials/limits:
+
+- The live TUI smoke hit the subscription's `rate_limit`, so live end-to-end is
+  recorded, not claimed; the offline end-to-end tests cover the same path.
+- Anthropic live checks and cross-provider live switching still need
+  `ANTHROPIC_API_KEY` (ADR 0018, ADR 0020 amendment).
+- Flags only: no config file (decision 3). Nested `AGENTS.md` files are not read;
+  only the root file, at session creation (ADR 0022).
+- No syntax highlighting, no workspace switching, no session deletion/retention
+  or export UI, and no credential UI. A torn journal is still repaired with
+  `harness journal repair`, never automatically.
+- Inspector budgets are heuristic estimates, not tokenizer counts, and pins or
+  context experiments remain M6.
 
 ## 6. Context experiments
 

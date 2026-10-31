@@ -49,6 +49,13 @@ describing a future component is not evidence that it is implemented.
   previews and runtime/automatic-trigger amendment.
 - [Headless ask](decisions/0020-headless-ask.md): durable CLI, approvals and
   cross-provider switching amendment.
+- [Shared wiring and session catalog](decisions/0021-shared-wiring-session-catalog.md):
+  provider, policy and instruction assembly shared by both clients, plus the
+  read-only `DataRoot::sessions()` catalog.
+- [Recorded instructions](decisions/0022-recorded-model-instructions.md): the
+  built-in base instruction and the root `AGENTS.md`, recorded at creation.
+- [TUI architecture](decisions/0023-tui-architecture.md): the pure model, the
+  `Action` boundary, the terminal lifecycle, key map and navigation.
 - [Providers](providers.md): implemented adapters, router, credentials and opt-in checks.
 - [Built-in tools usage](tools.md): implemented file/shell backends and host assembly.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
@@ -75,6 +82,10 @@ describing a future component is not evidence that it is implemented.
   full R02, output artifacts, randomized coverage and mutation checks.
 - [Milestone 4 acceptance](milestone-4-acceptance.md): both native adapters,
   compaction, headless ask, offline validation and sanitized live evidence.
+- [Milestone 5 acceptance](milestone-5-acceptance.md): the Ratatui client's
+  rendering, navigation, streaming, cancellation, approvals and inspector, the
+  terminal-lifecycle and lag-coherence evidence, and the client/engine boundary
+  guard.
 
 ## Document status
 
@@ -94,7 +105,9 @@ under decision 0009; approval/execution integration under decision 0010;
 trusted files under decision 0011; sandbox and host assembly under decision 0012;
 and tool recovery under decision 0013. M4 implements native model replay and
 switching (0014/0015), transport/credentials (0016), both native adapters
-(0017/0018), compaction generation/runtime (0019) and headless ask (0020).
+(0017/0018), compaction generation/runtime (0019) and headless ask (0020). M5
+implements the shared wiring and read-only session catalog (0021), recorded
+instructions (0022) and the Ratatui client with its terminal lifecycle (0023).
 Schema/examples alone are not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

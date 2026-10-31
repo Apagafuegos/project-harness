@@ -66,7 +66,8 @@ cargo doc --workspace --no-deps --locked --open
 
 Run `harness` in the workspace directory (or `cargo run -p harness --` from
 this repository). Plain `harness` opens terminal chat; there is no `tui`
-subcommand. Both stdin and stdout must be terminals. For pipes and scripts use
+subcommand. Both stdin and stdout must be terminals; otherwise it exits 2 with
+`use harness ask` before touching the terminal. For pipes and scripts use
 `harness ask --workspace DIR PROMPT` instead.
 
 ```sh
@@ -97,6 +98,7 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
   n/Esc returns to editing.
 - Approval captures the keyboard: `a` allows once, `d` denies, `r` allows and
   remembers, and Esc dismisses **by denying**. There is no automatic approval.
+  Every other key is ignored, and a paste never answers a ticket.
   Remembered mutation grants follow the existing continuation policy checks;
   a session with changed allowances may be refused on reopen.
 - On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
@@ -129,6 +131,13 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
 - PageUp/PageDown scroll; Ctrl-Up/Down scroll one line; Ctrl-R toggles expanded
   reasoning summaries. Resize relays out immediately. The status line shows
   phase, model, usage and the catalog's sourced context limit.
+- The prompt is a multi-line editor: Up/Down keep the column across logical
+  lines, Left/Right and Home/End move the cursor, and Backspace/Delete remove
+  the character before/at it. Ctrl-D never deletes.
+- Esc closes any open navigation or inspector dialog; the quit confirmation and
+  the approval dialog have their own Esc behavior above. Keys are read only from
+  the terminal event stream and the Ctrl-C signal; no timer or tick can type,
+  send or approve.
 
 ### Context inspector and compaction
 
@@ -166,7 +175,7 @@ visible and Ctrl-D can leave cleanly. A torn journal still requires explicit
 
 ### TUI verification
 
-`cargo test -p harness --test tui_inspector` runs 16 offline inspector tests:
+`cargo test -p harness --test tui_inspector` runs 17 offline inspector tests:
 real storage and ScriptedProvider summary requests, pure TestBackend buffers,
 model previews without switching, preview-first commitment, cancellation byte
 identity, stale fields, eligibility, automatic compaction, budget diagnostics,
@@ -182,16 +191,41 @@ immutable siblings, busy commands, reject-first switching, explicit optional
 omission and required incompatibilities. The separate
 `tui_recovery` target kills a child after a durable write intent, then resolves
 it through the running app without replay. The separate `tui_pty` target tests
-non-TTY refusal; enabling the default-off `test-provider` feature also runs the
-real binary under its own PTY for quit, panic and SIGTERM, checking termios and
-restoration sequences. `check.sh` runs both feature configurations. The fixture
+non-TTY refusal, the six-flag/no-config-file CLI surface, and restored the
+terminal after a returned loop error; enabling the default-off `test-provider`
+feature also runs the real binary under its own PTY for quit, panic, SIGTERM and
+that returned error, checking termios and restoration sequences. `check.sh` runs
+both feature configurations. The fixture
 environment hooks are compiled only with that feature **and debug assertions**;
 they cannot activate in a release binary. `portable-pty` is test/example-only.
+
+`cargo test -p harness --test tui_boundary` enforces the client/engine boundary
+over every file under `crates/cli/src/tui/`: no provider adapter or request type,
+no executor/workspace/sandbox/policy type, no code inclusion, `SubmitApproval`
+only in the modal key handler, and the key reducer reachable only from the
+terminal event arm and the Ctrl-C signal arm. It is a conservative source scan,
+not a security sandbox, and it self-tests that each mutation fails. The shell
+`crates/cli/src/tui_cli.rs` may use `wiring`; the model and loop may not.
 
 `scripts/live-check.sh tui` is a separate, opt-in Codex subscription smoke. It
 starts the real binary under a PTY, types the fixed pong request, observes the
 completed answer, sends Ctrl-D, and verifies exit zero and terminal restoration.
-It spends quota once, never prints credentials, and does not retry rate limits.
+It spends quota once, never prints credentials, and does not retry rate limits
+(the acceptance run recorded `rate_limit` once and stopped).
+
+#### TUI known limits
+
+- Flags only: six options, no config file (decision 3).
+- Only the workspace root `AGENTS.md` is read, at creation, capped at 64 KiB;
+  nested files are ignored and edits affect new sessions only.
+- Minimal Markdown without syntax highlighting; raw HTML is inert text.
+- One workspace per process: the picker lists other workspaces and refuses to
+  open them. There is no session delete/retention/export UI and no credential UI.
+- A model outside the merged catalog that differs from the opened model shows an
+  unknown context budget. Inspector budgets are labelled heuristic estimates.
+- The TUI never repairs a torn tail; use `harness journal inspect`/`repair`.
+- Live Anthropic use and cross-provider live switching still need
+  `ANTHROPIC_API_KEY`; the TUI supports the same provider flags as `ask`.
 
 ## Runtime tests
 

@@ -109,6 +109,7 @@ is available through `SessionHandle::inspect_context` and the read-only
 both native adapters, shared HTTP/SSE/credentials and the instance Router, never
 core orchestration. The runtime runs real authorized tools and independently
 configured summary generation through the same provider seam. The headless
-`harness ask` client uses typed commands/events and terminal approvals; Ratatui
-remains M5. See [M4 acceptance](milestone-4-acceptance.md) and the
-[roadmap](roadmap.md).
+`harness ask` client uses typed commands/events and terminal approvals, and the
+Ratatui client (M5) drives the same typed commands and subscriptions with a pure
+model and a thin terminal shell. See [M5 acceptance](milestone-5-acceptance.md),
+[M4 acceptance](milestone-4-acceptance.md) and the [roadmap](roadmap.md).

@@ -8,7 +8,7 @@
 //! The app never decides an approval, builds a provider request or runs a
 //! tool. It submits the user's decision and renders what the runtime reports.
 //!
-//! See `docs/decisions/0023-tui-model.md`.
+//! See `docs/decisions/0023-tui-architecture.md`.
 
 mod inspector;
 mod inspector_shell;
