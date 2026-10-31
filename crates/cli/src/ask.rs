@@ -15,7 +15,7 @@ use harness_core::{
     session::*,
     tools::{Registry, SandboxConfig},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 /// Invocation configuration. The caller supplies sourced model metadata in `driver`.
@@ -126,20 +126,6 @@ pub struct Io<'a, 't> {
     pub interrupts: mpsc::UnboundedReceiver<()>,
 }
 
-/// Resolve the default outside the workspace: XDG_DATA_HOME/harness or ~/.local/share/harness.
-pub fn default_data_root() -> Result<PathBuf, &'static str> {
-    let base = if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(path)
-    } else {
-        PathBuf::from(std::env::var_os("HOME").ok_or("data_root_unconfigured")?)
-            .join(".local/share")
-    };
-    if !base.is_absolute() {
-        return Err("data_root_not_absolute");
-    }
-    Ok(base.join("harness"))
-}
-
 /// Run one turn with an injected provider, returning the documented process code.
 /// No provider error message or opaque state is formatted by this client.
 pub async fn run(options: Options, provider: Arc<dyn ModelProvider>, mut io: Io<'_, '_>) -> u8 {
@@ -158,9 +144,6 @@ fn configuration(code: impl Into<String>) -> Failure {
 }
 fn infrastructure() -> Failure {
     (1, "client_io_failure".into())
-}
-fn storage(error: PersistError) -> Failure {
-    configuration(error.to_string())
 }
 
 async fn execute(
@@ -184,124 +167,19 @@ async fn execute(
     if o.prompt.is_empty() || o.prompt.len() > o.driver.runtime.max_user_bytes {
         return Err(configuration("invalid_prompt_size"));
     }
-    if let Some(parent) = o.data_root.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| configuration("invalid_data_root_parent"))?;
+    let opened = crate::wiring::open_session(&session_options(&o), provider).await?;
+    let handle = opened.handle;
+    let session = opened.session;
+    for warning in opened.warnings {
+        if writeln!(io.stderr, "warning: {}", line(&warning)).is_err() {
+            handle.shutdown().await;
+            return Err(infrastructure());
+        }
     }
-    let root = Arc::new(
-        DataRoot::open(&o.data_root, true).map_err(|_| configuration("invalid_data_root"))?,
-    );
-    let session = o.session.clone().unwrap_or_default();
-    let host = ToolHostConfig {
-        workspace_root: o.workspace.clone(),
-        data_root: root.path().to_owned(),
-        sandbox: o.sandbox.clone(),
-    };
-    let handle = if o.session.is_some() {
-        // Refuse imported remembered grants: this client never auto-approves mutations.
-        let inspection =
-            JournalStore::inspect(&root, &session).map_err(|e| configuration(e.to_string()))?;
-        if inspection.diagnostic.is_some() {
-            return Err(configuration("journal_requires_explicit_repair"));
-        }
-        let snapshot = inspection
-            .snapshot
-            .ok_or_else(|| configuration("missing_session_header"))?;
-        let bytes = root
-            .read_artifact(snapshot.configuration(), 16 * 1024 * 1024)
-            .map_err(|_| configuration("configuration_unreadable"))?;
-        let policy: Value =
-            serde_json::from_slice(&bytes).map_err(|_| configuration("invalid_configuration"))?;
-        let expected = policy_json(o.summary_model.as_ref());
-        for field in [
-            "workspace_read",
-            "workspace_mutation",
-            "process",
-            "network",
-            "allowances",
-            "compaction",
-        ] {
-            if policy[field] != expected[field] {
-                return Err(configuration("session_policy_mismatch"));
-            }
-        }
-        let head_model = snapshot
-            .model_at(snapshot.head())
-            .map_err(|_| configuration("unknown_head"))?
-            .clone();
-        // A continuation keeps the branch's model unless the user asked for
-        // another provider or model. Asking for one is an explicit switch, never
-        // an implicit rewrite: the policy decides whether optional native state
-        // may be dropped, and a refusal writes nothing.
-        let switch =
-            (o.explicit_provider || o.explicit_model).then(|| (o.model.clone(), o.switch_policy));
-        known(&o, switch.as_ref().map_or(&head_model, |(model, _)| model))?;
-        SessionHandle::open_with_tools(root, session.clone(), provider, o.driver.clone(), &host)
-            .await
-            .map_err(storage)?
-    } else {
-        known(&o, &o.model)?;
-        let bytes = serde_json::to_vec(&policy_json(o.summary_model.as_ref()))
-            .map_err(|_| configuration("invalid_configuration"))?;
-        let header = SessionHeader {
-            workspace: o
-                .workspace
-                .to_str()
-                .ok_or_else(|| configuration("workspace_not_utf8"))?
-                .into(),
-            initial_model: o.model.clone(),
-            policy_revision: "ask-v1".into(),
-            configuration: root
-                .put_artifact(&bytes)
-                .map_err(|_| configuration("configuration_publish_failed"))?,
-        };
-        SessionHandle::create_with_tools(
-            root,
-            session.clone(),
-            header,
-            provider,
-            o.driver.clone(),
-            &host,
-        )
-        .await
-        .map_err(storage)?
-    };
     // Always drain and release the journal, including output and command errors.
     let result = drive(&handle, &session, &o, io).await;
     handle.shutdown().await;
     result
-}
-
-/// Refuse a model whose provider instance the injected provider cannot serve,
-/// before anything is opened or written. An empty registry is not validated.
-fn known(o: &Options, model: &ModelRef) -> Result<(), Failure> {
-    if o.known_instances.is_empty()
-        || o.known_instances
-            .iter()
-            .any(|instance| instance == &model.provider_instance)
-    {
-        return Ok(());
-    }
-    if let Some(summary) = &o.summary_model
-        && !o
-            .known_instances
-            .iter()
-            .any(|instance| instance == &summary.provider_instance)
-    {
-        return Err(configuration("provider_not_configured"));
-    }
-    Err(configuration("provider_not_configured"))
-}
-
-/// The switch a continuation asks for, if the user named a provider or model.
-///
-/// Without an override the branch keeps its model. With one, the requested
-/// model is applied through `SwitchModel`, whose policy decides whether
-/// optional native state may be dropped. An identical request is not a switch.
-fn continuation_switch(o: &Options) -> Option<(ModelRef, Portability)> {
-    if o.session.is_none() || !(o.explicit_provider || o.explicit_model) {
-        return None;
-    }
-    Some((o.model.clone(), o.switch_policy))
 }
 
 /// Print the portability report on stderr: every affected entry and part, the
@@ -366,13 +244,6 @@ fn capability(capability: RequiredCapability) -> &'static str {
     }
 }
 
-fn policy_json(summary: Option<&ModelRef>) -> Value {
-    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash"],
-        "workspace_read":"ask", "workspace_mutation":"ask", "process":"ask", "network":"deny",
-        "protected_paths":[], "allowances":[],
-        "compaction":{"summary_model":summary,"automatic":summary.is_some()}})
-}
-
 fn rejection(error: Rejection) -> Failure {
     match error {
         Rejection::ContextBudgetExceeded { .. } => (1, "context_budget_exceeded".into()),
@@ -424,30 +295,14 @@ async fn drive(
     // while idle and before the turn opens. The report is printed either way; a
     // refusal exits 2 having written nothing. Naming the branch's current model
     // is not a switch, so no `model_changed` entry is appended for it.
-    let current = client
-        .view()
-        .snapshot
-        .model_at(client.view().snapshot.head())
-        .map_err(|_| configuration("unknown_head"))?
-        .clone();
-    if let Some(switch) = continuation_switch(o).filter(|(model, _)| model != &current) {
-        match handle
-            .command(Command::SwitchModel {
-                model: switch.0,
-                policy: switch.1,
-            })
-            .await
-        {
-            Ok(Accepted::ModelSwitched { preview, .. }) => {
-                switch_report(io, "switched", &preview)?;
-            }
-            Err(Rejection::PortabilityLoss(preview)) => {
-                switch_report(io, "refused", &preview)?;
-                return Err(configuration("portability_loss"));
-            }
-            Err(e) => return Err(rejection(e)),
-            Ok(other) => return Err((1, format!("unexpected_switch_reply: {other:?}"))),
+    match crate::wiring::switch_session(handle, &session_options(o)).await {
+        Ok(Some(preview)) => switch_report(io, "switched", &preview)?,
+        Ok(None) => {}
+        Err(Rejection::PortabilityLoss(preview)) => {
+            switch_report(io, "refused", &preview)?;
+            return Err(configuration("portability_loss"));
         }
+        Err(e) => return Err(rejection(e)),
     }
     let baseline = client.view().snapshot.sequence();
     let start = handle.command(Command::StartTurn {
@@ -807,4 +662,23 @@ fn bounded(text: &str, max: usize) -> String {
         s.push('…');
     }
     s
+}
+
+/// Backwards-compatible location of the shared default resolver.
+pub use crate::wiring::default_data_root;
+
+fn session_options(o: &Options) -> crate::wiring::SessionOptions {
+    crate::wiring::SessionOptions {
+        data_root: o.data_root.clone(),
+        workspace: o.workspace.clone(),
+        session: o.session.clone(),
+        model: o.model.clone(),
+        explicit_model: o.explicit_model,
+        explicit_provider: o.explicit_provider,
+        switch_policy: o.switch_policy,
+        known_instances: o.known_instances.clone(),
+        summary_model: o.summary_model.clone(),
+        driver: o.driver.clone(),
+        sandbox: o.sandbox.clone(),
+    }
 }

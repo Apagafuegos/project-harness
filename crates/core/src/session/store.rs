@@ -362,7 +362,7 @@ fn physical_line(reader: &mut impl BufRead) -> Result<(Vec<u8>, u64, bool)> {
         }
     }
 }
-fn scan(root: &DataRoot, file: &mut File, id: &SessionId) -> Result<Inspection> {
+pub(super) fn scan(root: &DataRoot, file: &mut File, id: &SessionId) -> Result<Inspection> {
     use sha2::{Digest as _, Sha256};
     file.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();

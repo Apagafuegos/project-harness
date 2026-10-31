@@ -88,6 +88,34 @@ before every append. User entries require a matching `turn_started` and
 complete tool groups require ordered associated results. Persisted audit types
 are available now so the later runtime can use the same representation.
 
+## Read-only session catalog
+
+`DataRoot::sessions()` discovers every `sessions/<UUIDv7>.jsonl` name through the
+pinned directory descriptor; other names are ignored. It returns serializable
+entries containing `session_id`, `workspace`, `created_at`, `last_activity`,
+`model`, durable `state`, `title`, `status` and `reason`. Model is evaluated at
+the current head; activity is the last committed record timestamp, not mtime.
+The title is the first user message's concatenated text, first line, bounded to
+120 Unicode scalar values (no ellipsis); no user messages means null.
+
+Inspection takes only a nonblocking shared lock, never writes or repairs, and
+never silently drops a matching file. Status is `ok`, `busy` (writer lock),
+`needs_repair` (torn tail after a valid header), or `unreadable` (corrupt,
+unsupported, unsafe or I/O failure), with a short reason. Available metadata
+comes only from the validated prefix; busy/headerless entries have null
+metadata. Order is activity descending, session ID ascending for ties, unknown
+activity last. Work is linear in total journal size plus existing validation.
+See [decision 0021](decisions/0021-shared-wiring-session-catalog.md).
+
+```sh
+harness sessions [--data-root DIR]
+```
+
+The command prints a pretty JSON array. Its default root matches `ask`:
+`$XDG_DATA_HOME/harness`, otherwise `$HOME/.local/share/harness`. It creates
+nothing; a missing root prints `[]`, an unsafe root fails. Use the explicit
+journal commands below for repair; catalog discovery never initiates recovery.
+
 ## Record versions
 
 Each record carries its own `version`. Readers accept versions 1 and 2

@@ -2,30 +2,14 @@
 use clap::{Arg, ArgAction, ArgMatches, Command, parser::ValueSource, value_parser};
 use harness::ask::{self, ControllingTerminal, Options};
 use harness_core::{
-    context::ModelCatalog,
-    runtime::DriverConfig,
-    session::{ModelError, ModelErrorCode, ModelRef, Portability, SessionId},
+    session::{ModelRef, Portability, SessionId},
     tools::SandboxConfig,
-};
-use harness_providers::{
-    anthropic::{self, AnthropicMessages},
-    openai::{self, OpenAiResponses, Profile},
-    router::Router,
 };
 use std::{
     io::{self, IsTerminal},
     path::PathBuf,
     process::ExitCode,
-    sync::Arc,
 };
-
-/// Provider instance for the Anthropic adapter. One account, one owner of
-/// native state.
-const ANTHROPIC: &str = "anthropic";
-/// OpenAI's two authentication profiles are separate instances: subscription
-/// state must never be replayed to the API-key endpoint, or the reverse.
-const CODEX: &str = "openai-codex";
-const API_KEY: &str = "openai-api-key";
 
 pub fn command() -> Command {
     Command::new("ask")
@@ -78,34 +62,6 @@ pub fn run(args: &ArgMatches) -> ExitCode {
     }))
 }
 
-/// An adapter this process can actually serve, or one it skipped for lack of a
-/// credential. Only the selected instance's failure ends the process.
-fn skip_or_fail<T>(
-    result: Result<T, ModelError>,
-    selected: bool,
-    codex: bool,
-) -> Result<Option<T>, u8> {
-    match result {
-        Ok(adapter) => Ok(Some(adapter)),
-        Err(_) if !selected => Ok(None),
-        Err(error) => Err(provider_failure(error, codex)),
-    }
-}
-
-/// Classify a setup failure without formatting the adapter's own message.
-fn provider_failure(error: ModelError, codex: bool) -> u8 {
-    if error.code == ModelErrorCode::Authentication {
-        eprintln!("error: authentication");
-        if codex {
-            eprintln!("run `codex login`");
-        }
-        3
-    } else {
-        eprintln!("error: provider_setup_failed");
-        2
-    }
-}
-
 async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiver<()>) -> u8 {
     let provider_name = args
         .get_one::<String>("provider")
@@ -129,11 +85,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
     let codex_hint = codex && provider_name == "openai";
     // Authentication profiles have separate state owners even though their wire
     // provider is the same. Never replay subscription state to the platform.
-    let selected = match provider_name {
-        "anthropic" => ANTHROPIC,
-        _ if codex => CODEX,
-        _ => API_KEY,
-    };
+    let selected = harness::wiring::provider_instance(provider_name, codex);
     let data_root = match args
         .get_one::<PathBuf>("data-root")
         .cloned()
@@ -146,46 +98,20 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
             return 2;
         }
     };
-    // Every instance whose credential exists is registered, so a session can
-    // switch between providers mid-flight. The selected one is required.
-    let mut router = Router::new();
-    let mut catalog = ModelCatalog::new();
-    for (instance, profile, result) in [
-        (CODEX, Profile::ChatGptCodex, OpenAiResponses::codex_login()),
-        (
-            API_KEY,
-            Profile::Platform,
-            OpenAiResponses::platform_from_env(),
-        ),
-    ] {
-        if let Some(adapter) = match skip_or_fail(result, selected == instance, codex_hint) {
-            Ok(adapter) => adapter,
-            Err(code) => return code,
-        } {
-            openai::extend_catalog(&mut catalog, profile, instance);
-            router.register(instance, Arc::new(adapter));
+    let wired = match harness::wiring::providers(selected, codex_hint) {
+        Ok(wired) => wired,
+        Err(error) => {
+            eprintln!("error: {}", error.diagnostic);
+            if error.codex_hint {
+                eprintln!("run `codex login`");
+            }
+            return error.code;
         }
-    }
-    match skip_or_fail(
-        AnthropicMessages::from_env(),
-        selected == ANTHROPIC,
-        codex_hint,
-    ) {
-        Ok(Some(adapter)) => {
-            anthropic::extend_catalog(&mut catalog, ANTHROPIC);
-            router.register(ANTHROPIC, Arc::new(adapter));
-        }
-        Ok(None) => {}
-        Err(code) => return code,
-    }
-    let model =
-        args.get_one::<String>("model")
-            .cloned()
-            .unwrap_or_else(|| match (provider_name, codex) {
-                ("anthropic", _) => "claude-sonnet-5-5".into(),
-                (_, true) => openai::LIVE_CHECK_MODEL.into(),
-                _ => "gpt-5.5".into(),
-            });
+    };
+    let model = args
+        .get_one::<String>("model")
+        .cloned()
+        .unwrap_or_else(|| harness::wiring::default_model(provider_name, codex).into());
     let switch_policy = match args
         .get_one::<String>("switch-policy")
         .map(String::as_str)
@@ -194,9 +120,6 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         "omit-optional" => Portability::OmitOptional,
         _ => Portability::Reject,
     };
-    let known_instances: Vec<String> = router.instances().map(str::to_owned).collect();
-    let mut driver = DriverConfig::default();
-    driver.runtime.context.catalog = catalog;
     let options = Options {
         data_root,
         workspace: args
@@ -211,21 +134,21 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         explicit_model: args.contains_id("model"),
         explicit_provider,
         switch_policy,
-        known_instances,
+        known_instances: wired.instances,
         summary_model: args.get_one::<String>("summary-model").map(|m| ModelRef {
             provider_instance: selected.into(),
             model: m.clone(),
         }),
         prompt: args.get_one::<String>("prompt").expect("required").clone(),
         approve_read_only: args.get_flag("approve-read-only"),
-        driver,
+        driver: wired.driver,
         sandbox: Some(SandboxConfig::default()),
         codex: codex_hint,
     };
     let mut terminal = ControllingTerminal::open();
     ask::run(
         options,
-        Arc::new(router),
+        wired.provider,
         ask::Io {
             stdin: &mut io::stdin(),
             stdout: &mut io::stdout(),

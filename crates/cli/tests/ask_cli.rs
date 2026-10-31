@@ -22,6 +22,7 @@ fn scan_no_secret(path: &Path, secret: &[u8]) {
 #[test]
 fn sentinel_credential_never_printed_on_real_auth_failure() {
     let sentinel = "SENTINEL-CREDENTIAL-ASK";
+    assert!(!include_str!("../src/base-instruction.txt").contains(sentinel));
     // The subscription login is absent in this temporary HOME, so the adapter's
     // own credential read fails. The API-key case uses a forbidden header byte,
     // so real adapter construction fails locally, never by contacting OpenAI.

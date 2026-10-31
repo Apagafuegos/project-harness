@@ -232,6 +232,29 @@ Offline tests inject `ScriptedProvider` and fake I/O into the client module.
 workspace; it checks exit 0 and stdout containing `pong`, printing only a sanitized
 summary. It is never part of `check.sh` or CI.
 
+New sessions record a factual built-in system instruction (workspace and available
+tools) and, when present, the workspace root `AGENTS.md` at developer level.
+Project text is read through descriptor-rooted resolution, capped at 64 KiB,
+and must be UTF-8. Unsafe/symlinked, oversized or unreadable files are skipped
+with one stderr warning. Nested `AGENTS.md` files are not read in v0.1. Edits
+affect new sessions only; continuations keep their recorded instructions.
+See [instructions](decisions/0022-recorded-model-instructions.md).
+
+## Session catalog
+
+```sh
+harness sessions [--data-root DIR]
+```
+
+Prints the [read-only catalog](session-storage.md#read-only-session-catalog) as
+a pretty JSON array, newest committed activity first, with IDs breaking ties.
+The default root matches `ask`; nothing is created or repaired. Missing storage
+prints `[]`. Busy and broken sessions remain listed with status and a short
+reason, and unavailable metadata is null. Titles are first-user-message text,
+first line, at most 120 Unicode scalar values. This is a linear journal scan,
+not a persisted index. A live session remains available through its handle;
+listing does not wait for its writer lock.
+
 ## Journal inspection and repair
 
 `harness journal inspect` and `harness journal repair` are described in

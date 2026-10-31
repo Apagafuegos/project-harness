@@ -811,3 +811,206 @@ async fn summary_model_opt_in_is_independent_and_persisted() {
     );
     assert_ne!(summary, f.options.model);
 }
+
+fn recorded_configuration(f: &Fixture, err: &str) -> Value {
+    let snapshot = f.snapshot(err);
+    let root = DataRoot::open(&f.options.data_root, false).unwrap();
+    serde_json::from_slice(
+        &root
+            .read_artifact(snapshot.configuration(), 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn new_session_records_base_and_root_agents_and_sends_instructions_first() {
+    let f = Fixture::new();
+    fs::write(
+        f.options.workspace.join("AGENTS.md"),
+        "Use the project conventions.\n",
+    )
+    .unwrap();
+    fs::create_dir(f.options.workspace.join("nested")).unwrap();
+    fs::write(
+        f.options.workspace.join("nested/AGENTS.md"),
+        "NESTED-MUST-NOT-BE-READ",
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new([reply("done")]));
+    let (code, _, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    let instructions = configuration["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 2);
+    assert_eq!(instructions[0]["level"], "system");
+    let base = instructions[0]["text"].as_str().unwrap();
+    assert!(base.contains(f.options.workspace.to_str().unwrap()));
+    let request = &provider.streams()[0].request;
+    let actual_tools = request
+        .input
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        base.contains(&format!("Available tools in this session: {actual_tools}.")),
+        "{base}"
+    );
+    assert_eq!(
+        instructions[1],
+        json!({"level":"developer", "text":"Project instructions from AGENTS.md:\nUse the project conventions.\n"})
+    );
+    let ContextItem::Instructions {
+        instructions: first,
+    } = &request.input.items[0]
+    else {
+        panic!("instructions must be first")
+    };
+    assert_eq!(
+        serde_json::to_value(first).unwrap(),
+        configuration["instructions"]
+    );
+    assert!(matches!(request.input.items[1], ContextItem::User { .. }));
+    assert!(
+        !configuration
+            .to_string()
+            .contains("NESTED-MUST-NOT-BE-READ")
+    );
+    assert!(!err.contains("warning:"));
+}
+
+#[tokio::test]
+async fn missing_agents_gets_base_only_and_unavailable_sandbox_never_mentions_shell() {
+    let f = Fixture::new();
+    let provider = Arc::new(ScriptedProvider::new([reply("done")]));
+    let (code, _, err) = f.run(provider, None).await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    let instructions = configuration["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 1);
+    let base = instructions[0]["text"].as_str().unwrap();
+    assert!(!base.contains("bash") && !base.contains("shell"), "{base}");
+    assert!(base.contains("read, write, edit"));
+    assert!(!err.contains("warning:"));
+}
+
+#[tokio::test]
+async fn oversized_agents_is_skipped_with_64_kib_warning_not_truncated() {
+    let f = Fixture::new();
+    fs::write(
+        f.options.workspace.join("AGENTS.md"),
+        "x".repeat(64 * 1024 + 1),
+    )
+    .unwrap();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["instructions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        err.contains("warning: AGENTS.md skipped: exceeds 64 KiB cap"),
+        "{err}"
+    );
+    assert_eq!(
+        err.lines()
+            .filter(|line| line.starts_with("warning:"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn invalid_utf8_agents_is_skipped_with_warning() {
+    let f = Fixture::new();
+    fs::write(f.options.workspace.join("AGENTS.md"), b"\xff").unwrap();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["instructions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        err.contains("warning: AGENTS.md skipped: not valid UTF-8"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn escaping_agents_symlink_is_skipped_with_warning() {
+    let f = Fixture::new();
+    let outside = f.temp.path().join("outside-agents");
+    fs::write(&outside, "OUTSIDE-MUST-NOT-BE-READ").unwrap();
+    std::os::unix::fs::symlink(&outside, f.options.workspace.join("AGENTS.md")).unwrap();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    assert_eq!(configuration["instructions"].as_array().unwrap().len(), 1);
+    assert!(
+        !configuration
+            .to_string()
+            .contains("OUTSIDE-MUST-NOT-BE-READ")
+    );
+    assert!(
+        err.contains("warning: AGENTS.md skipped: descriptor-rooted read refused"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn edited_agents_continuation_keeps_recorded_instructions_and_opens_fine() {
+    let mut f = Fixture::new();
+    fs::write(
+        f.options.workspace.join("AGENTS.md"),
+        "original instructions",
+    )
+    .unwrap();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    f.options.session = Some(f.snapshot(&err).session_id().clone());
+    fs::write(f.options.workspace.join("AGENTS.md"), "edited instructions").unwrap();
+    let provider = Arc::new(ScriptedProvider::new([reply("second")]));
+    let (code, _, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(recorded_configuration(&f, &err), configuration);
+    let ContextItem::Instructions { instructions } = &provider.streams()[0].request.input.items[0]
+    else {
+        panic!("missing instructions")
+    };
+    assert!(instructions[1].text.contains("original instructions"));
+    assert!(!instructions[1].text.contains("edited instructions"));
+    assert!(!err.contains("warning:"));
+}
+
+#[tokio::test]
+async fn agents_exactly_64_kib_is_not_truncated_or_skipped() {
+    let f = Fixture::new();
+    let text = "é".repeat(32 * 1024);
+    fs::write(f.options.workspace.join("AGENTS.md"), &text).unwrap();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["instructions"][1]["text"],
+        format!("Project instructions from AGENTS.md:\n{text}")
+    );
+    assert!(!err.contains("warning:"));
+}

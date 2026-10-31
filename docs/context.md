@@ -129,6 +129,19 @@ for `[]` (the RFC-001 fixtures), or `{"status": "absent"}` when the field is
 missing. The builder refuses a `SessionConfiguration` decoded from any artifact
 other than the snapshot's current configuration (`configuration_mismatch`).
 
+### Instructions supplied by clients
+
+New sessions created through `harness::wiring` (including `harness ask`) record a
+built-in system instruction with the absolute workspace and actual available
+registry tools, followed by developer instructions from the workspace's root
+`AGENTS.md` when present. The source is framed explicitly. Root project text is
+read descriptor-relatively, capped at 64 KiB and required to be valid UTF-8;
+unsafe, oversized or unreadable files are skipped with a client warning, never
+silently truncated. Nested `AGENTS.md` files are not read in v0.1. Continued
+sessions keep recorded instructions: edits apply to **new sessions only**.
+Older sessions without instructions still report `absent`.
+See [decision 0022](decisions/0022-recorded-model-instructions.md).
+
 ## Tools, options and continuation
 
 The runtime supplies enabled and backend-available definitions through
