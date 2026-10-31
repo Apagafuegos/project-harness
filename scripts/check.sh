@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 
 # Provision the pinned toolchain and locked dependencies before validation.
 export CARGO_NET_OFFLINE=true
+# Keep the multi-feature validation matrix within hosted-runner disk bounds.
+# Retain line-level debug information; do not cache incremental compiler state.
+export CARGO_PROFILE_DEV_DEBUG=1 CARGO_PROFILE_TEST_DEBUG=1 CARGO_INCREMENTAL=0
 ./scripts/test-offline-gate.sh
 
 cargo fmt --all -- --check

@@ -40,7 +40,10 @@ print the compaction fixture's golden report, and two runs of the
 must match. Provider examples use attributed loopback fixtures, not credentials.
 It can also be invoked
 from another working directory. CI runs the same script with the repository
-toolchain.
+toolchain. Validation uses debug level 1 and disables incremental artifacts so
+the default/conformance/test-provider matrix fits hosted-runner disk bounds;
+line-level debugging remains available and no test or security gate is skipped.
+Ordinary `cargo build` profiles are unchanged.
 
 The checks exercise J01–J03 storage behavior, the runtime core against real
 storage including crashes and recovery, the context builder and its golden
