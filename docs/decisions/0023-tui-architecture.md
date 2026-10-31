@@ -202,11 +202,12 @@ confirmation.
 `crates/cli/tests/tui.rs` records real `SubscriptionItem`s from an in-process
 `SessionHandle` with an injected `ScriptedProvider`, real JSONL storage and real
 file tools, then reduces and renders them synchronously with `TestBackend`; no
-snapshot crate is used. Twelve tests cover a streamed Markdown answer, the
-approval modal and all four answers, a denied tool, cancellation, a failed turn
-with `rate_limit`, a committed compaction summary, a model switch, a mid-stream
-reset, narrow and wide layouts, every decision-9 key, the uncertain-resolution
-modal and the opaque-state sentinel.
+snapshot crate is used. Thirteen tests cover a streamed Markdown answer with
+usage, the approval modal and all four answers, a denied tool, cancellation, a
+failed turn with `rate_limit`, a committed compaction summary, a model switch, a
+mid-stream reset (the rebuilt transcript must equal its pre-reset form), narrow
+and wide layouts, every decision-9 key, diagnostics and a fault with the error
+banner, the uncertain-resolution modal and the opaque-state sentinel.
 
 The uncertain-resolution fixture attaches an `awaiting` entry to a view read
 from the completed real session: a resolution requires a process death between

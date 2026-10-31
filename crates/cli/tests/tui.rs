@@ -356,7 +356,21 @@ fn type_text(app: &mut App, text: &str) {
 async fn streamed_answer_renders_markdown_and_status() {
     let fixture = Fixture::new(false);
     let answer = "# Result\n\nSome **bold** and `inline` text with *emphasis*.\n\n- one\n- two\n\n> quoted\n\n```rust\nfn main() {}\n```\n";
-    let mut recorded = fixture.create([reply(answer)]).await;
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, answer),
+            Step::Event(ProviderEvent::UsageUpdated {
+                usage: Usage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(20),
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                },
+            }),
+            Step::completed(FinishReason::Stop),
+        ])])
+        .await;
     let turn = recorded.start("explain").await;
     recorded.wait_finished(&turn).await;
     let buffer = render(&mut recorded.app(), 80, 24);
@@ -371,7 +385,7 @@ async fn streamed_answer_renders_markdown_and_status() {
     assert!(screen.contains("fn main() {}"), "{screen}");
     assert!(screen.contains("turn: completed"), "{screen}");
     assert!(!screen.contains("streaming"), "{screen}");
-    assert!(screen.contains("usage"), "{screen}");
+    assert!(screen.contains("usage 10/20"), "{screen}");
     recorded.shutdown().await;
 }
 
@@ -844,6 +858,44 @@ async fn every_decision_9_key_binding() {
             .as_slice(),
         [Action::Quit { cancel: None }]
     ));
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn diagnostics_and_faults_render_with_their_codes() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("ok")]).await;
+    let turn = recorded.start("hi").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    // A fault needs a storage failure the pure model never causes; the events
+    // continue the recorded view so the reducer and banner are still exercised.
+    let view = app.view().expect("recorded view").clone();
+    let epoch = view.epoch.clone();
+    let seq = view.event_seq;
+    app.on_subscription(SubscriptionItem::Event(RuntimeEvent {
+        epoch: epoch.clone(),
+        seq: seq + 1,
+        kind: EventKind::Diagnostic(RuntimeDiagnostic::MalformedStream {
+            inference: InferenceId(1),
+            reason: "bad_block",
+        }),
+    }));
+    app.on_subscription(SubscriptionItem::Event(RuntimeEvent {
+        epoch,
+        seq: seq + 2,
+        kind: EventKind::Fault(FaultCause::Internal("invariant_broken")),
+    }));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(
+        screen.contains("diagnostic: malformed provider stream (bad_block)"),
+        "{screen}"
+    );
+    assert!(screen.contains("fault: invariant_broken"), "{screen}");
+    assert!(
+        screen.contains("error: fault: invariant_broken"),
+        "{screen}"
+    );
     recorded.shutdown().await;
 }
 
