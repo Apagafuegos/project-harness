@@ -247,6 +247,7 @@ impl App {
                     self.set_error("runtime fault");
                 }
                 self.view = Some(client);
+                self.reset_inspector();
                 self.notices.clear();
                 self.context = None;
                 self.scroll = 0;

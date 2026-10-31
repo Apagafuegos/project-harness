@@ -41,6 +41,14 @@ impl App {
         self.inspector.open && matches!(self.modal, Modal::None)
     }
 
+    /// A reset replaces the projection, including any displayed inspection.
+    /// Keep the panel/override open, but request a fresh authoritative report.
+    pub(super) fn reset_inspector(&mut self) {
+        self.inspector.report = None;
+        self.inspector.requested = None;
+        self.inspector.scroll = 0;
+    }
+
     fn context_identity(&self) -> Option<Identity> {
         let view = self.view()?;
         Some((

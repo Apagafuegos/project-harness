@@ -244,6 +244,85 @@ fn pages(app: &mut App) -> String {
     }
     out
 }
+/// A lag reset can skip a committed turn and arrive during the next stream.
+/// Compare every panel with a fresh client of exactly that authoritative view.
+#[tokio::test]
+async fn lag_reset_mid_stream_replaces_transcript_inspector_and_branch_tree() {
+    let f = Fixture::new(
+        vec![
+            reply("old answer"),
+            Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::text(0, "new streaming answer"),
+                Step::Stall,
+            ]),
+        ],
+        false,
+    )
+    .await;
+    f.turn("old question").await;
+    let old_view = f.handle.view().await.unwrap();
+    let old_report = f.handle.inspect_context(None, None).await.unwrap();
+    f.handle
+        .command(Command::StartTurn {
+            command_id: CommandId::new(),
+            content: vec![ContentBlock::Text {
+                text: "new question".into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait(&f.handle, |v| {
+        v.partial.as_ref().is_some_and(|p| !p.blocks.is_empty())
+    })
+    .await;
+    let new_view = f.handle.view().await.unwrap();
+    let new_report = f.handle.inspect_context(None, None).await.unwrap();
+    assert_ne!(
+        old_report.identity.journal_sequence,
+        new_report.identity.journal_sequence
+    );
+
+    for panel in [None, Some('k'), Some('t')] {
+        let mut lagged = f.app();
+        lagged.on_subscription(SubscriptionItem::Reset(ClientView::from(old_view.clone())));
+        let mut fresh = f.app();
+        fresh.on_subscription(SubscriptionItem::Reset(ClientView::from(new_view.clone())));
+        if let Some(key) = panel {
+            for app in [&mut lagged, &mut fresh] {
+                app.on_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::CONTROL));
+            }
+        }
+        if panel == Some('k') {
+            lagged.on_context_report(Ok(old_report.clone()));
+            assert!(render(&mut lagged, 120, 50).contains("old question"));
+        }
+        lagged.on_subscription(SubscriptionItem::Reset(ClientView::from(new_view.clone())));
+        assert_eq!(
+            render(&mut lagged, 120, 50),
+            render(&mut fresh, 120, 50),
+            "panel {panel:?} retained pre-reset state"
+        );
+        // Late old reports must not repopulate the panel after invalidation.
+        if panel == Some('k') {
+            lagged.on_context_report(Ok(old_report.clone()));
+            assert_eq!(render(&mut lagged, 120, 50), render(&mut fresh, 120, 50));
+            for app in [&mut lagged, &mut fresh] {
+                app.on_context_report(Ok(new_report.clone()));
+            }
+        }
+        let screen = render(&mut lagged, 120, 50);
+        assert_eq!(screen, render(&mut fresh, 120, 50));
+        if panel != Some('k') {
+            assert!(screen.contains("new question"));
+        }
+        if panel.is_none() {
+            assert!(screen.contains("new streaming answer"));
+        }
+    }
+    f.handle.shutdown().await;
+}
+
 async fn preview(
     f: &Fixture,
 ) -> (
