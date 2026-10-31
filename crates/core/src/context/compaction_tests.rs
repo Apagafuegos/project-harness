@@ -3,7 +3,7 @@ use super::*;
 use crate::{
     context::compaction::*,
     model::{scripted::*, *},
-    session::ContextMode,
+    session::{ContextMode, TurnId},
 };
 
 #[tokio::test]
@@ -304,48 +304,83 @@ fn selection_closed_reasons_and_retained_window() {
 }
 
 #[test]
-fn controlled_turns_are_refused_in_the_span_and_ignored_in_the_retained_window() {
-    // Interim m6-01: compaction refuses a span holding a controlled turn.
+fn controlled_turns_are_skipped_and_ignored_in_the_retained_window() {
+    // Decision 14 (m6-02): coverage is the selected span minus every turn the
+    // user pinned or excluded, and m6-01's refusal no longer exists.
+    let config = CompactionConfig::default();
+    let select = |j: &Journal| select_span(&j.snapshot(), j.head().as_ref(), &config);
+    let mut journal = Journal::new();
+    let turns: Vec<TurnId> = (0..6)
+        .map(|index| {
+            let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+            journal.turn_of(&ids[0])
+        })
+        .collect();
+    // The span is the first four completed turns; two are retained.
+    let span: Vec<EntryId> = journal
+        .snapshot()
+        .ancestry(journal.head().as_ref())
+        .unwrap()[..8]
+        .iter()
+        .map(|stored| stored.entry.id.clone())
+        .collect();
+    assert_eq!(select(&journal).unwrap().covered_entry_ids, span);
+    let without = |journal: &Journal, turns: &[TurnId]| -> Vec<EntryId> {
+        span.iter()
+            .filter(|id| {
+                !turns
+                    .iter()
+                    .any(|turn| turn_entries(journal, turn).contains(id))
+            })
+            .cloned()
+            .collect()
+    };
+    // A pinned turn in the middle is skipped, keeping ancestral order.
+    journal.control(&turns[1], ContextMode::Pinned);
+    let pinned = select(&journal).unwrap();
+    assert_eq!(
+        pinned.covered_entry_ids,
+        without(&journal, &[turns[1].clone()])
+    );
+    assert!(pinned.supersedes.is_empty());
+    // An excluded turn in the middle is skipped the same way.
+    journal.control(&turns[2], ContextMode::Excluded);
+    assert_eq!(
+        select(&journal).unwrap().covered_entry_ids,
+        without(&journal, &[turns[1].clone(), turns[2].clone()])
+    );
+    // Resetting the pin brings that turn back into the span's coverage.
+    journal.control(&turns[1], ContextMode::Default);
+    assert_eq!(
+        select(&journal).unwrap().covered_entry_ids,
+        without(&journal, &[turns[2].clone()])
+    );
+
+    // Every turn in the span controlled leaves nothing to cover.
+    let mut journal = Journal::new();
+    let turns: Vec<TurnId> = (0..4)
+        .map(|index| {
+            let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+            journal.turn_of(&ids[0])
+        })
+        .collect();
+    journal.control(&turns[0], ContextMode::Pinned);
+    journal.control(&turns[1], ContextMode::Excluded);
+    assert_eq!(select(&journal), Err(NotEligible::OnlyControlledTurns));
+    assert_eq!(
+        CompactionError::NotEligible(NotEligible::OnlyControlledTurns).code(),
+        "only_controlled_turns"
+    );
+
+    // A controlled turn inside the retained window does not change the span.
     for mode in [ContextMode::Pinned, ContextMode::Excluded] {
         let mut journal = Journal::new();
-        let first = journal.exchange("one", "first");
-        journal.exchange("two", "second");
-        journal.exchange("three", "third");
-        journal.exchange("four", "fourth");
-        let turn = journal.turn_of(&first[0]);
-        journal.control(&turn, mode);
-        assert_eq!(
-            select_span(
-                &journal.snapshot(),
-                journal.head().as_ref(),
-                &CompactionConfig::default()
-            ),
-            Err(NotEligible::ContextControlsInSpan),
-            "{mode:?}"
-        );
-        assert_eq!(
-            CompactionError::NotEligible(NotEligible::ContextControlsInSpan).code(),
-            "context_controls_in_span"
-        );
-
-        // A controlled turn inside the retained window does not change the span.
-        let mut journal = Journal::new();
-        for (prompt, reply) in [
-            ("one", "first"),
-            ("two", "second"),
-            ("three", "third"),
-            ("four", "fourth"),
-        ] {
-            journal.exchange(prompt, reply);
+        for index in 0..4 {
+            journal.exchange(&format!("p{index}"), &format!("r{index}"));
         }
-        let last_turn = journal.turn_of(&journal.snapshot().head().cloned().unwrap());
-        journal.control(&last_turn, mode);
-        let selected = select_span(
-            &journal.snapshot(),
-            journal.head().as_ref(),
-            &CompactionConfig::default(),
-        )
-        .unwrap();
+        let last = journal.turn_of(&journal.snapshot().head().cloned().unwrap());
+        journal.control(&last, mode);
+        let selected = select(&journal).unwrap();
         let expected: Vec<_> = journal
             .snapshot()
             .ancestry(journal.head().as_ref())
@@ -356,6 +391,435 @@ fn controlled_turns_are_refused_in_the_span_and_ignored_in_the_retained_window()
         assert_eq!(selected.covered_entry_ids, expected, "{mode:?}");
         assert!(selected.supersedes.is_empty());
     }
+}
+
+/// Branch entries of `turn`, in ancestral order.
+fn turn_entries(journal: &Journal, turn: &TurnId) -> Vec<EntryId> {
+    journal
+        .snapshot()
+        .ancestry(journal.head().as_ref())
+        .unwrap()
+        .iter()
+        .filter(|stored| stored.entry.turn_id.as_ref() == Some(turn))
+        .map(|stored| stored.entry.id.clone())
+        .collect()
+}
+
+/// A journal with `count` completed turns named `p0`.. and their turns.
+fn turns_journal(count: usize) -> (Journal, Vec<TurnId>) {
+    let mut journal = Journal::with_configuration(POLICY);
+    let turns = (0..count)
+        .map(|index| {
+            let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+            journal.turn_of(&ids[0])
+        })
+        .collect();
+    (journal, turns)
+}
+
+/// The included items of a build, in projection order.
+fn order(built: &BuiltContext) -> Vec<(Option<EntryId>, ItemKind)> {
+    built
+        .report
+        .included
+        .iter()
+        .map(|record| (record.entry_id.clone(), record.kind))
+        .collect()
+}
+
+/// The user and assistant items of each turn, in turn order.
+fn items(journal: &Journal, turns: &[TurnId]) -> Vec<(Option<EntryId>, ItemKind)> {
+    turns
+        .iter()
+        .flat_map(|turn| turn_entries(journal, turn))
+        .map(|id| {
+            let kind = match &journal.snapshot().entry(&id).unwrap().entry.payload {
+                EntryPayload::UserMessage(_) => ItemKind::User,
+                EntryPayload::AssistantResponse(_) => ItemKind::Assistant,
+                EntryPayload::ToolResult(_) => ItemKind::ToolResult,
+                _ => panic!("dialogue entry"),
+            };
+            (Some(id), kind)
+        })
+        .collect()
+}
+
+/// `text` blocks of an included item.
+fn item_text(built: &BuiltContext, id: &EntryId) -> String {
+    let item = built
+        .projection
+        .input
+        .items
+        .iter()
+        .find(|item| item.entry_id() == Some(id))
+        .expect("included item");
+    match item {
+        ContextItem::User { content, .. } | ContextItem::Assistant { content, .. } => {
+            serde_json::to_string(content).unwrap()
+        }
+        other => panic!("not dialogue: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn summarizer_never_receives_a_controlled_entry() {
+    let (mut journal, turns) = turns_journal(6);
+    journal.control(&turns[1], ContextMode::Pinned);
+    journal.control(&turns[2], ContextMode::Excluded);
+    let pinned = turn_entries(&journal, &turns[1]);
+    let excluded = turn_entries(&journal, &turns[2]);
+    let provider = Arc::new(ScriptedProvider::new([script(SUMMARY)]));
+    let proposed = RollingSummary::new(provider.clone())
+        .propose(
+            input(journal.snapshot(), journal.configuration.clone()),
+            OperationControl::default(),
+        )
+        .await
+        .unwrap();
+    let request = &provider.streams()[0].request;
+    let sent: Vec<&EntryId> = request
+        .input
+        .items
+        .iter()
+        .filter_map(ContextItem::entry_id)
+        .collect();
+    for id in pinned.iter().chain(&excluded) {
+        assert!(
+            !sent.contains(&id),
+            "controlled entry {id} reached the summarizer"
+        );
+    }
+    // Only the instructions and the two covered turns are sent.
+    assert_eq!(request.input.items.len(), 5);
+    let json = serde_json::to_string(&request.input.items).unwrap();
+    for covered in [&turns[0], &turns[3]] {
+        for id in turn_entries(&journal, covered) {
+            assert!(json.contains(id.as_str()), "covered entry {id} is missing");
+        }
+    }
+    let EntryPayload::Compaction(compaction) = &proposed.entry.payload else {
+        panic!()
+    };
+    assert_eq!(compaction.covered_entry_ids.len(), 4, "two whole turns");
+    assert_accepted(&mut journal, &proposed);
+}
+
+#[tokio::test]
+async fn excluded_turn_stays_excluded_after_compaction() {
+    let (mut journal, turns) = turns_journal(6);
+    journal.control(&turns[2], ContextMode::Excluded);
+    let excluded = turn_entries(&journal, &turns[2]);
+    let proposed = preview(&journal).await;
+    let EntryPayload::Compaction(compaction) = &proposed.entry.payload else {
+        panic!()
+    };
+    for id in &excluded {
+        assert!(!compaction.covered_entry_ids.contains(id));
+    }
+    assert_accepted(&mut journal, &proposed);
+    let built = journal.build();
+    for id in &excluded {
+        assert!(
+            built.report.excluded.iter().any(|exclusion| {
+                &exclusion.entry_id == id
+                    && exclusion.part == Part::Entry
+                    && exclusion.reason == ExclusionReason::UserExcluded
+            }),
+            "{id} is still the user's choice"
+        );
+        assert!(
+            !built
+                .projection
+                .input
+                .items
+                .iter()
+                .any(|item| item.entry_id() == Some(id))
+        );
+    }
+}
+
+#[tokio::test]
+async fn projection_order_is_summary_then_pinned_turn_then_retained() {
+    let (mut journal, turns) = turns_journal(6);
+    journal.control(&turns[1], ContextMode::Pinned);
+    let pinned = turn_entries(&journal, &turns[1]);
+    let proposed = preview(&journal).await;
+    let EntryPayload::Compaction(compaction) = &proposed.entry.payload else {
+        panic!()
+    };
+    for id in &pinned {
+        assert!(!compaction.covered_entry_ids.contains(id));
+    }
+    assert_accepted(&mut journal, &proposed);
+    let built = journal.build();
+    // Instructions, the summary, the skipped pinned turn verbatim, then the
+    // two retained turns. Nothing of the covered turns 1, 3 and 4.
+    let mut expected = vec![
+        (None, ItemKind::Instructions),
+        (Some(proposed.entry.id.clone()), ItemKind::Summary),
+    ];
+    expected.extend(items(&journal, &[turns[1].clone()]));
+    expected.extend(items(&journal, &[turns[4].clone(), turns[5].clone()]));
+    assert_eq!(order(&built), expected);
+    // The summary stands at its first covered entry, turn 1 of the span.
+    assert_eq!(
+        built.report.summaries[0].covered_entry_ids.first(),
+        turn_entries(&journal, &turns[0]).first()
+    );
+    // Only the pinned turn's items carry the marker, and they are verbatim.
+    let marked: Vec<EntryId> = built
+        .report
+        .included
+        .iter()
+        .filter(|record| record.pinned)
+        .filter_map(|record| record.entry_id.clone())
+        .collect();
+    assert_eq!(marked, pinned);
+    assert!(item_text(&built, &pinned[0]).contains("p1"));
+    assert!(item_text(&built, &pinned[1]).contains("r1"));
+}
+
+#[tokio::test]
+async fn rolling_compaction_skips_pins_and_keeps_the_order() {
+    let (mut journal, turns) = turns_journal(6);
+    journal.control(&turns[1], ContextMode::Pinned);
+    let first = preview(&journal).await;
+    assert_accepted(&mut journal, &first);
+    let pinned = turn_entries(&journal, &turns[1]);
+    let mut later = Vec::new();
+    for index in 6..9 {
+        let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+        later.push(journal.turn_of(&ids[0]));
+    }
+    let second = preview(&journal).await;
+    let (EntryPayload::Compaction(previous), EntryPayload::Compaction(rolled)) =
+        (&first.entry.payload, &second.entry.payload)
+    else {
+        panic!()
+    };
+    assert_eq!(rolled.supersedes, std::slice::from_ref(&first.entry.id));
+    assert!(
+        previous
+            .covered_entry_ids
+            .iter()
+            .all(|id| rolled.covered_entry_ids.contains(id)),
+        "rolling replacement keeps the earlier source"
+    );
+    for id in &pinned {
+        assert!(!rolled.covered_entry_ids.contains(id));
+    }
+    assert!(
+        turn_entries(&journal, &later[0])
+            .iter()
+            .all(|id| rolled.covered_entry_ids.contains(id))
+    );
+    assert_accepted(&mut journal, &second);
+    let built = journal.build();
+    let mut expected = vec![
+        (None, ItemKind::Instructions),
+        (Some(second.entry.id.clone()), ItemKind::Summary),
+    ];
+    expected.extend(items(&journal, &[turns[1].clone()]));
+    expected.extend(items(&journal, &[later[1].clone(), later[2].clone()]));
+    assert_eq!(order(&built), expected);
+    // Only one summary is projected; the first one is superseded, not covered.
+    assert_eq!(built.report.summaries.len(), 1);
+    assert_eq!(built.report.summaries[0].entry_id, second.entry.id);
+    assert!(built.report.excluded.iter().any(|exclusion| {
+        exclusion.entry_id == first.entry.id
+            && exclusion.part == Part::Entry
+            && exclusion.reason == ExclusionReason::SupersededSummary
+    }));
+}
+
+#[tokio::test]
+async fn a_large_pinned_turn_is_never_truncated_and_overflows_the_budget() {
+    let mut journal = Journal::with_configuration(POLICY);
+    let big = "x".repeat(40_000);
+    let user = journal.user(vec![text(&big)]);
+    let pinned_turn = journal.turn_of(&user);
+    journal.respond(Response::completed(vec![text("acknowledged")]));
+    for index in 1..6 {
+        journal.exchange(&format!("p{index}"), &format!("r{index}"));
+    }
+    journal.control(&pinned_turn, ContextMode::Pinned);
+    let limited = config_with_limit(&mock(), Some(20_000));
+    let mut request = input(journal.snapshot(), journal.configuration.clone());
+    request.context = limited.clone();
+    let provider = Arc::new(ScriptedProvider::new([script(SUMMARY)]));
+    let proposed = RollingSummary::new(provider)
+        .propose(request, OperationControl::default())
+        .await
+        .unwrap();
+    assert!(proposed.after.flags.overflow, "the pin cannot fit");
+    assert!(!proposed.diff.fits_budget, "a manual preview says so");
+    commit_preview(&mut journal.store, &journal.root, &proposed).unwrap();
+    let built = journal
+        .build_with(&limited, journal.head().as_ref(), None)
+        .unwrap();
+    assert!(built.report.flags.overflow);
+    // Byte for byte: a pinned turn is never truncated to fit.
+    let item = built
+        .projection
+        .input
+        .items
+        .iter()
+        .find(|item| item.entry_id() == Some(&user))
+        .expect("the pinned message is still projected");
+    assert!(matches!(
+        item,
+        ContextItem::User { content, .. }
+            if content == &vec![text(&big)]
+    ));
+    assert!(
+        built
+            .report
+            .included
+            .iter()
+            .any(|record| record.entry_id.as_ref() == Some(&user) && record.pinned)
+    );
+}
+
+#[tokio::test]
+async fn resetting_a_skipped_excluded_turn_restores_it_in_place() {
+    let (mut journal, turns) = turns_journal(6);
+    journal.control(&turns[1], ContextMode::Pinned);
+    journal.control(&turns[2], ContextMode::Excluded);
+    let pinned = turn_entries(&journal, &turns[1]);
+    let excluded = turn_entries(&journal, &turns[2]);
+    let proposed = preview(&journal).await;
+    assert_accepted(&mut journal, &proposed);
+    assert!(
+        !journal
+            .build()
+            .projection
+            .input
+            .items
+            .iter()
+            .filter_map(ContextItem::entry_id)
+            .any(|id| excluded.contains(id))
+    );
+    // Resetting is how a control is undone, and a skipped turn was never
+    // summarized: it comes back verbatim, after the pinned turn.
+    journal.control(&turns[2], ContextMode::Default);
+    let built = journal.build();
+    let mut expected = vec![
+        (None, ItemKind::Instructions),
+        (Some(proposed.entry.id.clone()), ItemKind::Summary),
+    ];
+    expected.extend(items(&journal, &[turns[1].clone(), turns[2].clone()]));
+    expected.extend(items(&journal, &[turns[4].clone(), turns[5].clone()]));
+    assert_eq!(order(&built), expected);
+    assert!(item_text(&built, &pinned[0]).contains("p1"));
+    assert!(item_text(&built, &excluded[0]).contains("p2"));
+    assert!(item_text(&built, &excluded[1]).contains("r2"));
+    let _ = pinned;
+}
+
+#[tokio::test]
+async fn compaction_keeps_an_earlier_continuation_valid() {
+    // A compaction is appended at the head, so it cannot change the projection
+    // of any entry before it: the prefix a continuation bound is untouched.
+    let mut journal = Journal::with_configuration(POLICY);
+    let first = journal.exchange("p0", "r0");
+    let pinned_turn = journal.turn_of(&first[0]);
+    journal.exchange("p1", "r1");
+    journal.exchange("p2", "r2");
+    journal.exchange("p3", "r3");
+    let native = journal.root.put_artifact(b"private native state").unwrap();
+    journal.user(vec![text("p4")]);
+    let response = journal.respond(Response {
+        continuation: Some(native),
+        ..Response::completed(vec![text("r4")])
+    });
+    journal.control(&pinned_turn, ContextMode::Pinned);
+    let proposed = preview(&journal).await;
+    assert_accepted(&mut journal, &proposed);
+    let built = journal.build();
+    assert!(built.report.included.iter().any(|record| {
+        record.entry_id.as_ref() == Some(&response)
+            && record
+                .blocks
+                .iter()
+                .any(|block| block.part == Part::Continuation)
+    }));
+    assert!(item_text(&built, &first[0]).contains("p0"));
+}
+
+#[tokio::test]
+async fn a_control_after_a_compaction_invalidates_a_continuation() {
+    // Controls are folded at the head and applied to every rebuilt prefix, so a
+    // later exclusion does change the prefix a continuation bound.
+    let (mut journal, turns) = turns_journal(6);
+    let proposed = preview(&journal).await;
+    assert_accepted(&mut journal, &proposed);
+    let native = journal.root.put_artifact(b"private native state").unwrap();
+    journal.user(vec![text("p6")]);
+    let response = journal.respond(Response {
+        continuation: Some(native),
+        ..Response::completed(vec![text("r6")])
+    });
+    let before = journal.build();
+    assert!(before.report.included.iter().any(|record| {
+        record.entry_id.as_ref() == Some(&response)
+            && record
+                .blocks
+                .iter()
+                .any(|block| block.part == Part::Continuation)
+    }));
+    // Turn 4 is retained by the compaction, so it can still be excluded.
+    journal.control(&turns[4], ContextMode::Excluded);
+    let after = journal.build();
+    assert!(after.report.excluded.iter().any(|exclusion| {
+        exclusion.entry_id == response
+            && exclusion.part == Part::Continuation
+            && exclusion.reason == ExclusionReason::ContinuationPrefixMismatch
+    }));
+    assert!(after.projection.input.items.iter().any(|item| matches!(
+        item,
+        ContextItem::Assistant { entry_id, content, .. }
+            if entry_id == &response
+                && content.len() == 1
+                && matches!(&content[0], ContentBlock::Text { text } if text == "r6")
+    )));
+}
+
+#[test]
+fn no_eligible_new_dialogue_after_a_summary_is_ineligible() {
+    let (mut journal, turns) = turns_journal(4);
+    let covered: Vec<EntryId> = turn_entries(&journal, &turns[0])
+        .into_iter()
+        .chain(turn_entries(&journal, &turns[1]))
+        .collect();
+    journal.compact(covered, vec![], "older summary");
+    let mut later = Vec::new();
+    for index in 4..7 {
+        let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+        later.push(journal.turn_of(&ids[0]));
+    }
+    // Every turn after the summary that the span reaches is pinned.
+    for turn in [&turns[2], &turns[3], &later[0]] {
+        journal.control(turn, ContextMode::Pinned);
+    }
+    assert_eq!(
+        select_span(
+            &journal.snapshot(),
+            journal.head().as_ref(),
+            &CompactionConfig::default()
+        ),
+        Err(NotEligible::OnlyControlledTurns),
+        "the only new dialogue is pinned"
+    );
+    // Resetting one brings back eligible new dialogue.
+    journal.control(&turns[2], ContextMode::Default);
+    assert!(
+        select_span(
+            &journal.snapshot(),
+            journal.head().as_ref(),
+            &CompactionConfig::default()
+        )
+        .is_ok()
+    );
 }
 
 #[test]

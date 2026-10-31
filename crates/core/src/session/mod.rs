@@ -8,6 +8,7 @@
 mod artifacts;
 mod catalog;
 pub(crate) mod codec;
+pub(crate) mod coverage;
 mod error;
 mod identity;
 pub(crate) mod io;

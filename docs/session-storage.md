@@ -194,6 +194,8 @@ not change the effective mode is refused instead of recorded. See
 | The control does not change the target turn's effective mode | `context_control_noop` |
 | A `pinned` or `excluded` control targets a turn an active summary covers | `context_control_covered` |
 | A compaction's coverage contains a turn pinned at its parent | `compaction_covers_pinned_turn` |
+| A compaction's coverage contains a turn excluded at its parent | `compaction_covers_excluded_turn` |
+| A coverage gap is not a whole turn controlled at the compaction's parent | `compaction_not_contiguous` |
 
 `session_not_idle` covers the tool-exchange case in practice: a pending exchange
 belongs to an open turn. The `head_inside_tool_exchange` check in the branch
@@ -201,6 +203,17 @@ walk stays as the same defense `model_changed` has. Resetting to `default` is
 always accepted, because it is how a control is undone; pinning or excluding a
 turn whose content an active summary already absorbed is refused, because the
 summary text derived from it stays in the projection.
+
+**Coverage shape.** Since m6-02 a compaction's `covered_entry_ids` is the
+selected span minus every turn pinned or excluded at the compaction's parent, so
+it is an ancestral, ordered subsequence of the branch. The entries between its
+first and last covered entry are either covered or belong to a controlled turn;
+anything else is `compaction_not_contiguous`. A covered entry whose turn is not
+covered whole is `compaction_splits_turn`, so every gap is a whole turn. The
+rule lives in `session::coverage` and the builder validates a recorded coverage
+with it too, folding the same controls at the same parent, so storage and the
+builder cannot disagree; `session::compaction_manifest` remains the single
+source of the manifest and its fingerprint.
 
 Effective modes are derived state: `BranchFacts` carries them per entry, replay
 rebuilds them, and the test-build oracle compares them with a scanning walk
@@ -288,9 +301,10 @@ arguments. Checksums cover the original raw record bytes, never reserialized JSO
 The hash chain, sequences, IDs, ancestry, heads, turn transitions, call/result
 bindings, authorization references and artifact references are validated.
 Compaction replay checks ancestry, whole completed source turns, the two retained
-recent turns, supersession, exact manifest provenance and that no covered turn is
-pinned. Context-control replay checks the effective-mode rules above. Summary
-generation, compaction-time pin skipping, portability previews and context
+recent turns, the coverage shape above, supersession and exact manifest
+provenance, and that no covered turn is pinned or excluded. Context-control
+replay checks the effective-mode rules above. Summary
+generation, selection, target-model portability previews and context
 budgets are not storage questions and are not implemented here.
 
 Physical records, including LF, are limited to 8 MiB with bounded reading and

@@ -31,10 +31,11 @@ pub enum NotEligible {
     /// A cancelled, interrupted or failed turn blocks contiguous coverage.
     #[error("non_completed_turn")]
     NonCompletedTurn,
-    /// The span would contain a turn a control pinned or excluded. Interim:
-    /// m6-02 replaces this refusal with skipping pinned turns.
-    #[error("context_controls_in_span")]
-    ContextControlsInSpan,
+    /// Every turn in the selected span is pinned or excluded, so coverage
+    /// would be empty. m6-01 refused any controlled span; m6-02 skips them
+    /// instead, which is only impossible when all of them are controlled.
+    #[error("only_controlled_turns")]
+    OnlyControlledTurns,
     /// The supplied head does not exist.
     #[error("unknown_head")]
     UnknownHead,
@@ -52,8 +53,10 @@ pub struct Span {
     pub supersedes: Vec<EntryId>,
 }
 
-/// Select the longest eligible contiguous prefix after prior coverage, rolling
-/// the applicable active summary's source into it. No I/O or provider calls.
+/// Select the longest eligible contiguous span of completed turns after prior
+/// coverage, rolling the applicable active summary's source into it, then drop
+/// every turn a control pinned or excluded from its coverage. No I/O or
+/// provider calls.
 pub fn select_span(
     snapshot: &SessionSnapshot,
     head: Option<&EntryId>,
@@ -138,9 +141,10 @@ pub fn select_span(
             }
         }
     }
-    // Interim (m6-02 replaces this with skipping pinned turns): compaction
-    // never absorbs a turn the user pinned or excluded. Controls are folded
-    // over this ancestry only, so a sibling's control never applies.
+    // Effective modes folded over this ancestry only, so a sibling's control
+    // never applies. Decision 14: coverage is the selected span minus every
+    // turn pinned or excluded here. Those turns are projected verbatim after
+    // the summary and never reach the summarizer.
     let mut controls = BTreeMap::new();
     for stored in &branch {
         if let EntryPayload::ContextControl(control) = &stored.entry.payload {
@@ -151,22 +155,35 @@ pub fn select_span(
             }
         }
     }
-    if branch[start..end].iter().any(|stored| {
-        stored
-            .entry
-            .turn_id
-            .as_ref()
-            .is_some_and(|turn| controls.contains_key(turn))
-    }) {
-        return Err(NotEligible::ContextControlsInSpan);
-    }
-    // Do not count audit markers or summary entries as new dialogue.
+    let skipped = |turn: &TurnId| controls.contains_key(turn);
+    // Coverage is the span minus every skipped turn, in ancestral order. A
+    // control entry is not dialogue and carries no turn, so it stays covered:
+    // the summary's manifest then binds it as it stood when the summary was
+    // made. Its own report reason stays `covered_by_summary`.
+    let covered_entry_ids: Vec<_> = branch[start..end]
+        .iter()
+        .filter(|stored| {
+            stored
+                .entry
+                .turn_id
+                .as_ref()
+                .is_none_or(|turn| !skipped(turn))
+        })
+        .map(|stored| stored.entry.id.clone())
+        .collect();
+    // Do not count audit markers, summary entries or skipped turns as new
+    // dialogue; only dialogue the summary would actually absorb counts.
     let new_dialogue = branch
         .iter()
         .take(end)
         .skip(new_start)
+        .any(|s| s.entry.turn_id.as_ref().is_some_and(|turn| !skipped(turn)));
+    let any_new_turn = branch
+        .iter()
+        .take(end)
+        .skip(new_start)
         .any(|s| s.entry.turn_id.is_some());
-    if !new_dialogue {
+    if !any_new_turn {
         if let Some(reason) = blocked {
             return Err(reason);
         }
@@ -184,10 +201,11 @@ pub fn select_span(
         }
         return Err(NotEligible::OnlyRecentTurns);
     }
-    let covered_entry_ids: Vec<_> = branch[start..end]
-        .iter()
-        .map(|s| s.entry.id.clone())
-        .collect();
+    // An empty coverage means every turn in the span is controlled, and a span
+    // with no eligible new dialogue has nothing a new summary could add.
+    if !new_dialogue || covered_entry_ids.is_empty() {
+        return Err(NotEligible::OnlyControlledTurns);
+    }
     let supersedes = active
         .into_iter()
         .filter(|(_, c)| {
@@ -347,7 +365,7 @@ impl CompactionError {
                 NotEligible::UnresolvedWork => "unresolved_work",
                 NotEligible::NothingNewSinceSummary => "nothing_new_since_summary",
                 NotEligible::NonCompletedTurn => "non_completed_turn",
-                NotEligible::ContextControlsInSpan => "context_controls_in_span",
+                NotEligible::OnlyControlledTurns => "only_controlled_turns",
                 NotEligible::UnknownHead => "unknown_head",
                 NotEligible::InvalidConfig => "invalid_compaction",
             },

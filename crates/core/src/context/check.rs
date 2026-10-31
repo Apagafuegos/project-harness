@@ -29,7 +29,44 @@ pub(super) fn check(
     }
     complete(branch, report)?;
     controls(branch, report, applied)?;
+    ordered(branch, report)?;
     paired(items)
+}
+
+/// Included items follow ancestral order, and a summary stands where its first
+/// covered entry is. Decision 14 projects a skipped pinned turn in place, so
+/// this catches one moved after the retained window, or ahead of the entries a
+/// summary spans around it.
+fn ordered(branch: &[&StoredEntry], report: &ContextReport) -> Result<(), &'static str> {
+    let positions: HashMap<&EntryId, usize> = branch
+        .iter()
+        .enumerate()
+        .map(|(position, stored)| (&stored.entry.id, position))
+        .collect();
+    let starts: HashMap<&EntryId, usize> = report
+        .summaries
+        .iter()
+        .filter_map(|summary| {
+            let first = summary.covered_entry_ids.first()?;
+            Some((&summary.entry_id, *positions.get(first)?))
+        })
+        .collect();
+    let mut last = None;
+    for record in &report.included {
+        let Some(id) = &record.entry_id else {
+            continue;
+        };
+        let position = if record.kind == ItemKind::Summary {
+            *starts.get(id).ok_or("summary_without_coverage")?
+        } else {
+            *positions.get(id).ok_or("entry_from_other_branch")?
+        };
+        if last.is_some_and(|last| last >= position) {
+            return Err("items_out_of_branch_order");
+        }
+        last = Some(position);
+    }
+    Ok(())
 }
 
 /// The report's included list describes exactly the projection's items.
@@ -287,8 +324,13 @@ fn controls(
         if mode == ContextMode::Excluded && !excluded_decision(ExclusionReason::UserExcluded) {
             return Err("excluded_entry_without_decision");
         }
+        // A control entry is a marker, unless an active summary covers it: the
+        // summary then stands for it as for any other source entry.
+        let covered = excluded_decision(ExclusionReason::CoveredBySummary)
+            || excluded_decision(ExclusionReason::SupersededSummary);
         if matches!(stored.entry.payload, EntryPayload::ContextControl(_))
             && !excluded_decision(ExclusionReason::ContextControlMarker)
+            && !covered
         {
             return Err("undecided_control_entry");
         }

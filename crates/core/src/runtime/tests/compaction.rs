@@ -1,12 +1,17 @@
 //! RFC-001 C02 against the real journal validator (oracle enabled).
 use super::*;
 use crate::context::compaction::*;
+use crate::context::{ContextBuilder, ContextItem, SessionConfiguration};
 use crate::model::{OperationControl, scripted::*};
+use crate::session::ContextMode;
 use scenarios::plain_turn;
 
 pub(super) const SUMMARY: &str = "## Task and constraints\nKeep task.\n## Decisions\nRust.\n## Files and actions\nRead succeeded.\n## Outcomes\nDone.\n## Unresolved work\nNone.\n";
 const MANUAL: &[u8] = br#"{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"automatic":false}}"#;
 const AUTOMATIC: &[u8] = br#"{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"retain_recent_turns":3}}"#;
+/// The default retention of two turns, with automatic compaction on.
+const AUTOMATIC_TWO: &[u8] =
+    br#"{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"}}}"#;
 
 pub(super) fn summary_script() -> Script {
     Script::new([
@@ -16,7 +21,9 @@ pub(super) fn summary_script() -> Script {
     ])
 }
 impl Driver {
-    fn generate_summary(&mut self) -> (CompactionToken, CompactionPreview) {
+    fn generate_summary_recording(
+        &mut self,
+    ) -> (CompactionToken, CompactionPreview, Arc<ScriptedProvider>) {
         let (token, input) = self.compaction.take().expect("generation effect");
         let provider = Arc::new(ScriptedProvider::new([summary_script()]));
         let preview = tokio::runtime::Builder::new_current_thread()
@@ -28,6 +35,10 @@ impl Driver {
             )
             .unwrap();
         assert_eq!(provider.streams().len(), 1);
+        (token, preview, provider)
+    }
+    fn generate_summary(&mut self) -> (CompactionToken, CompactionPreview) {
+        let (token, preview, _) = self.generate_summary_recording();
         (token, preview)
     }
     fn propose_summary(&mut self) {
@@ -433,12 +444,201 @@ fn c02_budget_fits_or_failure_is_explicit() {
     checked(d);
 }
 #[test]
-fn c02_pins_not_applicable_until_pins_exist() {
-    // ADR 0019 explicitly records this C02 clause as not applicable.
+fn c02_automatic_summaries_respect_pins() {
+    // The C02 pin clause: a pinned turn is never summarized and never lost.
+    let mut d = before_overflow();
+    let snapshot = d.runtime.snapshot();
+    let branch = snapshot.ancestry(snapshot.head()).unwrap();
+    let pinned_turn = branch[0].entry.turn_id.clone().unwrap();
+    let pinned: Vec<EntryId> = branch
+        .iter()
+        .filter(|stored| stored.entry.turn_id.as_ref() == Some(&pinned_turn))
+        .map(|stored| stored.entry.id.clone())
+        .collect();
+    let pin = d.command(Command::SetContextControl {
+        turn_id: pinned_turn,
+        mode: ContextMode::Pinned,
+    });
+    d.settle();
+    d.accepted(pin);
+    assert!(d.compaction.is_none(), "a pin alone triggers nothing");
+
+    // The held start overflows, so automatic compaction runs while idle.
+    let prompt = "u".repeat(800);
+    let (request, _) = d.start(&prompt);
+    assert!(d.reply(request).is_none());
     assert!(
-        include_str!("../../../../../docs/decisions/0019-compaction.md")
-            .contains("not applicable until")
+        d.compaction.is_some(),
+        "an overflowing start compacts first"
     );
+    let (token, preview, provider) = d.generate_summary_recording();
+    // The summarizer never receives an entry of the pinned turn.
+    let streams = provider.streams();
+    let sent: Vec<&EntryId> = streams[0]
+        .request
+        .input
+        .items
+        .iter()
+        .filter_map(|item| item.entry_id())
+        .collect();
+    assert!(!sent.is_empty());
+    assert!(sent.iter().all(|id| !pinned.contains(id)));
+    let EntryPayload::Compaction(compaction) = &preview.entry.payload else {
+        panic!()
+    };
+    assert!(
+        compaction
+            .covered_entry_ids
+            .iter()
+            .all(|id| !pinned.contains(id))
+    );
+    assert_eq!(compaction.covered_entry_ids.len(), 2, "the other span turn");
+    d.step(Input::CompactionProposed {
+        token,
+        result: Ok(Box::new(preview.clone())),
+    });
+    d.settle();
+
+    // The projection keeps the pinned turn verbatim and marked, with the
+    // summary standing for the covered turn.
+    let snapshot = d.runtime.snapshot().clone();
+    let configuration = SessionConfiguration::load(&d.root, snapshot.configuration()).unwrap();
+    let built = ContextBuilder::new(&budget_config().context, &configuration)
+        .build(&snapshot, snapshot.head(), None)
+        .unwrap();
+    for id in &pinned {
+        assert!(
+            built
+                .report
+                .included
+                .iter()
+                .any(|record| record.entry_id.as_ref() == Some(id) && record.pinned),
+            "pinned entry {id} is included and marked"
+        );
+    }
+    assert!(built.projection.input.items.iter().any(|item| matches!(
+        item,
+        ContextItem::Summary { entry_id, .. } if entry_id == &preview.entry.id
+    )));
+    let pinned_user = built
+        .projection
+        .input
+        .items
+        .iter()
+        .find(|item| item.entry_id() == Some(&pinned[0]))
+        .expect("the pinned message is projected");
+    assert!(matches!(
+        pinned_user,
+        ContextItem::User { content, .. }
+            if content.len() == 1
+                && matches!(&content[0], ContentBlock::Text { text } if *text == prompt)
+    ));
+    d.settle();
+    d.accepted(request);
+    checked(d);
+}
+
+/// A summary long enough that replacing one small turn leaves a pinned turn
+/// over budget: the failure may not be papered over by a bigger summary.
+fn padded_summary() -> String {
+    format!(
+        "## Task and constraints\n{}\n## Decisions\nRust.\n## Files and actions\nRead succeeded.\n## Outcomes\nDone.\n## Unresolved work\nNone.\n",
+        "padding ".repeat(300)
+    )
+}
+
+#[test]
+fn a_pinned_turn_that_cannot_fit_fails_explicitly() {
+    // A 1000-token usable budget. The pinned turn is most of it, so pinned plus
+    // summary plus retained turns cannot fit and nothing is truncated.
+    let mut config = budget_config();
+    config.context.compaction_trigger_permille = 850;
+    let mut d = Driver::with_configuration(config.clone(), AUTOMATIC_TWO);
+    plain_turn(&mut d, &"p".repeat(2800), "done");
+    let snapshot = d.runtime.snapshot();
+    let branch = snapshot.ancestry(snapshot.head()).unwrap();
+    let pinned_turn = branch[0].entry.turn_id.clone().unwrap();
+    let pinned: Vec<EntryId> = branch
+        .iter()
+        .filter(|stored| stored.entry.turn_id.as_ref() == Some(&pinned_turn))
+        .map(|stored| stored.entry.id.clone())
+        .collect();
+    let pin = d.command(Command::SetContextControl {
+        turn_id: pinned_turn,
+        mode: ContextMode::Pinned,
+    });
+    d.settle();
+    d.accepted(pin);
+    for _ in 0..2 {
+        plain_turn(&mut d, "next", "done");
+        assert!(d.compaction.is_none(), "still under the trigger");
+    }
+    // The fourth turn reaches the trigger and the summary would overflow.
+    plain_turn(&mut d, &"n".repeat(600), "done");
+    assert!(d.compaction.is_some());
+    let sequence = d.runtime.snapshot().sequence();
+    let (token, input) = d.compaction.take().expect("generation effect");
+    let provider = Arc::new(ScriptedProvider::new([Script::new([
+        Step::Event(ProviderEvent::Started),
+        Step::text(0, padded_summary()),
+        Step::completed(FinishReason::Stop),
+    ])]));
+    let preview = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(RollingSummary::new(provider).propose(input, OperationControl::default()))
+        .unwrap();
+    assert!(
+        preview.after.flags.overflow,
+        "pinned plus summary plus retained cannot fit"
+    );
+    assert!(!preview.diff.fits_budget);
+    d.step(Input::CompactionProposed {
+        token,
+        result: Ok(Box::new(preview)),
+    });
+    d.settle();
+    assert!(d.segment.events().any(|event| matches!(
+        &event.kind,
+        EventKind::CompactionFailed {
+            code: "context_budget_exceeded"
+        }
+    )));
+    assert_eq!(
+        d.runtime.snapshot().sequence(),
+        sequence,
+        "an ineffective summary is not committed"
+    );
+    assert!(
+        d.runtime
+            .snapshot()
+            .entries()
+            .all(|(_, stored)| !matches!(stored.entry.payload, EntryPayload::Compaction(_)))
+    );
+    assert!(d.compaction.is_none() && d.pending.is_none());
+    // The pinned turn is still projected in full, never truncated. The head
+    // itself fits: it was the summary that would not.
+    let snapshot = d.runtime.snapshot().clone();
+    let configuration = SessionConfiguration::load(&d.root, snapshot.configuration()).unwrap();
+    let built = ContextBuilder::new(&config.context, &configuration)
+        .build(&snapshot, snapshot.head(), None)
+        .unwrap();
+    assert!(!built.report.flags.overflow);
+    let item = built
+        .projection
+        .input
+        .items
+        .iter()
+        .find(|item| item.entry_id() == Some(&pinned[0]))
+        .expect("the pinned message is projected");
+    assert!(matches!(
+        item,
+        ContextItem::User { content, .. }
+            if content.len() == 1
+                && matches!(&content[0], ContentBlock::Text { text } if text.len() == 2800)
+    ));
+    checked(d);
 }
 #[test]
 fn c02_no_summary_regenerated_during_pure_projection_or_prepare() {
@@ -873,6 +1073,58 @@ pub(super) fn randomized(seed: u64) {
     }
     let stale = d.command(Command::CommitCompaction { preview_id: id });
     assert!(matches!(d.rejected(stale), Rejection::StalePreview { .. }));
+    checked(d);
+
+    // Controls, the compaction that skips them, then controls again: the
+    // skipped turn can be reset, the covered one cannot be pinned.
+    let mut d = prepared();
+    let mut turns: Vec<TurnId> = Vec::new();
+    for stored in d
+        .runtime
+        .snapshot()
+        .ancestry(d.runtime.snapshot().head())
+        .unwrap()
+    {
+        if let Some(turn) = &stored.entry.turn_id
+            && !turns.contains(turn)
+        {
+            turns.push(turn.clone());
+        }
+    }
+    let controlled = turns[(seed as usize) % 2].clone();
+    let covered = turns[(seed as usize + 1) % 2].clone();
+    let mode = if seed.is_multiple_of(2) {
+        ContextMode::Pinned
+    } else {
+        ContextMode::Excluded
+    };
+    let request = d.command(Command::SetContextControl {
+        turn_id: controlled.clone(),
+        mode,
+    });
+    d.settle();
+    d.accepted(request);
+    let (id, _) = d.manual_preview();
+    let request = d.command(Command::CommitCompaction { preview_id: id });
+    d.settle();
+    d.accepted(request);
+    let request = d.command(Command::SetContextControl {
+        turn_id: covered,
+        mode: ContextMode::Pinned,
+    });
+    d.settle();
+    assert_eq!(
+        d.rejected(request),
+        Rejection::Invalid("context_control_covered")
+    );
+    let request = d.command(Command::SetContextControl {
+        turn_id: controlled,
+        mode: ContextMode::Default,
+    });
+    d.settle();
+    d.accepted(request);
+    d.reopen();
+    d.settle();
     checked(d);
     let mut d = automatic();
     match (seed / 4) % 4 {

@@ -363,6 +363,110 @@ fn storage_refuses_a_compaction_covering_a_pinned_turn() {
 }
 
 #[test]
+fn coverage_may_skip_a_controlled_turn() {
+    // Decision 14 (m6-02): the covered IDs are an ancestral, ordered
+    // subsequence whose gap is a whole turn the user excluded here.
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    accepted(&mut store, &ids[1], ContextMode::Excluded);
+    let snapshot = store.snapshot();
+    let covered: Vec<EntryId> = turn_entries(&snapshot, &ids[0])
+        .into_iter()
+        .chain(turn_entries(&snapshot, &ids[2]))
+        .collect();
+    let commit = compaction(&root, &snapshot, covered);
+    store.append(commit, at()).unwrap();
+    let snapshot = store.snapshot();
+    let EntryPayload::Compaction(stored) = &snapshot
+        .entry(snapshot.head().unwrap())
+        .unwrap()
+        .entry
+        .payload
+    else {
+        panic!("the compaction is the head")
+    };
+    assert_eq!(stored.covered_entry_ids.len(), 4, "two whole turns");
+    assert!(
+        turn_entries(&snapshot, &ids[1])
+            .iter()
+            .all(|id| !stored.covered_entry_ids.contains(id))
+    );
+}
+
+#[test]
+fn coverage_refuses_a_gap_of_an_uncontrolled_turn() {
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    let snapshot = store.snapshot();
+    let covered: Vec<EntryId> = turn_entries(&snapshot, &ids[0])
+        .into_iter()
+        .chain(turn_entries(&snapshot, &ids[2]))
+        .collect();
+    let commit = compaction(&root, &snapshot, covered);
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("compaction_not_contiguous"))
+    ));
+}
+
+#[test]
+fn coverage_refuses_a_partially_covered_turn() {
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    let snapshot = store.snapshot();
+    let mut covered = turn_entries(&snapshot, &ids[0]);
+    covered.pop();
+    let commit = compaction(&root, &snapshot, covered);
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("compaction_splits_turn"))
+    ));
+}
+
+#[test]
+fn coverage_refuses_an_excluded_turn() {
+    // Without the control the same coverage is accepted, so the refusal is the
+    // exclusion's and not a property of the span.
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    let snapshot = store.snapshot();
+    let covered: Vec<EntryId> = turn_entries(&snapshot, &ids[0])
+        .into_iter()
+        .chain(turn_entries(&snapshot, &ids[1]))
+        .collect();
+    let commit = compaction(&root, &snapshot, covered);
+    store.append(commit, at()).unwrap();
+
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    accepted(&mut store, &ids[1], ContextMode::Excluded);
+    let snapshot = store.snapshot();
+    let covered: Vec<EntryId> = turn_entries(&snapshot, &ids[0])
+        .into_iter()
+        .chain(turn_entries(&snapshot, &ids[1]))
+        .collect();
+    let commit = compaction(&root, &snapshot, covered);
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("compaction_covers_excluded_turn"))
+    ));
+}
+
+#[test]
+fn coverage_refuses_a_wrong_order() {
+    let (_temp, root, mut store) = fresh();
+    let ids = turns(&mut store, 6);
+    let snapshot = store.snapshot();
+    let mut covered = turn_entries(&snapshot, &ids[1]);
+    covered.extend(turn_entries(&snapshot, &ids[0]));
+    let commit = compaction(&root, &snapshot, covered);
+    assert!(matches!(
+        store.append(commit, at()),
+        Err(StoreError::Invalid("compaction_not_contiguous"))
+    ));
+}
+
+#[test]
 fn a_v3_compaction_may_omit_its_model() {
     let (_temp, root, mut store) = fresh();
     let ids = turns(&mut store, 4);

@@ -1,7 +1,9 @@
 # 0025: Context controls and record version 3
 
-Status: Implemented for Milestone 6, step 01 (m6-01). Pins do not yet change
-compaction in m6-02, and the client controls arrive in m6-03.
+Status: Implemented for Milestone 6, step 01 (m6-01). The interim compaction
+refusal described below was replaced by skipping in m6-02 (see the m6-02
+amendment to [decision 0019](0019-compaction.md)); the client controls arrive in
+m6-03.
 
 Date: 2026-10-31
 
@@ -43,6 +45,7 @@ nothing written:
 | The control changes the target turn's effective mode on this ancestry | `context_control_noop` |
 | A non-`default` mode does not touch a turn an active summary already covers | `context_control_covered` |
 | A compaction's coverage contains no turn pinned at its parent | `compaction_covers_pinned_turn` |
+| A compaction's coverage contains no turn excluded at its parent | `compaction_covers_excluded_turn` |
 
 `context_control_inside_turn` is needed because entries are validated before
 the commit's events install the active turn; without it, a control in a
@@ -63,9 +66,14 @@ ancestry that no other summary on it supersedes, exactly as the builder's
 `Plan` counts them.
 
 **Pinned coverage.** A compaction whose coverage includes a turn pinned at the
-compaction's parent is refused (`compaction_covers_pinned_turn`). This is
-defense in depth for RFC-001 6.1: the runtime's `select_span` refuses any
-controlled span in this step, but storage must not depend on one caller.
+compaction's parent is refused (`compaction_covers_pinned_turn`), and since
+m6-02 the same holds for an excluded turn (`compaction_covers_excluded_turn`).
+This is defense in depth for RFC-001 6.1: storage must not depend on one caller.
+Since m6-02 the runtime selects coverage as the span minus every controlled turn
+instead of refusing a span that contains one, so these refusals catch a caller
+that would cover a controlled turn rather than a span that merely holds one. The
+coverage shape itself is validated by `session::coverage`, shared with the
+builder.
 
 ### Derived state
 
@@ -93,7 +101,10 @@ The control entry itself is excluded from dialogue with the new
 `ExclusionReason::ContextControlMarker` (`context_control_marker`). A distinct
 reason rather than `model_change_marker` keeps the report's account precise:
 the two entry kinds make different statements, and a reader should not have to
-infer which from the entry payload.
+infer which from the entry payload. Since m6-02 an active summary may cover the
+control entry itself, which is not dialogue and carries no turn; it is then
+reported `covered_by_summary` (or `superseded_summary`), because the summary
+stands for every covered source entry.
 
 `ContextReport` gained `controls: [{turn_id, mode, control_entry_id}]`, omitted
 when empty and ordered by the branch position of the effective control entry.
@@ -118,15 +129,17 @@ control entries it contains, so a mode set by a later control is applied but
 not listed there; the check compares the report and the applied modes
 accordingly. The head build always contains every setter.
 
-### Interim compaction refusal
+### Interim compaction refusal (superseded by m6-02)
 
-`select_span` returns the new `NotEligible::ContextControlsInSpan`
-(`context_controls_in_span`) when the span it would choose contains a turn
-whose effective mode is `pinned` or `excluded`. Automatic compaction therefore
-behaves as it does for every other `NotEligible` reason: an overflowing start
-is refused with the existing explicit code, and no summary is generated. A
-controlled turn inside the retained window changes nothing. This is temporary:
-m6-02 replaces the refusal with skipping pinned turns.
+**Superseded.** m6-01 made `select_span` return
+`NotEligible::ContextControlsInSpan` (`context_controls_in_span`) when the span
+it would choose contained a turn whose effective mode was `pinned` or
+`excluded`, so automatic compaction behaved as it does for every other
+`NotEligible` reason. **[Decision 0019](0019-compaction.md#m6-02-amendment)'s
+m6-02 amendment replaces this refusal with skipping:** coverage is the span minus
+every controlled turn, `ContextControlsInSpan` is gone, and the new reason
+`only_controlled_turns` covers the case where nothing eligible would remain.
+The text below records what m6-01 shipped.
 
 ### Runtime command
 
@@ -172,7 +185,8 @@ with four controls; the existing examples stay v1.
 - Projection: `context::tests` covers pin, exclude, reset, sibling controls, an
   excluded tool group, an excluded prefix invalidating a continuation,
   fingerprint stability under a pin, and the `context-controls` golden.
-- Compaction: `compaction_tests::controlled_turns_are_refused_in_the_span_and_ignored_in_the_retained_window`.
+- Compaction: `compaction_tests::controlled_turns_are_skipped_and_ignored_in_the_retained_window`
+  (m6-02 replaced the m6-01 refusal test of the same fixture).
 - Runtime: `runtime::tests::controls` covers acceptance, every refusal state,
   typed storage codes, reopening and the no-op retry; the randomized test picks
   a control command on every seed.

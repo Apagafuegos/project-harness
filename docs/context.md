@@ -10,8 +10,9 @@ Milestone 4 steps 05–06 add rolling summaries, manual preview/commit/cancel,
 inspection diffs and idle-only automatic triggering
 ([decision 0019](decisions/0019-compaction.md)). Milestone 6 step 01 folds durable
 whole-turn pins and exclusions into the projection and report
-([decision 0025](decisions/0025-context-controls.md)); compaction still refuses a
-controlled span until m6-02. Both native wire adapters are implemented in
+([decision 0025](decisions/0025-context-controls.md)); step 02 makes compaction
+skip controlled turns instead of refusing a span that contains one, per the
+m6-02 amendment to decision 0019. Both native wire adapters are implemented in
 `harness-providers`; see [providers](providers.md).
 
 ## Three layers
@@ -66,7 +67,7 @@ the closed enum `ExclusionReason`.
 | Assistant response, failed | Excluded, with all its parts | `failed_response` |
 | Tool result | Included as a `tool_result` item with its `provenance`, directly after its call | — |
 | `model_changed` | Excluded from dialogue; it decides the model | `model_change_marker` |
-| `context_control` | Excluded from dialogue; it sets its target turn's mode | `context_control_marker` |
+| `context_control` | Excluded from dialogue; it sets its target turn's mode. An active summary may cover the entry itself, which then reports `covered_by_summary` | `context_control_marker` |
 | Any entry of a turn whose effective mode is `excluded` | Excluded, whole turn including tool groups | `user_excluded` |
 | Any entry of a turn whose effective mode is `pinned` | Included as usual, with `pinned: true` in the report | — |
 | Compaction summary listed in a later summary's `supersedes` | Excluded | `superseded_summary` |
@@ -121,9 +122,16 @@ Notes:
   still reports `user_excluded` (its entries remain named in
   `summaries[].covered_entry_ids`). A pinned turn is included exactly as before;
   pinning changes what the report says and nothing that is sent. The control
-  entry itself is a marker, never dialogue. The fold used for a continuation's
+  entry itself is a marker, never dialogue: it carries no turn, so a summary may
+  cover it like any other source entry, and it is reported `covered_by_summary`
+  rather than as a marker in that case. The fold used for a continuation's
   rebuilt prefix is the head's fold, so excluding an earlier turn invalidates a
   later native continuation through the existing prefix rule.
+- **Pins and compaction.** Compaction never covers a turn that is pinned or
+  excluded at its parent (see [compaction previews](#compaction-previews)), so a
+  pinned turn survives as ordinary entries wherever it sits, and an excluded
+  turn stays `user_excluded`. Resetting either one later changes only the
+  fold: nothing has to be un-summarized.
 - **Siblings.** Entries off the selected branch never appear, in either list.
   RFC-001's `other_branch` reason is not used; inspect another branch by
   passing its head.
@@ -270,10 +278,15 @@ one part decision; nothing from another branch appears; only summary reasons
 carry a `summary_id` or `effective_summary`, each names a summary on the
 branch, and they differ;
 every included call has exactly one included result directly after its
-response, and every result has its call; every reported control names a control
+response, and every result has its call; included items follow ancestral order,
+with each summary standing at its first covered entry, so a skipped pinned turn
+cannot be moved after the retained window or ahead of the entries a summary
+spans around it; every reported control names a control
 entry on the branch that sets the applied mode, every included item's `pinned`
 marker matches that mode, and every entry of an excluded turn has its
-`user_excluded` decision. A violation is `ContextError::Invariant(code)`, a
+`user_excluded` decision. A control entry must be a marker or, when an active
+summary covers it, a `covered_by_summary`/`superseded_summary` exclusion. A
+violation is `ContextError::Invariant(code)`, a
 builder bug. The core faults on it.
 
 ## Fingerprint
@@ -304,7 +317,11 @@ adds tools/options to the fingerprint and selects a single validated continuatio
 outside assistant items; builder version 4 checks/accounts for that selection.
 Builder version 5 adds `controls`, the `pinned` marker and the
 `user_excluded`/`context_control_marker` reasons; the projection version stays 4
-because no item changed.
+because no item changed. The m6-02 amendment adds no report field: it changes
+which entries a summary is generated over, not how a build projects them, so
+the projection version stays 4 and the builder version stays 5 (a coverage
+shape that storage accepted is now revalidated in the plan, which is an
+invariant inside an existing code path).
 
 ## Integration
 
@@ -351,11 +368,17 @@ whole completed turns before at least the two newest completed turns and the
 current turn. A rolling span includes prior active summary coverage and explicitly
 supersedes applicable ancestor summaries. Sibling summaries never apply.
 `NotEligible` explains empty history, only recent turns, unresolved work, no new
-dialogue since a summary, a non-completed turn barrier, an unknown head or invalid
-policy. It also refuses a span that would contain a turn whose effective mode is
-`pinned` or `excluded` (`context_controls_in_span`). That refusal is interim:
-m6-02 replaces it with skipping pinned turns, and until then automatic
-compaction behaves like any other `NotEligible` trigger.
+dialogue since a summary, a non-completed turn barrier, a span whose every turn
+is controlled (`only_controlled_turns`), an unknown head or invalid policy.
+Since m6-02 a span that contains a pinned or excluded turn is not refused: its
+coverage is the selected span minus those whole turns, and the same pure rule
+validates a recorded coverage in storage and in the builder. The summarizer is
+given only the covered entries, so a controlled turn never reaches a summary
+model. A pinned turn is projected verbatim in its original order after the
+summary; one that precedes every covered entry stays before it, because the
+summary stands at its first covered entry and the entry's branch position is all
+the record holds. An excluded turn is neither covered nor sent, and stays
+`user_excluded`. m6-01's `context_controls_in_span` refusal no longer exists.
 
 The optional session configuration object is independently shape-checked:
 
@@ -424,8 +447,7 @@ for pre-C1 budget checking, pending-start deduplication, events and failure code
 ## Not implemented
 
 - Real tokenizers (estimates remain explicitly heuristic).
-- Compaction that skips pinned turns instead of refusing a controlled span
-  (m6-02), and alternative strategies (m6-04).
+- Alternative compaction strategies (m6-04).
 
 ## Tests
 

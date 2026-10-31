@@ -678,6 +678,13 @@ automatic rollback to an older valid prefix and no guessing missing entries.
 > `other_branch`, and the exclusion reasons are the closed set in
 > [context](../context.md#inclusion-rules). Summary generation (6.1) is not
 > implemented. The proposal below is kept for reference.
+>
+> **Implementation note (m6-02).** Decision 14, the
+> [m6-02 amendment to decision 0019](../decisions/0019-compaction.md#m6-02-amendment),
+> narrows the contiguous-slice rule in 6.1: compaction coverage is the selected
+> span minus every turn pinned or excluded at the compaction's parent, so a
+> summary never covers, and a summarizer never receives, a controlled turn.
+> "Required pinned items remain outside coverage" still holds.
 
 ```rust,ignore
 pub struct ProjectionInput {

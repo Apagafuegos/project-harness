@@ -16,7 +16,7 @@ use crate::{
     session::{
         ArtifactRef, AssistantResponse, CallId, Compaction, ContentBlock, ContextMode, EntryId,
         EntryPayload, ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry, ToolResultEntry,
-        TurnId, UserMessage,
+        TurnId, UserMessage, coverage,
     },
     tools::ToolDefinition,
 };
@@ -499,13 +499,30 @@ impl<'a> Plan<'a> {
         let mut superseded_by = BTreeMap::new();
         let mut answered = BTreeSet::new();
         let mut summaries = Vec::new();
-        for stored in branch {
+        // Effective modes at the parent of each entry, folded as the branch is
+        // walked. They are exactly what storage folded when it accepted the
+        // compaction, so both apply the shared coverage rule to the same modes.
+        let mut modes: BTreeMap<TurnId, ContextMode> = BTreeMap::new();
+        for (index, stored) in branch.iter().enumerate() {
             match &stored.entry.payload {
                 EntryPayload::Compaction(compaction) => {
+                    // Decision 14: one shared rule, so storage and the builder
+                    // cannot disagree about which gaps may be skipped.
+                    coverage::error(&branch[..index], &compaction.covered_entry_ids, |turn| {
+                        modes.get(turn).is_some_and(|mode| !mode.is_default())
+                    })
+                    .map_err(ContextError::Invariant)?;
                     for old in &compaction.supersedes {
                         superseded_by.entry(old).or_insert(&stored.entry.id);
                     }
                     summaries.push((&stored.entry.id, compaction));
+                }
+                EntryPayload::ContextControl(control) => {
+                    if control.mode.is_default() {
+                        modes.remove(&control.turn_id);
+                    } else {
+                        modes.insert(control.turn_id.clone(), control.mode);
+                    }
                 }
                 EntryPayload::ToolResult(result) => {
                     let call = &result.result.call;

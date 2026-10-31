@@ -1182,15 +1182,15 @@ impl State {
         )?;
         let ancestry = self.ancestry(entry.parent_id.as_ref())?;
         let ids: Vec<_> = ancestry.iter().map(|v| &v.entry.id).collect();
-        let start = ids
-            .iter()
-            .position(|id| **id == compaction.covered_entry_ids[0])
-            .ok_or(StoreError::Invalid("compaction_not_ancestral"))?;
-        require(
-            ids.get(start..start + compaction.covered_entry_ids.len())
-                .is_some_and(|span| span.iter().copied().eq(compaction.covered_entry_ids.iter())),
-            "compaction_not_contiguous",
-        )?;
+        // Decision 14 (m6-02) replaced m6-01's plain contiguity check: coverage
+        // is an ancestral, ordered subsequence whose gaps are exactly the turns
+        // pinned or excluded at this compaction's parent. The builder checks the
+        // same rule with `session::coverage`, so the two cannot disagree.
+        let facts = self.facts(entry.parent_id.as_ref())?;
+        let controls = &facts.controls;
+        let controlled = |turn: &TurnId| controls.get(turn).is_some_and(|mode| !mode.is_default());
+        coverage::error(&ancestry, &compaction.covered_entry_ids, controlled)
+            .map_err(StoreError::Invalid)?;
         // Completed turns in order of first appearance on the branch.
         let mut seen = BTreeSet::new();
         let mut completed_turns = Vec::new();
@@ -1225,15 +1225,22 @@ impl State {
                 )?;
             }
         }
-        // A pinned turn is kept verbatim on this ancestry (RFC-001 6.1), so no
-        // summary may absorb it. Decision 9: the effective mode at the
-        // compaction's parent decides.
-        let controls = &self.facts(entry.parent_id.as_ref())?.controls;
+        // A pinned turn is kept verbatim on this ancestry (RFC-001 6.1) and an
+        // excluded turn stays excluded (decision 14), so no summary may absorb
+        // either. The effective mode at the compaction's parent decides; the
+        // same fold already told `coverage` which turns a gap may contain.
         for id in &compaction.covered_entry_ids {
-            if let Some(turn) = &self.entries[id].entry.turn_id
-                && controls.get(turn) == Some(&ContextMode::Pinned)
-            {
-                return Err(StoreError::Invalid("compaction_covers_pinned_turn"));
+            let Some(turn) = &self.entries[id].entry.turn_id else {
+                continue;
+            };
+            match controls.get(turn) {
+                Some(ContextMode::Pinned) => {
+                    return Err(StoreError::Invalid("compaction_covers_pinned_turn"));
+                }
+                Some(ContextMode::Excluded) => {
+                    return Err(StoreError::Invalid("compaction_covers_excluded_turn"));
+                }
+                _ => {}
             }
         }
         for id in &compaction.supersedes {
