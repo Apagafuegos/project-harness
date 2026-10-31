@@ -20,6 +20,17 @@ fn terminal_restored_on_quit_panic_and_sigterm() {
     }
 }
 
+#[cfg(all(feature = "test-provider", debug_assertions))]
+#[test]
+fn terminal_restored_after_returned_loop_error() {
+    let evidence = support::probe(
+        std::path::Path::new(env!("CARGO_BIN_EXE_harness")),
+        support::Scenario::ReturnedError,
+    )
+    .unwrap();
+    println!("{evidence}");
+}
+
 #[test]
 fn non_tty_exits_two_without_terminal_sequences() {
     // Stdin is a genuine terminal but stdout is piped: raw mode must not be

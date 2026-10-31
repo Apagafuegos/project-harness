@@ -126,10 +126,21 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
         if std::env::var_os("HARNESS_TUI_TEST_PANIC").is_some() {
             panic!("forced TUI panic");
         }
+        let events = crossterm::event::EventStream::new();
+        // Debug-only PTY fault injection: return an I/O error through drive,
+        // rather than unwinding or using a signal/ordinary quit path.
+        #[cfg(all(feature = "test-provider", debug_assertions))]
+        let events = futures_util::StreamExt::chain(
+            futures_util::stream::iter(
+                std::env::var_os("HARNESS_TUI_TEST_ERROR")
+                    .map(|_| Err(io::Error::other("forced TUI input error"))),
+            ),
+            events,
+        );
         runtime::drive(
             &mut terminal,
             &mut app,
-            crossterm::event::EventStream::new(),
+            events,
             subscriptions,
             signals,
             &commands,

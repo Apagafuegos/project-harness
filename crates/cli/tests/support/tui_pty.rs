@@ -15,6 +15,7 @@ use std::{
 pub enum Scenario {
     Quit,
     Panic,
+    ReturnedError,
     Terminate,
     Live,
 }
@@ -38,6 +39,7 @@ pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
     command.arg(temp.path().join("state"));
     command.env_remove("HARNESS_TUI_TEST_PROVIDER");
     command.env_remove("HARNESS_TUI_TEST_PANIC");
+    command.env_remove("HARNESS_TUI_TEST_ERROR");
     if !matches!(scenario, Scenario::Live) {
         command.env(
             "HARNESS_TUI_TEST_PROVIDER",
@@ -51,6 +53,9 @@ pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
     }
     if matches!(scenario, Scenario::Panic) {
         command.env("HARNESS_TUI_TEST_PANIC", "1");
+    }
+    if matches!(scenario, Scenario::ReturnedError) {
+        command.env("HARNESS_TUI_TEST_ERROR", "1");
     }
     let mut child = pair.slave.spawn_command(command).map_err(|_| "spawn")?;
     drop(pair.slave);
@@ -170,6 +175,24 @@ pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
         let panic = screen.find("forced TUI panic").ok_or("panic message")?;
         if restore >= panic {
             return Err("panic printed before restoration".into());
+        }
+    } else if matches!(scenario, Scenario::ReturnedError) {
+        if status.exit_code() != 1 {
+            return Err("returned error must exit 1".into());
+        }
+        let restore = screen.find("\x1b[?1049l").ok_or("restore")?;
+        let diagnostic = screen
+            .find("error: terminal_io_failure")
+            .ok_or("error diagnostic")?;
+        if restore >= diagnostic {
+            return Err("returned error printed before restoration".into());
+        }
+        // The error still shuts the engine down and releases its writer lock.
+        let root = harness_core::session::DataRoot::open(temp.path().join("state"), false)
+            .map_err(|_| "error root")?;
+        let entries = root.sessions().map_err(|_| "error catalog")?;
+        if entries.len() != 1 || entries[0].status != harness_core::session::CatalogStatus::Ok {
+            return Err("returned error did not release a coherent journal".into());
         }
     } else if !status.success() {
         return Err(format!("PTY exit {}", status.exit_code()));
