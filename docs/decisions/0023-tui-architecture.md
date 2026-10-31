@@ -32,14 +32,14 @@ boundary.
 
 | Crate | Version | Why |
 | --- | --- | --- |
-| `ratatui` | 0.30, default features | The selected TUI. Defaults select the crossterm backend, widgets, layout cache, macros and underline colour. `TestBackend`, `Frame` and `Terminal` come from `ratatui-core`. |
+| `ratatui` | 0.30, `default-features = false`, features `crossterm` and `layout-cache` | The selected TUI. Only the crossterm backend and the layout cache are enabled; `all-widgets`, `macros` and `underline-color` are off because the client doesn't use them, which keeps 57 lockfile entries out. `TestBackend`, `Frame` and `Terminal` come from `ratatui-core`. |
 | `crossterm` | 0.29, `default-features = false`, `events` | Key-event types only. Ratatui's default backend already depends on the same 0.29 line, so there is one crossterm in the graph; the direct declaration makes the key types explicit instead of relying on a re-export. No terminal I/O is used here. |
 | `pulldown-cmark` | 0.13, `default-features = false` | Minimal CommonMark parsing (decision 4). The default `html` and `getopts` features are unneeded; nothing is escaped to HTML and nothing is highlighted. |
 
 Added to `[workspace.dependencies]` for version consistency with every other
 dependency, but referenced only by `crates/cli`. `cargo tree` shows no
 `ratatui`, `crossterm` or `pulldown-cmark` in `harness-core` or
-`harness-providers`. `Cargo.lock` gains 108 package entries (232 → 340); they
+`harness-providers`. `Cargo.lock` gains 51 package entries (232 → 283); they
 are ratatui's widget/geometry surface, crossterm's event dependencies and the
 Markdown parser, all normal dependencies rather than new workspace crates.
 
