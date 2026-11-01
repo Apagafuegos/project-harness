@@ -522,6 +522,18 @@ fn group_turns(name: &str, steps: Vec<Step>) -> Result<Vec<Turn>, TaskError> {
                 ));
             }
         }
+        // A reply ends its turn, so an assistant step before the last one would
+        // silently push the remaining scripts into the next stage.
+        if turn.steps[..turn.steps.len() - 1]
+            .iter()
+            .any(|step| matches!(step, Step::Assistant { .. }))
+        {
+            return fail(format!(
+                "{name}: turn {} (1-based) has an assistant reply before its last step; \
+                 a reply ends the turn, so tool calls must come first",
+                index + 1
+            ));
+        }
     }
     Ok(turns)
 }
@@ -822,6 +834,44 @@ mod tests {
         );
         let error = Task::load(temp.path().join("one")).unwrap_err();
         assert!(error.0.contains("unanswered"), "{error}");
+    }
+
+    #[test]
+    fn an_assistant_reply_before_the_last_step_is_rejected() {
+        // A reply ends its turn, so a second reply in the same turn would push
+        // the remaining scripts into the next stage.
+        let temp = tempfile::tempdir().unwrap();
+        task_dir(temp.path(), "one");
+        write(
+            &temp.path().join("one"),
+            "history.jsonl",
+            concat!(
+                r#"{"type":"user","text":"one"}"#,
+                "\n",
+                r#"{"type":"tool_call","tool":"read","arguments":{"path":"a"}}"#,
+                "\n",
+                r#"{"type":"assistant","text":"done"}"#,
+                "\n",
+                r#"{"type":"tool_call","tool":"read","arguments":{"path":"a"}}"#,
+                "\n",
+                r#"{"type":"assistant","text":"done"}"#,
+                "\n",
+                r#"{"type":"user","text":"two"}"#,
+                "\n",
+                r#"{"type":"assistant","text":"done"}"#,
+                "\n",
+                r#"{"type":"user","text":"three"}"#,
+                "\n",
+                r#"{"type":"assistant","text":"done"}"#,
+                "\n",
+                r#"{"type":"user","text":"four"}"#,
+                "\n",
+                r#"{"type":"assistant","text":"done"}"#,
+                "\n",
+            ),
+        );
+        let error = Task::load(temp.path().join("one")).unwrap_err();
+        assert!(error.0.contains("before its last step"), "{error}");
     }
 
     #[test]

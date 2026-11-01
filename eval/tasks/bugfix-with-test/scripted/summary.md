@@ -5,15 +5,16 @@ must keep passing. The CLI contract stays one slug per argument.
 
 ## Decisions
 Change the cut in slugify from 15 to 16 characters. Reuse the existing check
-helper in test.sh and leave the two current cases untouched.
+helper in test.sh and keep the two current cases untouched.
 
 ## Files and actions
-Read slug.sh and test.sh. Ran `sh slug.sh 'Hello World Example Title'` and got
-hello-world-exa. Ran `sh test.sh`: both existing cases pass, so the off-by-one is
-not covered.
+Read slug.sh, then wrote slug.sh with cut -c1-16. Wrote test.sh with the
+long-title case, but with a guessed expected value. Ran `sh test.sh`: it fails
+because the case expects hello-world-example while the slug is hello-world-exam.
 
 ## Outcomes
-Root cause confirmed: cut -c1-15 truncates one character early. Nothing changed yet.
+slug.sh is fixed; test.sh is red because the regression case's expected value is
+wrong in test.sh.
 
 ## Unresolved work
-Edit slug.sh and test.sh, then re-run the suite.
+Correct the expected value in test.sh and re-run the suite.

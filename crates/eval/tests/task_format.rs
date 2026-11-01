@@ -79,11 +79,21 @@ fn every_task_declares_its_history_requirements_and_files() {
                 requirement.text
             );
         }
-        // Every modified path must really exist in the task's workspace.
+        // The declared paths must be regular files in the task's workspace. This
+        // is only a shape check: existing is not evidence of having changed. The
+        // ground truth is asserted by the S02 gate, which compares the workspace
+        // with its pristine copy at the pre-compaction boundary
+        // (`every_task_declares_exactly_the_files_its_history_changed`).
         for path in task.modified_files() {
+            let resolved = task.workspace().join(path);
             assert!(
-                task.workspace().join(path).exists(),
-                "{}: modified path {path:?} is not in the workspace",
+                resolved.is_file(),
+                "{}: modified path {path:?} is not a workspace file",
+                task.name()
+            );
+            assert!(
+                !path.starts_with('/') && !path.contains(".."),
+                "{}: modified path {path:?} must stay inside the workspace",
                 task.name()
             );
         }

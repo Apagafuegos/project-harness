@@ -10,4 +10,12 @@ if [ "${1:-}" = "--live" ] && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
     exit 2
 fi
 
+# Provenance: every result records the exact commit it was produced from, so the
+# wrapper supplies it instead of relying on the binary's HEAD detection.
+commit=$(git rev-parse HEAD)
+case " $* " in
+    *" --commit "*) ;;
+    *) set -- --commit "$commit" "$@" ;;
+esac
+
 exec cargo run --locked -q -p harness-eval --bin harness-eval -- "$@"

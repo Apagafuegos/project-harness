@@ -155,35 +155,110 @@ impl HiddenCheck {
         }
     }
 
-    /// Copy the hidden check into the workspace, run it, and remove it again.
+    /// Publish the hidden check into the workspace, run it, and remove it again.
+    ///
+    /// Publication is exclusive and never follows a link: the carrier name is
+    /// model-controlled, so a pre-existing file, symlink or hardlink there is a
+    /// refusal, not a target to overwrite. Only a file this call created is
+    /// removed afterwards, and a publication or cleanup failure is never
+    /// reported as a successful check.
     pub fn run_check(&self, task_check: &Path, workspace: &Path) -> CheckOutcome {
         let script = match fs::read(task_check) {
             Ok(bytes) => bytes,
-            Err(error) => {
-                return CheckOutcome {
-                    passed: false,
-                    status: "infrastructure_failure".into(),
-                    exit_code: None,
-                    code: Some("check_unreadable".into()),
-                    duration_ms: 0,
-                    output: error.to_string(),
-                };
+            Err(error) => return refused("check_unreadable", "infrastructure_failure", error),
+        };
+        let file = match publish(&workspace.join(CHECK_FILE), &script) {
+            Ok(file) => file,
+            Err((code, error)) => {
+                return refused(code, "infrastructure_failure", error);
             }
         };
+        // Release the handle before the sandbox opens the path, so the check runs
+        // with no writer of ours alive.
+        drop(file);
+        let mut outcome = self.run_command(workspace, CHECK_COMMAND);
         let published = workspace.join(CHECK_FILE);
-        if let Err(error) = fs::write(&published, &script) {
-            return CheckOutcome {
-                passed: false,
-                status: "infrastructure_failure".into(),
-                exit_code: None,
-                code: Some("check_unwritable".into()),
-                duration_ms: 0,
-                output: error.to_string(),
-            };
+        use std::os::unix::fs::MetadataExt as _;
+        match fs::symlink_metadata(&published) {
+            // The carrier must still be the regular file this call created.
+            Ok(metadata) if metadata.file_type().is_file() && metadata.nlink() == 1 => {}
+            Ok(_) => {
+                outcome.passed = false;
+                outcome.code = Some("check_carrier_replaced".into());
+                outcome.output.push_str("\ncheck_carrier_replaced");
+            }
+            Err(error) => {
+                outcome.passed = false;
+                outcome.code = Some("check_carrier_missing".into());
+                outcome
+                    .output
+                    .push_str(&format!("\ncheck_carrier_missing: {error}"));
+            }
         }
-        let outcome = self.run_command(workspace, CHECK_COMMAND);
-        let _ = fs::remove_file(&published);
+        if let Err(error) = fs::remove_file(&published) {
+            outcome.passed = false;
+            outcome.code = Some("check_cleanup_failed".into());
+            outcome
+                .output
+                .push_str(&format!("\ncheck_cleanup_failed: {error}"));
+        }
         outcome
+    }
+}
+
+/// Create the carrier exclusively: no existing object at all, and never through
+/// a symlink. Returns the open file so the caller can release it before the
+/// sandbox reads the path.
+fn publish(path: &Path, script: &[u8]) -> Result<fs::File, (&'static str, std::io::Error)> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(o_nofollow())
+        .open(path)
+        .map_err(|error| {
+            // EEXIST covers a regular file, a symlink (followed or not, the name
+            // already exists) and a hardlink: nothing is written to any target.
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ("check_carrier_exists", error)
+            } else {
+                ("check_unwritable", error)
+            }
+        })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| ("check_unwritable", error))?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        let _ = fs::remove_file(path);
+        return Err((
+            "check_carrier_unsafe",
+            std::io::Error::other("published carrier is not a single-link regular file"),
+        ));
+    }
+    file.write_all(script)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            let _ = fs::remove_file(path);
+            ("check_unwritable", error)
+        })?;
+    Ok(file)
+}
+
+/// `O_NOFOLLOW`, so even a race that creates a link between the check and the
+/// open cannot redirect the write. `create_new` already implies `O_EXCL`.
+fn o_nofollow() -> i32 {
+    rustix::fs::OFlags::NOFOLLOW.bits() as i32
+}
+
+fn refused(code: &'static str, status: &'static str, error: std::io::Error) -> CheckOutcome {
+    CheckOutcome {
+        passed: false,
+        status: status.into(),
+        exit_code: None,
+        code: Some(code.into()),
+        duration_ms: 0,
+        output: error.to_string(),
     }
 }
 

@@ -13,9 +13,12 @@ clap.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Loopback binding proves the CLI runtime really has an I/O driver.
+tokio = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true

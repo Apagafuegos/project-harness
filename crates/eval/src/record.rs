@@ -2,7 +2,8 @@
 //!
 //! Records are plain JSON with stable field order. Every metric is a count, so
 //! two runs of the same suite produce byte-identical aggregate files: durations
-//! live only in the per-record files and are never aggregated. See ADR 0027.
+//! and the exact session-configuration digest live only in the per-record files
+//! and are never aggregated (M6 decision 15). See ADR 0027.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,8 +13,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-/// Record schema version.
-pub const RECORD_SCHEMA: u32 = 1;
+/// Record schema version. Version 2 splits configuration provenance into the
+/// exact session-configuration artifact digest and the compaction-policy
+/// fingerprint (M6 decision 15).
+pub const RECORD_SCHEMA: u32 = 2;
 
 /// A provider-qualified model name, as written in a record.
 pub type ModelName = String;
@@ -72,9 +75,12 @@ pub struct Durations {
 /// Stable error codes, one slot per stage. `None` means the stage succeeded.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Errors {
-    /// A history turn, control, approval or session failure.
+    /// A history turn, approval or session failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<String>,
+    /// Applying the task's pins and exclusions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<String>,
     /// Preview or commit refusal, or the strategy's coded failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<String>,
@@ -87,6 +93,31 @@ pub struct Errors {
     /// The hidden check's executor status or code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+}
+
+impl Errors {
+    /// No stage failed.
+    pub fn is_clear(&self) -> bool {
+        self.replay.is_none()
+            && self.control.is_none()
+            && self.compaction.is_none()
+            && self.probe.is_none()
+            && self.continuation.is_none()
+            && self.check.is_none()
+    }
+
+    /// Record a stage failure in its own slot. The stage decides the slot, so a
+    /// probe timeout can never be reported as a replay failure.
+    pub fn set(&mut self, stage: crate::pipeline::Stage, code: String) {
+        use crate::pipeline::Stage;
+        match stage {
+            Stage::Replay => self.replay = Some(code),
+            Stage::Control => self.control = Some(code),
+            Stage::Compaction => self.compaction = Some(code),
+            Stage::Probe => self.probe = Some(code),
+            Stage::Continuation => self.continuation = Some(code),
+        }
+    }
 }
 
 /// One task × strategy × repetition result.
@@ -111,10 +142,16 @@ pub struct Record {
     /// Summary model, absent for a model-free strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_model: Option<ModelName>,
-    /// Compaction policy fingerprint: strategy name and version plus the
-    /// compaction configuration in force.
+    /// Exact digest of the session configuration artifact the committed
+    /// compaction entry binds (instructions, execution policy, compaction
+    /// policy). Per-record only: it includes the ephemeral workspace path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub configuration_fingerprint: Option<String>,
+    pub session_configuration: Option<String>,
+    /// Compaction-policy fingerprint: strategy name and version plus the
+    /// compaction configuration. Independent of the workspace path, so an
+    /// aggregate can group by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_policy: Option<String>,
     /// Token estimator method and version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimator: Option<Estimator>,
@@ -163,7 +200,8 @@ impl Record {
             strategy_version: strategy.version().to_owned(),
             session_model: model_name(session_model),
             summary_model: summary_model.map(model_name),
-            configuration_fingerprint: None,
+            session_configuration: None,
+            compaction_policy: None,
             estimator: None,
             repetition,
             seed: repetition as u64,
@@ -177,6 +215,7 @@ impl Record {
     /// Whether every stage succeeded and a check ran.
     pub fn complete(&self) -> bool {
         self.errors.replay.is_none()
+            && self.errors.control.is_none()
             && self.errors.compaction.is_none()
             && self.errors.probe.is_none()
             && self.errors.continuation.is_none()
@@ -258,8 +297,10 @@ pub struct Aggregate {
     pub strategies: Vec<StrategyTotals>,
     /// One entry per task, in task order.
     pub tasks: Vec<TaskTotals>,
-    /// Compaction policy fingerprints seen, per strategy.
-    pub configuration_fingerprints: BTreeMap<String, BTreeSet<String>>,
+    /// Compaction-policy fingerprints seen, per strategy. The exact
+    /// session-configuration digest is deliberately not aggregated: it varies
+    /// with the ephemeral scratch path (M6 decision 15).
+    pub compaction_policies: BTreeMap<String, BTreeSet<String>>,
     /// Estimator identities seen.
     pub estimators: BTreeSet<(String, String)>,
 }
@@ -270,11 +311,11 @@ impl Aggregate {
     pub fn new(records: &[Record], harness_commit: &str) -> Self {
         let mut strategies: Vec<StrategyTotals> = Vec::new();
         let mut tasks: Vec<TaskTotals> = Vec::new();
-        let mut configuration_fingerprints: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut compaction_policies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut estimators = BTreeSet::new();
         for record in records {
-            if let Some(fingerprint) = &record.configuration_fingerprint {
-                configuration_fingerprints
+            if let Some(fingerprint) = &record.compaction_policy {
+                compaction_policies
                     .entry(record.strategy.clone())
                     .or_default()
                     .insert(fingerprint.clone());
@@ -303,7 +344,7 @@ impl Aggregate {
             runs: records.len() as u64,
             strategies,
             tasks,
-            configuration_fingerprints,
+            compaction_policies,
             estimators,
         }
     }
@@ -506,7 +547,9 @@ mod tests {
         completion: bool,
     ) -> Record {
         let mut record = Record::skeleton(task, strategy, &model(), None, 0, "commit");
-        record.configuration_fingerprint = Some(format!("sha256:{}", strategy.as_str()));
+        // Two distinct identities, per M6 decision 15.
+        record.session_configuration = Some(format!("{:0>64}", strategy.as_str()));
+        record.compaction_policy = Some(format!("{:1>64}", strategy.as_str()));
         record.estimator = Some(Estimator {
             method: "heuristic".into(),
             version: "bytes4-flat-media-v1".into(),

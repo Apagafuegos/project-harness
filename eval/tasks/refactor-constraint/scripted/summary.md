@@ -4,14 +4,17 @@ The printed output must stay byte-identical, exactly one copy of the row format
 string must be left, the helper must be named emit, and no new files may be added.
 
 ## Decisions
-Keep POSIX sh. Put emit in report.sh above the first call. Call emit once per row.
+Keep POSIX sh. Start halfway: emit was added and the header row converted; the two
+data rows still print directly.
 
 ## Files and actions
-Read report.sh. Ran `sh report.sh` to capture the current output and counted the
-format strings: three copies of the row format today.
+Read report.sh, then wrote report.sh with emit() and one converted row. Counted the
+format strings with grep: three copies remain — one inside emit and two inline.
 
 ## Outcomes
-No change made yet; the plan is agreed and the target output is captured.
+The refactor is unfinished and the script still prints the same three rows. Two
+inline printf rows remain in report.sh.
 
 ## Unresolved work
-Apply the refactor in report.sh and re-run the script to compare the output.
+Convert the two remaining data rows to emit so exactly one copy of the format
+string is left, then re-run the script.

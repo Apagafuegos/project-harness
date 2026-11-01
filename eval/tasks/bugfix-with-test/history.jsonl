@@ -1,14 +1,12 @@
 {"type": "user", "text": "slug.sh cuts long titles one character too short. A title must be cut to 16 characters, not 15. Fix slugify, and add a regression test to test.sh that pins the long-title case. The existing two tests in test.sh must keep passing."}
 {"type": "tool_call", "tool": "read", "arguments": {"path": "slug.sh"}, "say": "Reading slug.sh first."}
 {"type": "assistant", "text": "The pipeline ends in cut -c1-15, so the slug is cut to 15 characters. It must be cut to 16 characters."}
-{"type": "user", "text": "What does it produce for a long title right now?"}
-{"type": "tool_call", "tool": "bash", "arguments": {"command": "sh slug.sh 'Hello World Example Title'"}, "say": "Checking the current behaviour on a long title."}
-{"type": "assistant", "text": "hello-world-exa: fifteen characters, one short of the sixteen a long title may keep."}
-{"type": "user", "text": "And the test suite?"}
+{"type": "user", "text": "Fix the cut now and add the regression case; we can correct the expected value after we see it fail."}
+{"type": "tool_call", "tool": "write", "arguments": {"path": "slug.sh", "overwrite": true, "text": "#!/bin/sh\n# Print a slug for each argument.\nslugify() {\n    printf '%s' \"$1\" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' | cut -c1-16\n}\n\nfor title in \"$@\"; do\n    slugify \"$title\"\n    printf '\\n'\ndone\n"}, "say": "Changing the cut to 16 characters."}
+{"type": "tool_call", "tool": "write", "arguments": {"path": "test.sh", "overwrite": true, "text": "#!/bin/sh\n# Exercise slug.sh on three titles.\nfail=0\ncheck() {\n    got=$(sh slug.sh \"$1\")\n    if [ \"$got\" = \"$2\" ]; then\n        printf 'ok: %s\\n' \"$1\"\n    else\n        printf 'not ok: %s (got %s, want %s)\\n' \"$1\" \"$got\" \"$2\"\n        fail=1\n    fi\n}\ncheck \"Hello World\" \"hello-world\"\ncheck \"Hello   World\" \"hello-world\"\ncheck \"Hello World Example Title\" \"hello-world-example\"\nexit $fail\n"}, "say": "Adding the long-title case with the same check helper."}
+{"type": "assistant", "text": "The regression case is in test.sh, but I guessed its expected value."}
+{"type": "user", "text": "Does the suite pass?"}
 {"type": "tool_call", "tool": "bash", "arguments": {"command": "sh test.sh"}}
-{"type": "assistant", "text": "Both existing cases pass, so the suite does not catch the off-by-one at all."}
-{"type": "user", "text": "Use the same check helper for the new case and keep the CLI contract: one slug per argument on stdout."}
-{"type": "tool_call", "tool": "read", "arguments": {"path": "test.sh"}}
-{"type": "assistant", "text": "I will add one check line with the long title and keep the existing two lines untouched."}
-{"type": "user", "text": "Perfect. Apply it when we resume."}
-{"type": "assistant", "text": "Ready to fix slugify and extend the tests."}
+{"type": "assistant", "text": "It fails: the case expects hello-world-example but the fixed slug is hello-world-exam, so the suite is red."}
+{"type": "user", "text": "Right. Fix the expectation when we resume."}
+{"type": "assistant", "text": "Ready to correct the regression case."}

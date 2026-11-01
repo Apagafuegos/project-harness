@@ -8,7 +8,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::{Arg, ArgAction, Command};
-use harness_core::context::StrategyId;
+use harness_core::{context::StrategyId, session::ModelRef};
 use harness_eval::{
     Aggregate, HiddenCheck, ModelPlan, RunOptions, Task, live_model, live_providers,
     offline_driver, offline_model, offline_summary_model, parse_strategy, record::run_id,
@@ -85,7 +85,7 @@ fn main() {
             Arg::new("commit")
                 .long("commit")
                 .value_name("SHA")
-                .help("Harness commit to record, usually `git rev-parse HEAD`"),
+                .help("Harness commit to record: 40 hex characters, usually `git rev-parse HEAD`; resolved from the checkout when omitted"),
         )
         .arg(
             Arg::new("yes")
@@ -109,10 +109,10 @@ fn main() {
         .get_one::<String>("out")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("eval/results").join(run_id()));
-    let commit = matches
-        .get_one::<String>("commit")
-        .cloned()
-        .unwrap_or_else(|| "unknown".into());
+    let commit = match resolve_commit(matches.get_one::<String>("commit").map(String::as_str)) {
+        Ok(commit) => commit,
+        Err(message) => usage(&message),
+    };
     let repetitions = matches
         .get_one::<u32>("repetitions")
         .copied()
@@ -138,10 +138,7 @@ fn main() {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-    {
+    let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(error) => fail(&2, format!("runtime: {error}")),
     };
@@ -156,6 +153,25 @@ fn main() {
         &matches,
     ));
     std::process::exit(code);
+}
+
+/// The CLI runtime. `enable_all` is required: the live adapters do HTTP, and a
+/// time-only runtime has no I/O driver to run them.
+fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+}
+
+/// Live models: an absent summary model inherits the explicitly selected session
+/// model, never the provider's default.
+fn live_models(provider: &str, model: Option<&str>, summary: Option<&str>) -> (ModelRef, ModelRef) {
+    let session = live_model(provider, model);
+    let summary = match summary {
+        Some(name) => live_model(provider, Some(name)),
+        None => session.clone(),
+    };
+    (session, summary)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +219,7 @@ async fn run(
             model: offline_model(),
             summary_model: Some(offline_summary_model()),
             driver: offline_driver(),
+            stage_timeout: harness_eval::pipeline::STAGE_TIMEOUT,
         };
         let code = finish(
             out,
@@ -224,16 +241,14 @@ async fn run(
         Ok(providers) => providers,
         Err(diagnostic) => fail(&2, format!("provider: {diagnostic}")),
     };
-    let model = live_model(
+    let (model, summary_model) = live_models(
         provider_name,
         matches.get_one::<String>("model").map(String::as_str),
-    );
-    let summary_model = Some(live_model(
-        provider_name,
         matches
             .get_one::<String>("summary-model")
             .map(String::as_str),
-    ));
+    );
+    let summary_model = Some(summary_model);
     let driver = providers.driver.clone();
     let dry_scratch = harness_eval::scratch_root();
     let dry = RunOptions {
@@ -243,6 +258,7 @@ async fn run(
         model: model.clone(),
         summary_model: summary_model.clone(),
         driver: driver.clone(),
+        stage_timeout: harness_eval::pipeline::STAGE_TIMEOUT,
     };
     // A scripted dry run measures the projections before any money is spent and
     // proves the mechanics work with this task suite.
@@ -262,6 +278,7 @@ async fn run(
         model,
         summary_model,
         driver,
+        stage_timeout: harness_eval::pipeline::STAGE_TIMEOUT,
     };
     let plan = ModelPlan::Live(
         Arc::clone(&providers.provider) as Arc<dyn harness_core::model::ModelProvider>
@@ -320,6 +337,80 @@ fn finish(out: &std::path::Path, result: Result<harness_eval::SuiteRun, String>)
     0
 }
 
+/// Resolve the harness commit for provenance. An explicit `--commit` must be a
+/// 40-character commit id; without one, `HEAD` is read from the checkout. There
+/// is no silent `unknown`: a record without a real commit cannot be reproduced.
+fn resolve_commit(explicit: Option<&str>) -> Result<String, String> {
+    match explicit {
+        Some(value) => validate_commit(value),
+        None => detect_commit().ok_or_else(|| {
+            "--commit is required here: pass `git rev-parse HEAD` (HEAD could not be              resolved from the checkout)"
+                .to_owned()
+        }),
+    }
+}
+
+fn validate_commit(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(value.to_ascii_lowercase());
+    }
+    Err(format!(
+        "--commit {value:?} is not a 40-character git commit id"
+    ))
+}
+
+/// Read `HEAD` from the checkout without spawning a process. `.git` is either a
+/// directory or a `gitdir:` file (a linked worktree), and a worktree's refs live
+/// in its common directory.
+fn detect_commit() -> Option<String> {
+    let dot_git = repo_root().join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let path = text.trim().strip_prefix("gitdir:")?.trim();
+        if path.starts_with('/') {
+            PathBuf::from(path)
+        } else {
+            repo_root().join(path)
+        }
+    };
+    let common = std::fs::read_to_string(git_dir.join("commondir"))
+        .ok()
+        .map(|path| git_dir.join(path.trim()))
+        .unwrap_or_else(|| git_dir.clone());
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(reference) = head.strip_prefix("ref:") else {
+        return validate_commit(head).ok();
+    };
+    let reference = reference.trim();
+    for root in [&git_dir, &common] {
+        if let Ok(value) = std::fs::read_to_string(root.join(reference)) {
+            return validate_commit(value.trim()).ok();
+        }
+    }
+    for root in [&git_dir, &common] {
+        let Ok(packed) = std::fs::read_to_string(root.join("packed-refs")) else {
+            continue;
+        };
+        for line in packed.lines() {
+            if line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let (Some(id), Some(name)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if name == reference {
+                return validate_commit(id).ok();
+            }
+        }
+    }
+    None
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -335,4 +426,62 @@ fn usage(message: &str) -> ! {
 fn fail(code: &i32, message: String) -> ! {
     eprintln!("harness-eval: {message}");
     std::process::exit(*code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cli_runtime_has_an_io_driver_for_the_live_adapters() {
+        // A time-only runtime panics here; `enable_all` must give the I/O driver
+        // the HTTP adapters need.
+        let runtime = build_runtime().expect("runtime");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback bind needs an I/O driver");
+            drop(listener);
+        });
+    }
+
+    #[test]
+    fn an_absent_summary_model_inherits_the_selected_session_model() {
+        let (session, summary) = live_models("deepseek", Some("deepseek-v4-pro"), None);
+        assert_eq!(session, summary);
+        assert_eq!(summary.model, "deepseek-v4-pro");
+        // Not the provider default, which is deepseek-flash.
+        assert_ne!(
+            summary.model,
+            harness::wiring::default_model("deepseek", false)
+        );
+
+        let (session, summary) = live_models("deepseek", Some("deepseek-v4-pro"), Some("cheap"));
+        assert_eq!(session.model, "deepseek-v4-pro");
+        assert_eq!(summary.model, "cheap");
+        assert_eq!(summary.provider_instance, "deepseek");
+
+        // An absent --model falls back to the provider default for both.
+        let (session, summary) = live_models("deepseek", None, None);
+        assert_eq!(
+            session.model,
+            harness::wiring::default_model("deepseek", false)
+        );
+        assert_eq!(summary, session);
+    }
+
+    #[test]
+    fn a_commit_must_be_a_full_commit_id_and_head_is_resolvable_here() {
+        assert!(validate_commit("970b9b566a256af9b50cd037297375d31e0f579f").is_ok());
+        assert!(validate_commit("unknown").is_err());
+        assert!(validate_commit("").is_err());
+        assert!(validate_commit("970b9b5").is_err());
+        assert!(validate_commit(&"z".repeat(40)).is_err());
+        // The checkout this suite runs in has a resolvable HEAD, so a direct
+        // invocation never needs to emit an unknown commit.
+        let detected = detect_commit().expect("HEAD is resolvable from the checkout");
+        assert_eq!(detected.len(), 40);
+        assert!(detected.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(resolve_commit(Some(&detected)).unwrap(), detected);
+    }
 }

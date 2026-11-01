@@ -60,7 +60,19 @@ the journal, and therefore the compaction input, genuine.
 The script vocabulary is deliberately small (`user`, `assistant`, `tool_call`,
 plus optional `say` narration), and the loader enforces the shape that matters:
 4–8 turns, at least two tool calls, at least two requirements, every turn ending
-with an assistant reply, a continuation that cannot contain a user message.
+with an assistant reply and **no reply before that** (a reply ends its turn; a
+stray one would silently push the remaining scripts into the next stage, which the
+runner now also refuses as `unconsumed_*_scripts`), and a continuation that cannot
+contain a user message.
+
+**Ground truth is measured, not declared.** `modified_files.json` names the files
+the history itself changed, and the pipeline diffs the scratch workspace against
+the task's pristine copy at the pre-compaction boundary to produce
+`pre_compaction_changes`. The gate asserts they are equal for every task, that the
+set is non-empty, and that the hidden check still fails on that boundary snapshot.
+A path existing in the workspace is never evidence that it changed; the pristine
+check in `tests/task_format.rs` only verifies that a declared path is a regular
+file inside the workspace.
 
 ### Metrics, exactly
 
@@ -94,6 +106,9 @@ in every arm, and never derived from the task's history. Rendering from the repo
 rather than from a second build means the scored text cannot disagree with what
 the runtime decided to include.
 
+`modified_files` is the set the history really changed, so file recall measures
+whether the projection still names files the task had already touched.
+
 `probe_text` is the probe turn's assistant text: one extra turn after compaction
 with a prompt fixed by the harness (`pipeline::PROBE_PROMPT`) asking for the
 requirements and the files changed so far, scored with the same matchers. The two
@@ -112,11 +127,31 @@ trigger; score the projection; ask the probe; send `continue.md` through the
 normal tool loop bounded by `max_inferences_per_turn` and a per-stage deadline;
 close the session; run the hidden check.
 
+**The fixed history is replayed in live mode too.** A `PhaseProvider` serves every
+request from the task's scripts until the history has replayed, then hands the
+summary, probe and continuation to the plan's provider — in offline mode that is
+the same scripted provider, so the phase switch is a no-op. This is what makes the
+comparison meaningful: the pre-compaction conversation and workspace are identical
+in both plans and across strategies, and a live run does not spend requests before
+the measured stage. The gate asserts identical `history_requests` (dialogue only,
+because instructions embed the absolute workspace path) and identical
+`pre_compaction_changes` across plans and strategies.
+
+**Shutdown is unconditional.** `drive` awaits `SessionHandle::shutdown` on every
+post-open exit — success, refusal, coded failure or timeout — before `run_task` is
+allowed to publish the hidden check. Dropping the handle would only signal
+asynchronous shutdown, which on a current-thread runtime can still be pending when
+a synchronous check runs. Stage failures carry their own stage, so a probe timeout
+is recorded as `probe: stage_timeout`, never as a replay failure; the check runs
+only when `errors` is clear and metrics exist. Each stage deadline is injectable
+(`RunOptions::stage_timeout`) so the gate can prove the failure paths release
+everything with a 250 ms bound.
+
 Nothing in the pipeline reimplements a product stage. A missing product hook was a
 "stop and report" condition, and none was needed: the report exposes the ordered
 included items with their block-level decisions, `Command::SetContextControl`
-exists, and the stored `Compaction` entry carries the strategy, version and model
-it was written with.
+exists, and the stored `Compaction` entry carries the strategy, version, model and
+configuration digest it was written with.
 
 ### Auto-approval, and its exact scope
 
@@ -147,11 +182,21 @@ backend fails `Sandbox::probe`, the run fails with `sandbox_unavailable`, and th
 gate is ignored where `bwrap` is missing, exactly like the product's S02 targets.
 
 The check script is not part of the workspace while the model runs. Immediately
-before the check, the runner writes it to `.harness-eval-check.sh`, runs
+before the check, the runner **publishes** it to `.harness-eval-check.sh`, runs
 `sh .harness-eval-check.sh`, and removes it. Because the check is copied in only
 after the session is closed, it cannot be sent to a model; the gate asserts that
 no continuation request contains the check marker, the file name or the phrase
 "hidden check", and that the file is gone afterwards.
+
+Publication is the one host-side write into a model-controlled directory, so it is
+exclusive and never follows a link: `create_new` plus `O_NOFOLLOW`. A pre-existing
+file, symlink or hardlink at the carrier name is refused with
+`check_carrier_exists` and its target is left untouched; a carrier that is not a
+single-link regular file is refused as `check_carrier_unsafe`; after the run the
+carrier must still be that file (`check_carrier_replaced`, `check_carrier_missing`)
+and cleanup must succeed (`check_cleanup_failed`). Any of those failures makes the
+outcome a non-passing check, never a silent success. The regression test links the
+carrier to an external sentinel and asserts the sentinel keeps its bytes.
 
 The gate itself (`crates/eval/tests/offline_gate.rs`, `#[ignore]`) also asserts
 that the runner really is isolated: a command run through it reports
@@ -167,10 +212,18 @@ Offline mode is deterministic. Two runs of the same suite write **byte-identical
 What made this need care:
 
 - **No identities or clocks in aggregates.** Records carry the repetition index as
-  the seed, the task fingerprint, the policy fingerprint and the estimator
-  identity. Session, entry and call identities never reach a record; durations are
-  per-record and never aggregated; ratios are printed as fixed-width decimals from
-  integer counts.
+  the seed, the task fingerprint, the compaction-policy fingerprint and the
+  estimator identity. Session, entry and call identities never reach a record;
+  durations are per-record and never aggregated; ratios are printed as fixed-width
+  decimals from integer counts.
+- **Two configuration identities, one of them path-dependent (decision 15).** Each
+  record keeps the exact session-configuration artifact digest the committed
+  compaction entry binds — which embeds the absolute workspace path — *and* the
+  compaction-policy fingerprint, which does not. The aggregate groups by the policy
+  fingerprint and omits the raw digest, so the aggregate is the deterministic
+  comparison while the record keeps exact provenance. Records from two runs are
+  therefore equal apart from `durations_ms` and `session_configuration`; that is
+  asserted, not assumed.
 - **The scratch path must not influence an estimate.** A session's base
   instruction embeds the absolute workspace path, and the heuristic estimator
   counts its bytes. The eval therefore places every cell under a scratch root
@@ -192,15 +245,23 @@ One record per task × strategy × repetition, written to
 `<out>/aggregate.md`. The default `<out>` is `eval/results/<run-id>/`, which is
 git-ignored.
 
-A record carries: the harness commit (`--commit`, normally
-`git rev-parse HEAD`), the task fingerprint (SHA-256 over the task directory's
-sorted `path, length, sha256` manifest), the strategy name **and version as
-written into the committed compaction entry**, the session and summary models, the
-compaction **policy fingerprint** (`context::compaction::policy_fingerprint`,
-which hashes the strategy name, its version and the compaction configuration), the
+A record (schema 2) carries: the harness commit, the task fingerprint (SHA-256 over
+the task directory's sorted `path, length, sha256` manifest), the strategy name
+**and version as written into the committed compaction entry**, the session and
+summary models, **both configuration identities** —
+`session_configuration` (the compaction entry's
+`configuration_fingerprint`, i.e. the exact session-configuration artifact digest)
+and `compaction_policy` (`context::compaction::policy_fingerprint`) — the
 estimator method and version, token estimates before and after
 (`CompactionDiff::before/after.estimated_total`), the metrics, per-stage
-durations, per-stage error codes and the repetition index.
+durations, per-stage error codes (one slot per stage) and the repetition index.
+
+The commit is never `unknown`: `--commit` must be a 40-character id and is
+validated, and when it is absent the binary resolves `HEAD` from the checkout
+itself — `.git` as a directory or a linked worktree's `gitdir`, then the ref file
+or `packed-refs` — without spawning a process. If neither works, the run exits 2
+and asks for `--commit` instead of recording a placeholder. `scripts/eval.sh`
+passes `git rev-parse HEAD` automatically.
 
 The strategy is read back from the committed entry rather than from the input, so
 a record cannot claim a strategy the journal does not hold; `observation_masking`
@@ -288,12 +349,72 @@ These are stated here so a reader of the m6-06 report cannot mistake the numbers
 - Format and matchers: `crates/eval/src/task.rs`, `src/matcher.rs` unit tests and
   `crates/eval/tests/task_format.rs` (suite shape, requirement self-match,
   fingerprint, probe prompt, literal matchers).
-- Mechanics: `crates/eval/tests/offline_gate.rs` (five ignored integration tests,
-  listed above).
+- Mechanics: `crates/eval/tests/offline_gate.rs` (seventeen ignored integration
+  tests, listed above, including the review regressions for m6-05).
 - Gate wiring: `scripts/check.sh`, `scripts/test-security-gate.sh`,
   `.github/workflows/ci.yml`.
 - `eval/tasks/` — `refactor-constraint`, `bugfix-with-test`,
   `feature-style-rule`, `multi-file-change`.
+
+## Review round 2 (m6-05 @ 970b9b5)
+
+The first head was not accepted. Six findings, and what changed:
+
+1. **P1, check publication escaped through a symlink.** `fs::write` into a
+   model-controlled directory followed a model-created symlink and overwrote its
+   external target. Now: exclusive `create_new` + `O_NOFOLLOW`, refuse any
+   pre-existing object, verify the carrier is a single-link regular file, remove
+   only the file this call created, and fail the check on publication or cleanup
+   failure. Regression: `hidden_check_publication_refuses_links_and_existing_paths`.
+2. **P1, live mode did not replay the fixed history.** `ModelPlan::Live` skipped
+   the scripts, so every history prompt went to the real provider. Now a
+   `PhaseProvider` serves the scripts for the fixed history in **both** plans and
+   only the post-history stages reach the injected provider. Regressions:
+   `live_plan_replays_the_fixed_history_before_the_first_live_request`,
+   `live_and_scripted_plans_replay_identical_history_and_workspaces`.
+3. **P2, file recall ground truth listed planned work.** No history modified a
+   file; `modified_files.json` listed what the continuation would change. Now every
+   history makes real, incomplete progress through write/edit in a coverable turn,
+   `modified_files.json` names exactly the files the history changed, and the gate
+   diffs the workspace at the pre-compaction boundary. Regression:
+   `every_task_declares_exactly_the_files_its_history_changed`.
+4. **P1, error paths skipped awaited shutdown.** Stage failures returned out of the
+   pipeline without awaiting `shutdown`, were labelled `replay`, and could publish
+   the hidden check while driver or executor work was live. Now: one awaited
+   shutdown on every post-open exit, per-stage attribution (`control` is its own
+   record slot), a check only when every preceding stage succeeded, and injectable
+   deadlines. Regressions: `a_failed_compaction_skips_the_probe_and_the_hidden_check`,
+   `a_probe_failure_is_attributed_and_skips_the_hidden_check`,
+   `a_stalled_probe_times_out_and_the_continuation_never_runs`.
+5. **P2, incomplete provenance.** The wrapper did not pass `--commit`, so records
+   said `unknown`, and `configuration_fingerprint` was only the compaction policy.
+   Now the commit is resolved and validated (never `unknown`), and the record keeps
+   the exact session-configuration digest separately from the compaction-policy
+   fingerprint, per decision 15, with the aggregate carrying only the deterministic
+   policy identity. Regressions:
+   `cli_records_a_real_commit_and_refuses_a_malformed_one`,
+   `a_non_compaction_configuration_change_changes_source_provenance`, and the
+   record-equality half of the determinism test.
+6. **P2, completion accepted constraint violations.** A forbidden edit to the
+   protected file, an arbitrary extra file, and a removed final newline all passed.
+   Now every check enforces the allowed file set, compares protected files against
+   trusted bytes, and compares output bytes with a sentinel so the final newline
+   counts. Regressions: `completion_rejects_a_change_to_the_forbidden_math_file`,
+   `completion_rejects_an_extra_file_in_the_no_new_files_task`,
+   `byte_identical_output_includes_the_final_newline`.
+
+Two reviewer CLI corrections are kept and now covered: the runtime uses
+`enable_all` (a time-only runtime has no I/O driver for the live adapters) and an
+absent `--summary-model` inherits the selected session model rather than the
+provider default — `the_cli_runtime_has_an_io_driver_for_the_live_adapters` and
+`an_absent_summary_model_inherits_the_selected_session_model`.
+
+The reviewer's temporary `tests/review_findings.rs` target was consolidated into
+`tests/offline_gate.rs`, which `scripts/check.sh` and the CI S02 job run; no
+ignored target is left outside the gate. A loader rule added here —
+`an_assistant_reply_before_the_last_step_is_rejected` — exists because the first
+version of finding 3's fixture had a mid-turn reply, which silently pushed two
+scripts into the summary request.
 
 ### Break-on-purpose results
 

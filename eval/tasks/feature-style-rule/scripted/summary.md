@@ -8,10 +8,12 @@ Peel --json off first, then read the name with a default of world. One printf pe
 path, no helper needed.
 
 ## Files and actions
-Read greet.sh and ran `sh greet.sh Alice`, which printed Hello, Alice!.
+Read greet.sh, then wrote greet.sh with the JSON branch. Ran
+`sh greet.sh --json Alice`, which printed {"greeting":"Hello, Alice!"}.
 
 ## Outcomes
-Shape agreed: {"greeting":"Hello, Alice!"}. Nothing changed yet.
+The flag works, but greet.sh indents the branch with four spaces, which the style
+rule forbids.
 
 ## Unresolved work
-Add the flag in greet.sh under the style rule and print both forms.
+Reindent the branch in greet.sh with two spaces and check the line width.

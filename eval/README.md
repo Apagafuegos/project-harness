@@ -73,17 +73,34 @@ produces real tool calls and real tool results against the workspace.
 ```
 
 - A `user` step opens a turn. Everything until the next `user` step belongs to it.
-- Every turn must end with an `assistant` step: a tool call may not be the last
-  thing in a turn, because the model has to answer its result.
+- A reply ends its turn. The **last** step of a turn must be `assistant`, and no
+  earlier step in that turn may be: a `tool_call` is followed by another
+  inference, which is how multi-call turns work. The loader rejects the other
+  order, because a stray reply would silently push the remaining scripts into the
+  next stage.
 - `tool_call` runs the real built-in tool against the scratch workspace. The
   next step is the following inference, so a tool call and its result are always
   a real round trip.
 - `assistant` is one completed response with one text block. `say` adds a text
   block before the call.
+- A history command that is expected to **fail** must not let stdout and stderr
+  interleave: the replay must be byte-comparable across plans and strategies. For
+  example capture them separately —
+  `out=$(sh main.sh 2>/dev/null); status=$?; printf 'stdout=<%s> status=%s\n' "$out" "$status"`.
 
 Validation requires 4–8 turns, at least 2 tool calls and at least 2 requirements.
 `scripted/continue.jsonl` uses the same vocabulary without `user`, and must end
 with an `assistant` step.
+
+**The history must make real, incomplete progress.** At least one coverable turn
+(not one of the two retained turns, and not a controlled turn) writes or edits a
+file for real, so the task is half-done at the pre-compaction boundary:
+`modified_files.json` names exactly the files whose bytes the history changed, and
+the task's hidden check still fails there. The continuation finishes the work. The
+S02 gate asserts all of this by diffing the scratch workspace against the task's
+pristine copy at the boundary:
+`every_task_declares_exactly_the_files_its_history_changed`. A path that merely
+exists is never accepted as evidence that it changed.
 
 ### `requirements.json`
 
@@ -120,16 +137,30 @@ exits 0 only when the task is complete. Requirements for a check:
 
 - every task's check must contain the marker `# harness-eval hidden check:` so the
   suite can prove it knows where the check's text lives;
-- it must fail on the pre-task workspace (the gate asserts this) and pass after a
-  correct continuation;
-- it must not need the network, and must ignore `.harness-eval-check.sh` (see
-  below) — list the files it inspects rather than scanning everything;
-- it must be quick: the whole offline gate has to stay within a few minutes.
+- it must fail on the pre-task workspace and on the workspace at the
+  pre-compaction boundary, and pass after a correct continuation;
+- it must not need the network;
+- it must be quick: the whole offline gate has to stay within a few minutes;
+- it must enforce the task's **allowed file set** (`find . -type f`, excluding
+  only `.harness-eval-check.sh`), so an arbitrary extra file fails;
+- a protected file must be compared against its **trusted original bytes**
+  (including the final newline), not against a hash of whatever is there;
+- output identity must be compared **byte for byte, including the final newline**.
+  Command substitution strips trailing newlines, so capture with a sentinel:
+  `out=$(sh main.sh; printf '\037'); out=${out%"$sentinel"}`;
+- it must not depend on files it creates: the check runs in the workspace, so end
+  by leaving it as the solution left it.
 
-The runner copies the check into the workspace as `.harness-eval-check.sh`
-immediately before running it and removes it afterwards, so the check is never
-in the workspace while the model runs. The eval gate asserts that no continuation
+The runner publishes the check into the workspace as `.harness-eval-check.sh`
+immediately before running it and removes it afterwards, so the check is never in
+the workspace while the model runs. The eval gate asserts that no continuation
 request contains the marker, the file name or the phrase "hidden check".
+
+Publication is **exclusive and never follows a link**: the carrier name is
+model-controlled, so a pre-existing file, symlink or hardlink there is refused
+(`check_carrier_exists`) without touching its target, and the check does not run.
+Only a file the runner created is removed, and a publication or cleanup failure
+is never reported as a successful check.
 
 ### `controls.json`
 
@@ -179,17 +210,29 @@ Per task × strategy × repetition:
    and terminal clients use, with the strategy recorded in its configuration and
    an independent summary model when the strategy needs one.
 3. Replay `history.jsonl` through `SessionHandle`. Tool calls execute for real
-   through the product's tool host and Bubblewrap.
+   through the product's tool host and Bubblewrap. The **same scripted history is
+   replayed in live mode too** — a comparison needs one fixed pre-compaction
+   conversation — and only the summary, probe and continuation are answered by the
+   live provider. The runner records the workspace at the pre-compaction boundary
+   and the exact history requests, so the gate can show the replay is identical
+   across plans and strategies and that exactly one compaction is committed.
 4. Apply `controls.json` with `Command::SetContextControl`.
 5. Run **one** compaction through the product commands: `PreviewCompaction`, then
    `CommitCompaction` of that exact preview. It is forced regardless of the budget
    trigger.
 6. Score the post-compaction projection.
-7. Ask the probe and score its answer.
+7. Ask the probe and score its answer (the harness's only model-facing question).
 8. Send `continue.md` and let the model work through the normal tool loop with a
    turn and inference cap.
-9. Close the session, then run the hidden check in the sandbox against the
-   scratch workspace.
+9. Close the session — **awaiting** `shutdown` on every exit path, success or
+   failure — then run the hidden check in the sandbox against the scratch
+   workspace.
+
+Every stage failure is attributed to its own slot (`replay`, `control`,
+`compaction`, `probe`, `continuation`), a timed-out stage reports
+`stage_timeout`, and the hidden check runs only when every preceding stage
+succeeded. A check that runs and fails is the `completion: false` metric, not an
+error.
 
 ### Auto-approval
 
@@ -203,30 +246,52 @@ root are all per-cell, and nothing outside them is authorized.
 
 ## Records and aggregates
 
-Each record carries the harness commit (`--commit`, normally
-`git rev-parse HEAD`), the task fingerprint (a SHA-256 over the task directory's
-sorted `path, length, sha256` manifest), the strategy name and version as written
-into the committed compaction entry, the session and summary models, the
-compaction policy fingerprint (which hashes the strategy name, its version and the
-compaction configuration), the estimator method and version, token estimates
-before and after, the metrics, per-stage durations, per-stage error codes and the
-repetition index (`seed`).
+Schema 2. Each record carries the harness commit, the task fingerprint (a SHA-256
+over the task directory's sorted `path, length, sha256` manifest), the strategy
+name and version as written into the committed compaction entry, the session and
+summary models, the estimator method and version, token estimates before and
+after, the metrics, per-stage durations, per-stage error codes and the repetition
+index (`seed`).
 
-Aggregates sum counts per strategy and per task. They contain no durations, no
-identities and no floats, so **two runs of the same suite write byte-identical
-`aggregate.json` and `aggregate.md`**. `cargo test -p harness-eval --test
-offline_gate -- --ignored` asserts exactly that, and also that two runs' records
-are equal apart from `durations_ms`.
+Provenance has **two separate configuration identities** (M6 decision 15):
+
+| Field | What it is |
+| --- | --- |
+| `session_configuration` | the exact digest of the session configuration artifact the committed compaction entry binds: instructions, execution policy and compaction policy |
+| `compaction_policy` | the compaction-policy fingerprint: strategy name, its version and the compaction configuration |
+
+They are not interchangeable. Changing a workspace instruction (for example
+`AGENTS.md`) changes `session_configuration` and leaves `compaction_policy` alone;
+changing the strategy or its configuration changes both.
+
+The commit is never `unknown`. `--commit` must be a 40-character commit id, and
+when it is absent the binary reads `HEAD` from the checkout itself (a `.git`
+directory or a linked worktree's `gitdir`); if that fails it exits 2 and asks for
+`--commit`. `scripts/eval.sh` passes `git rev-parse HEAD` automatically.
+
+Aggregates sum counts per strategy and per task, and group by `compaction_policy`.
+They contain no durations, no identities, no floats and **not** the raw
+`session_configuration` digest, which embeds the ephemeral scratch path. So **two
+runs of the same suite write byte-identical `aggregate.json` and
+`aggregate.md`** — that aggregate, not the raw record, is the deterministic
+comparison. `cargo test -p harness-eval --test offline_gate -- --ignored` asserts
+it, and also that two records are equal apart from `durations_ms` and
+`session_configuration`.
 
 ## Adding a task
 
 1. Create `eval/tasks/<name>/` with the files above.
-2. Write the history so it makes at least two real tool calls and states at least
-   two requirements in the first turn.
-3. Write the matchers against the phrases you actually state, and check that each
+2. Write the history so it makes at least two real tool calls, states at least two
+   requirements in the first turn, and **changes files for real in a coverable
+   turn**, leaving the task half-done.
+3. List exactly the changed paths in `modified_files.json`; the gate compares them
+   with the workspace at the pre-compaction boundary.
+4. Write the matchers against the phrases you actually state, and check that each
    requirement's `text` satisfies its own matcher.
-4. Write `check.sh` so it fails on `workspace/` as checked in, and passes after the
-   continuation in `scripted/continue.jsonl`.
-5. Run `cargo test -p harness-eval` (format) and
+5. Write `check.sh` so it fails on `workspace/` as checked in *and* on the
+   half-done workspace, and passes after the continuation in
+   `scripted/continue.jsonl`. Enforce the allowed file set, compare protected
+   files with trusted bytes and compare output bytes including the final newline.
+6. Run `cargo test -p harness-eval` (format) and
    `cargo test -p harness-eval --test offline_gate -- --ignored` (mechanics).
-6. If the task should exercise pins or exclusions, add `controls.json`.
+7. If the task should exercise pins or exclusions, add `controls.json`.

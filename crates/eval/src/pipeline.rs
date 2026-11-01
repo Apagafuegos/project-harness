@@ -9,18 +9,23 @@
 //! Bubblewrap sandbox. Nothing here is a second implementation of the product.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use harness::{wiring, wiring::SessionOptions};
 use harness_core::{
-    context::{ContextItem, ContextReport, ItemKind, Part, StrategyId},
+    context::{
+        ContextItem, ContextReport, ItemKind, Part, StrategyId, compaction::CompactionPreview,
+    },
     model::{
-        ModelProvider, ProviderEvent,
+        ModelEventStream, ModelProvider, ModelRequest, OperationControl, ProviderEvent,
         scripted::{Script, ScriptedProvider, Step as ModelStep},
     },
     runtime::*,
@@ -42,8 +47,9 @@ pub const PROBE_PROMPT: &str = "Before we continue: restate (a) every requiremen
 conversation and (b) every file changed so far. Be concise and use your own words only for the \
 restatement.";
 
-/// Bounds on one stage, so a stuck runtime fails the run instead of the gate.
-const STAGE_TIMEOUT: Duration = Duration::from_secs(180);
+/// Default bound on one stage, so a stuck runtime fails the run instead of the
+/// gate.
+pub const STAGE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// How the post-history stages are answered.
 #[derive(Clone)]
@@ -72,6 +78,9 @@ pub struct RunOptions {
     pub summary_model: Option<ModelRef>,
     /// Runtime defaults, with the sourced model catalog already installed.
     pub driver: DriverConfig,
+    /// Per-stage deadline. Production uses [`STAGE_TIMEOUT`]; the offline gate
+    /// injects a short one to prove failure paths release the session.
+    pub stage_timeout: Duration,
 }
 
 /// One cell's scores plus the texts they were computed from.
@@ -84,12 +93,67 @@ pub struct TaskRun {
     pub probe_text: String,
     /// Every request the continuation sent, rendered for leak assertions.
     pub continuation_requests: Vec<String>,
+    /// Every request the replayed history sent, rendered in order. Identical
+    /// across plans and strategies that replay the same task.
+    pub history_requests: Vec<String>,
+    /// Workspace paths whose bytes differ from the task's pristine workspace at
+    /// the pre-compaction boundary, sorted. The ground truth for
+    /// `modified_files.json`.
+    pub pre_compaction_changes: Vec<String>,
+    /// A copy of the workspace at the pre-compaction boundary, before the
+    /// continuation ran. Absent when the cell failed before that boundary.
+    pub pre_compaction_workspace: Option<PathBuf>,
+    /// Compaction entries on the final branch. One cell must commit exactly one.
+    pub compactions: usize,
     /// The scratch workspace, for the hidden check the caller may re-run.
     pub workspace: PathBuf,
 }
 
-/// Failure of a stage, as a stable code.
-type Stage<T> = Result<T, String>;
+/// Which stage a failure came from. Every exit is attributed, so a probe
+/// timeout can never be reported as a replay failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// History replay, session creation or an approval.
+    Replay,
+    /// Applying the task's pins and exclusions.
+    Control,
+    /// Preview or commit of the one compaction.
+    Compaction,
+    /// The probe turn, or building the post-compaction projection.
+    Probe,
+    /// The continuation turn.
+    Continuation,
+}
+
+/// A stage failure: where it happened and its stable code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StageFailure {
+    /// The stage that failed.
+    pub stage: Stage,
+    /// Stable code, such as `stage_timeout` or a product rejection code.
+    pub code: String,
+}
+
+impl StageFailure {
+    /// A failure at `stage` with `code`.
+    pub fn new(stage: Stage, code: impl Into<String>) -> Self {
+        Self {
+            stage,
+            code: code.into(),
+        }
+    }
+}
+
+trait StageResult<T> {
+    /// Attribute a bare code to the stage being run.
+    fn at(self, stage: Stage) -> Result<T, StageFailure>;
+}
+
+impl<T> StageResult<T> for Result<T, String> {
+    fn at(self, stage: Stage) -> Result<T, StageFailure> {
+        self.map_err(|code| StageFailure::new(stage, code))
+    }
+}
 
 /// Run one task × strategy × repetition cell.
 pub async fn run_task(
@@ -126,9 +190,12 @@ pub async fn run_task(
     let mut projection_text = String::new();
     let mut probe_text = String::new();
     let mut continuation_requests = Vec::new();
+    let mut history_requests = Vec::new();
+    let mut pre_compaction_changes = Vec::new();
+    let mut pre_compaction_workspace = None;
+    let mut compactions = 0;
 
-    let prepared = prepare_scratch(task, &scratch, &workspace, &state);
-    if let Err(error) = prepared {
+    if let Err(error) = prepare_scratch(task, &scratch, &workspace, &state) {
         record.errors.replay = Some("scratch_unavailable".into());
         record.durations_ms.total_ms = millis(started);
         eprintln!("{}: scratch: {error}", task.name());
@@ -137,11 +204,18 @@ pub async fn run_task(
             projection_text,
             probe_text,
             continuation_requests,
+            history_requests,
+            pre_compaction_changes,
+            pre_compaction_workspace,
+            compactions,
             workspace,
         };
     }
 
-    match drive(
+    // Every post-open exit inside `drive` awaits the session's shutdown before it
+    // returns, so the hidden check can never be published while inference,
+    // driver or executor work is still live.
+    let observed = drive(
         task,
         strategy,
         options,
@@ -153,20 +227,21 @@ pub async fn run_task(
         &mut projection_text,
         &mut probe_text,
         &mut continuation_requests,
+        &mut history_requests,
+        &mut pre_compaction_changes,
+        &mut pre_compaction_workspace,
+        &mut compactions,
     )
-    .await
-    {
-        Ok(()) => {}
-        Err(code) => {
-            if record.errors.replay.is_none() {
-                record.errors.replay = Some(code);
-            }
-        }
+    .await;
+    if let Err(failure) = observed {
+        record.errors.set(failure.stage, failure.code);
     }
 
-    // The hidden check runs after the session is closed, so nothing the check
-    // does can reach the model and nothing the model did can see the check.
-    if record.errors.compaction.is_none() && record.errors.continuation.is_none() {
+    // The hidden check runs only when every preceding stage succeeded and the
+    // session is closed and drained: nothing the check does can reach a model,
+    // and no model or tool work is still pending while it runs.
+    let publishable = record.errors.is_clear() && record.metrics.is_some();
+    if publishable {
         let check_started = Instant::now();
         let outcome = check.run_check(task.check(), &workspace);
         record.durations_ms.check_ms = millis(check_started);
@@ -174,8 +249,8 @@ pub async fn run_task(
             metrics.completion = Some(outcome.passed);
         }
         // A check that ran and failed is a metric (`completion: false`), not a
-        // mechanical error; only an executor failure that prevented the check
-        // from running is recorded as an error code.
+        // mechanical error; only a failure that prevented the check from running
+        // to a verdict is recorded as an error code.
         if outcome
             .code
             .as_deref()
@@ -190,10 +265,15 @@ pub async fn run_task(
         projection_text,
         probe_text,
         continuation_requests,
+        history_requests,
+        pre_compaction_changes,
+        pre_compaction_workspace,
+        compactions,
         workspace,
     }
 }
 
+/// Open the session, run every stage, and always await shutdown.
 #[allow(clippy::too_many_arguments)]
 async fn drive(
     task: &Task,
@@ -207,14 +287,23 @@ async fn drive(
     projection_text: &mut String,
     probe_text: &mut String,
     continuation_requests: &mut Vec<String>,
-) -> Stage<()> {
-    let (scripted, provider): (Option<Arc<ScriptedProvider>>, Arc<dyn ModelProvider>) = match plan {
-        ModelPlan::Scripted => {
-            let provider = Arc::new(ScriptedProvider::new([]));
-            (Some(provider.clone()), provider as Arc<dyn ModelProvider>)
-        }
-        ModelPlan::Live(provider) => (None, provider.clone()),
+    history_requests: &mut Vec<String>,
+    pre_compaction_changes: &mut Vec<String>,
+    pre_compaction_workspace: &mut Option<PathBuf>,
+    compactions: &mut usize,
+) -> Result<(), StageFailure> {
+    let scripted = Arc::new(ScriptedProvider::new([]));
+    // The fixed history is replayed from the scripts in **both** plans; only the
+    // post-history stages go to a live provider.
+    let later: Arc<dyn ModelProvider> = match plan {
+        ModelPlan::Scripted => scripted.clone(),
+        ModelPlan::Live(provider) => provider.clone(),
     };
+    let phase = Arc::new(PhaseProvider {
+        scripted: scripted.clone(),
+        later,
+        replaying_history: AtomicBool::new(true),
+    });
     let mut known_instances = vec![options.model.provider_instance.clone()];
     if let Some(summary) = summary_model {
         known_instances.push(summary.provider_instance.clone());
@@ -240,86 +329,154 @@ async fn drive(
             ..SandboxConfig::default()
         }),
     };
-    let wired = wiring::open_session(&session_options, provider.clone())
+    let wired = wiring::open_session(&session_options, phase.clone())
         .await
-        .map_err(|(_, code)| code)?;
+        .map_err(|(_, code)| StageFailure::new(Stage::Replay, code))?;
     let handle = &wired.handle;
     let mut session = Session {
         handle,
-        scripted: scripted.as_ref(),
+        scripted: &scripted,
+        phase: &phase,
         submitted: BTreeSet::new(),
+        timeout: options.stage_timeout,
+        workspace,
     };
+    let outcome = run_stages(
+        &mut session,
+        task,
+        strategy,
+        record,
+        projection_text,
+        probe_text,
+        continuation_requests,
+        history_requests,
+        pre_compaction_changes,
+        pre_compaction_workspace,
+        compactions,
+    )
+    .await;
+    // One awaited shutdown on every path, success or failure, before the caller
+    // is allowed to run the hidden check.
+    handle.shutdown().await;
+    outcome
+}
 
-    // 1. Replay the history through the real runtime.
-    let replay_started = Instant::now();
-    let mut turn_ids = Vec::new();
-    for (index, turn) in task.turns().iter().enumerate() {
-        if let Some(scripted) = session.scripted {
-            for step in &turn.steps {
-                scripted.push(script_for(step));
-            }
+/// Delegate every request to the scripted provider until the fixed history has
+/// replayed, then to the plan's provider.
+struct PhaseProvider {
+    scripted: Arc<ScriptedProvider>,
+    later: Arc<dyn ModelProvider>,
+    replaying_history: AtomicBool,
+}
+
+impl ModelProvider for PhaseProvider {
+    fn stream(&self, request: ModelRequest, control: OperationControl) -> ModelEventStream {
+        if self.replaying_history.load(Ordering::Acquire) {
+            self.scripted.stream(request, control)
+        } else {
+            self.later.stream(request, control)
         }
-        let turn_id = session.start(&turn.prompt).await?;
-        session.settle().await?;
-        let snapshot = session.snapshot().await?;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_stages(
+    session: &mut Session<'_>,
+    task: &Task,
+    strategy: StrategyId,
+    record: &mut Record,
+    projection_text: &mut String,
+    probe_text: &mut String,
+    continuation_requests: &mut Vec<String>,
+    history_requests: &mut Vec<String>,
+    pre_compaction_changes: &mut Vec<String>,
+    pre_compaction_workspace: &mut Option<PathBuf>,
+    compactions: &mut usize,
+) -> Result<(), StageFailure> {
+    let handle = session.handle;
+
+    // 1. Replay the fixed history through the real runtime.
+    let replay_started = Instant::now();
+    let streams_before = session.scripted.streams().len();
+    let mut turn_ids = Vec::new();
+    for turn in task.turns() {
+        for step in &turn.steps {
+            session.scripted.push(script_for(step));
+        }
+        let turn_id = session.start(&turn.prompt).await.at(Stage::Replay)?;
+        session.settle().await.at(Stage::Replay)?;
+        let snapshot = session.snapshot().await.at(Stage::Replay)?;
         let (outcome, code) = turn_result(&snapshot, &turn_id);
         if outcome != TurnOutcome::Completed {
-            record.errors.replay = Some(code.unwrap_or_else(|| format!("turn_{}", index + 1)));
-            handle.shutdown().await;
-            return Ok(());
+            return Err(StageFailure::new(
+                Stage::Replay,
+                code.unwrap_or_else(|| "history_turn_incomplete".into()),
+            ));
         }
         turn_ids.push(turn_id);
     }
+    for stream in session.scripted.streams().into_iter().skip(streams_before) {
+        // Instructions are fixed scaffolding that embeds the absolute workspace
+        // path, so only the dialogue is comparable across cells.
+        history_requests.push(render_dialogue(&stream.request.input.items));
+    }
+    session.expect_scripts_consumed(Stage::Replay, "unconsumed_history_scripts")?;
     record.durations_ms.replay_ms = millis(replay_started);
 
     // 2. Apply the task's controls, before compacting.
     for ordinal in &task.controls().pin {
         session
             .control(&turn_ids[ordinal - 1], ContextMode::Pinned)
-            .await?;
+            .await
+            .at(Stage::Control)?;
     }
     for ordinal in &task.controls().exclude {
         session
             .control(&turn_ids[ordinal - 1], ContextMode::Excluded)
-            .await?;
+            .await
+            .at(Stage::Control)?;
     }
 
+    // The ground truth for file recall: what the replayed history actually
+    // changed, compared with the task's pristine bytes. A path existing in the
+    // workspace is not evidence that it changed.
+    *pre_compaction_changes = changed_paths(task.workspace(), session.workspace())
+        .map_err(|error| StageFailure::new(Stage::Control, format!("workspace_diff:{error}")))?;
+    // A copy of the workspace at the pre-compaction boundary, so the gate can show
+    // the task is still incomplete before the continuation.
+    *pre_compaction_workspace = Some(session.snapshot_workspace().map_err(|error| {
+        StageFailure::new(Stage::Control, format!("pre_compaction_snapshot:{error}"))
+    })?);
+
     // 3. One compaction, through the real commands, forced regardless of budget.
+    // The history has replayed, so the configured provider takes over here.
+    session.begin_post_history();
     let compaction_started = Instant::now();
-    if strategy.needs_model()
-        && let Some(scripted) = &session.scripted
-    {
-        scripted.push(reply_script(&task.scripted().summary));
+    if strategy.needs_model() {
+        session
+            .scripted
+            .push(reply_script(&task.scripted().summary));
     }
-    let preview = match handle.command(Command::PreviewCompaction).await {
-        Ok(Accepted::CompactionPreviewed {
-            preview_id,
-            preview,
-        }) => Some((preview_id, preview)),
-        Ok(other) => {
-            record.errors.compaction = Some(format!("unexpected_reply:{}", kind_name(&other)));
-            None
-        }
-        Err(rejection) => {
-            record.errors.compaction = Some(rejection_code(&rejection));
-            None
-        }
-    };
+    let preview = session.preview_compaction().await?;
     let Some((preview_id, preview)) = preview else {
-        handle.shutdown().await;
         record.durations_ms.compaction_ms = millis(compaction_started);
         return Ok(());
     };
     {
         let EntryPayload::Compaction(compaction) = &preview.entry.payload else {
-            record.errors.compaction = Some("preview_is_not_a_compaction".into());
-            handle.shutdown().await;
-            return Ok(());
+            return Err(StageFailure::new(
+                Stage::Compaction,
+                "preview_is_not_a_compaction",
+            ));
         };
         record.strategy = compaction.strategy.clone();
         record.strategy_version = compaction.strategy_version.clone();
         record.summary_model = compaction.model.as_ref().map(model_name);
-        record.configuration_fingerprint = Some(digest_text(&preview.binding.policy_fingerprint));
+        // M6 decision 15: two identities, never interchangeable. The exact
+        // session-configuration artifact digest the committed entry binds, and
+        // the compaction-policy fingerprint.
+        record.session_configuration = Some(digest_text(&compaction.configuration_fingerprint));
+        record.compaction_policy = Some(digest_text(&preview.binding.policy_fingerprint));
         record.estimator = Some(Estimator {
             method: estimator_method(&preview.before.totals.estimator.method),
             version: preview.before.totals.estimator.version.clone(),
@@ -329,55 +486,42 @@ async fn drive(
             after: preview.diff.after.estimated_total,
         });
     }
-    match handle
-        .command(Command::CommitCompaction { preview_id })
-        .await
-    {
-        Ok(Accepted::CompactionCommitted { .. }) => {}
-        Ok(other) => {
-            record.errors.compaction = Some(format!("unexpected_reply:{}", kind_name(&other)));
-            handle.shutdown().await;
-            return Ok(());
-        }
-        Err(rejection) => {
-            record.errors.compaction = Some(rejection_code(&rejection));
-            handle.shutdown().await;
-            return Ok(());
-        }
-    }
+    session.commit_compaction(preview_id).await?;
     record.durations_ms.compaction_ms = millis(compaction_started);
 
     // 4. Score the post-compaction projection.
-    let snapshot = session.snapshot().await?;
+    let snapshot = session.snapshot().await.at(Stage::Probe)?;
     let report = handle
         .inspect_context(None, None)
         .await
-        .map_err(|error| format!("inspect: {error:?}"))?;
+        .map_err(|error| StageFailure::new(Stage::Probe, format!("inspect: {error:?}")))?;
     *projection_text = render_projection(&snapshot, &report);
     let projection_score = score(task, projection_text);
+    *compactions = snapshot
+        .ancestry(snapshot.head())
+        .map(|branch| {
+            branch
+                .iter()
+                .filter(|stored| matches!(stored.entry.payload, EntryPayload::Compaction(_)))
+                .count()
+        })
+        .unwrap_or(0);
 
     // 5. Ask the probe and score its answer.
     let probe_started = Instant::now();
-    if let Some(scripted) = &session.scripted {
-        scripted.push(reply_script(&task.scripted().probe));
-    }
-    let probe_turn = match session.start(PROBE_PROMPT).await {
-        Ok(turn) => turn,
-        Err(code) => {
-            record.errors.probe = Some(code);
-            handle.shutdown().await;
-            return Ok(());
-        }
-    };
-    session.settle().await?;
-    let snapshot = session.snapshot().await?;
+    session.scripted.push(reply_script(&task.scripted().probe));
+    let probe_turn = session.start(PROBE_PROMPT).await.at(Stage::Probe)?;
+    session.settle().await.at(Stage::Probe)?;
+    let snapshot = session.snapshot().await.at(Stage::Probe)?;
     let (outcome, code) = turn_result(&snapshot, &probe_turn);
     if outcome != TurnOutcome::Completed {
-        record.errors.probe = Some(code.unwrap_or_else(|| "probe_failed".into()));
-        handle.shutdown().await;
-        return Ok(());
+        return Err(StageFailure::new(
+            Stage::Probe,
+            code.unwrap_or_else(|| "probe_incomplete".into()),
+        ));
     }
     *probe_text = assistant_text(&snapshot, &probe_turn);
+    session.expect_scripts_consumed(Stage::Probe, "unconsumed_probe_scripts")?;
     record.durations_ms.probe_ms = millis(probe_started);
     let probe_score = score(task, probe_text);
 
@@ -393,55 +537,82 @@ async fn drive(
 
     // 6. Continue the task through the normal tool loop.
     let continuation_started = Instant::now();
-    let streams_before = session.scripted.map(|provider| provider.streams().len());
-    if let (Some(scripted), ModelPlan::Scripted) = (&session.scripted, plan) {
-        for step in &task.scripted().continuation {
-            scripted.push(script_for(step));
-        }
+    let streams_before = session.scripted.streams().len();
+    for step in &task.scripted().continuation {
+        session.scripted.push(script_for(step));
     }
-    let continuation_turn = match session.start(task.continue_prompt()).await {
-        Ok(turn) => turn,
-        Err(code) => {
-            record.errors.continuation = Some(code);
-            handle.shutdown().await;
-            return Ok(());
-        }
-    };
-    session.settle().await?;
-    let snapshot = session.snapshot().await?;
+    let continuation_turn = session
+        .start(task.continue_prompt())
+        .await
+        .at(Stage::Continuation)?;
+    session.settle().await.at(Stage::Continuation)?;
+    let snapshot = session.snapshot().await.at(Stage::Continuation)?;
     let (outcome, code) = turn_result(&snapshot, &continuation_turn);
     if outcome != TurnOutcome::Completed {
-        record.errors.continuation = Some(code.unwrap_or_else(|| "continuation_failed".into()));
+        return Err(StageFailure::new(
+            Stage::Continuation,
+            code.unwrap_or_else(|| "continuation_incomplete".into()),
+        ));
     }
-    if let (Some(scripted), Some(before)) = (session.scripted, streams_before) {
-        for record in scripted.streams().into_iter().skip(before) {
-            continuation_requests.push(render_items(&record.request.input.items));
-        }
+    for stream in session.scripted.streams().into_iter().skip(streams_before) {
+        continuation_requests.push(render_items(&stream.request.input.items));
     }
+    session.expect_scripts_consumed(Stage::Continuation, "unconsumed_continuation_scripts")?;
     record.durations_ms.continuation_ms = millis(continuation_started);
-    handle.shutdown().await;
     Ok(())
 }
 
 struct Session<'a> {
     handle: &'a SessionHandle,
-    scripted: Option<&'a Arc<ScriptedProvider>>,
+    scripted: &'a Arc<ScriptedProvider>,
+    phase: &'a Arc<PhaseProvider>,
     submitted: BTreeSet<ApprovalId>,
+    timeout: Duration,
+    workspace: &'a Path,
 }
 
-impl Session<'_> {
-    async fn start(&mut self, prompt: &str) -> Stage<TurnId> {
-        let reply = tokio::time::timeout(
-            STAGE_TIMEOUT,
-            self.handle.command(Command::StartTurn {
+impl<'a> Session<'a> {
+    fn workspace(&self) -> &'a Path {
+        self.workspace
+    }
+
+    /// Every script pushed for a finished stage must have been consumed. A
+    /// leftover script would be served to the next stage, so this is a hard
+    /// failure rather than a silently corrupted run.
+    fn expect_scripts_consumed(&self, stage: Stage, code: &str) -> Result<(), StageFailure> {
+        let remaining = self.scripted.remaining();
+        if remaining == 0 {
+            return Ok(());
+        }
+        Err(StageFailure::new(stage, format!("{code}:{remaining}_left")))
+    }
+
+    /// Copy the workspace beside itself, for the pre-compaction boundary.
+    fn snapshot_workspace(&self) -> Result<PathBuf, String> {
+        let target = self
+            .workspace
+            .parent()
+            .ok_or_else(|| "workspace has no parent".to_owned())?
+            .join("pre-compaction");
+        copy_workspace(self.workspace, &target).map_err(|error| error.to_string())?;
+        Ok(target)
+    }
+
+    /// Hand every later request to the plan's provider. Called once, after the
+    /// fixed history has replayed and before the compaction preview.
+    fn begin_post_history(&self) {
+        self.phase.replaying_history.store(false, Ordering::Release);
+    }
+
+    async fn start(&mut self, prompt: &str) -> Result<TurnId, String> {
+        let reply = self
+            .bounded(self.handle.command(Command::StartTurn {
                 command_id: CommandId::new(),
                 content: vec![ContentBlock::Text {
                     text: prompt.to_owned(),
                 }],
-            }),
-        )
-        .await
-        .map_err(|_| "start_timeout".to_owned())?;
+            }))
+            .await?;
         match reply {
             Ok(Accepted::TurnStarted { turn_id, .. }) => Ok(turn_id),
             Ok(other) => Err(format!("unexpected_reply:{}", kind_name(&other))),
@@ -449,14 +620,13 @@ impl Session<'_> {
         }
     }
 
-    async fn control(&mut self, turn: &TurnId, mode: ContextMode) -> Stage<()> {
+    async fn control(&mut self, turn: &TurnId, mode: ContextMode) -> Result<(), String> {
         match self
-            .handle
-            .command(Command::SetContextControl {
+            .bounded(self.handle.command(Command::SetContextControl {
                 turn_id: turn.clone(),
                 mode,
-            })
-            .await
+            }))
+            .await?
         {
             Ok(Accepted::ContextControlSet { .. }) => Ok(()),
             Ok(other) => Err(format!("unexpected_reply:{}", kind_name(&other))),
@@ -464,7 +634,53 @@ impl Session<'_> {
         }
     }
 
-    async fn snapshot(&self) -> Stage<SessionSnapshot> {
+    /// Generate the one preview. `None` means the refusal or failure is already
+    /// recorded in `record.errors.compaction` and the cell stops here.
+    async fn preview_compaction(
+        &mut self,
+    ) -> Result<Option<(EntryId, Box<CompactionPreview>)>, StageFailure> {
+        let reply = self
+            .bounded(self.handle.command(Command::PreviewCompaction))
+            .await
+            .map_err(|code| StageFailure::new(Stage::Compaction, code))?;
+        match reply {
+            Ok(Accepted::CompactionPreviewed {
+                preview_id,
+                preview,
+            }) => Ok(Some((preview_id, preview))),
+            Ok(other) => Err(StageFailure::new(
+                Stage::Compaction,
+                format!("unexpected_reply:{}", kind_name(&other)),
+            )),
+            Err(rejection) => Err(StageFailure::new(
+                Stage::Compaction,
+                rejection_code(&rejection),
+            )),
+        }
+    }
+
+    async fn commit_compaction(&mut self, preview_id: EntryId) -> Result<(), StageFailure> {
+        let reply = self
+            .bounded(
+                self.handle
+                    .command(Command::CommitCompaction { preview_id }),
+            )
+            .await
+            .map_err(|code| StageFailure::new(Stage::Compaction, code))?;
+        match reply {
+            Ok(Accepted::CompactionCommitted { .. }) => Ok(()),
+            Ok(other) => Err(StageFailure::new(
+                Stage::Compaction,
+                format!("unexpected_reply:{}", kind_name(&other)),
+            )),
+            Err(rejection) => Err(StageFailure::new(
+                Stage::Compaction,
+                rejection_code(&rejection),
+            )),
+        }
+    }
+
+    async fn snapshot(&self) -> Result<SessionSnapshot, String> {
         Ok(self
             .handle
             .view()
@@ -473,10 +689,17 @@ impl Session<'_> {
             .snapshot)
     }
 
+    /// Bound one command by this run's stage deadline.
+    async fn bounded<T>(&self, future: impl std::future::Future<Output = T>) -> Result<T, String> {
+        tokio::time::timeout(self.timeout, future)
+            .await
+            .map_err(|_| "stage_timeout".to_owned())
+    }
+
     /// Poll the runtime until the turn is finished, answering every approval the
     /// eval is asked for. This is the only auto-approval in the harness.
-    async fn settle(&mut self) -> Stage<RuntimeView> {
-        let deadline = tokio::time::Instant::now() + STAGE_TIMEOUT;
+    async fn settle(&mut self) -> Result<RuntimeView, String> {
+        let deadline = tokio::time::Instant::now() + self.timeout;
         loop {
             let view = self
                 .handle
@@ -491,17 +714,15 @@ impl Session<'_> {
             if let Some(ticket) = view.pending_approval.clone()
                 && self.submitted.insert(ticket.approval_id.clone())
             {
-                let reply = tokio::time::timeout(
-                    STAGE_TIMEOUT,
-                    self.handle.command(Command::SubmitApproval {
+                let reply = self
+                    .bounded(self.handle.command(Command::SubmitApproval {
                         approval_id: ticket.approval_id,
                         plan_digest: ticket.plan_digest,
                         decision: Decision::Allow,
                         remember: false,
-                    }),
-                )
-                .await
-                .map_err(|_| "approval_timeout".to_owned())?;
+                    }))
+                    .await
+                    .map_err(|code| format!("approval:{code}"))?;
                 if let Err(rejection) = reply {
                     return Err(format!("approval:{}", rejection_code(&rejection)));
                 }
@@ -515,6 +736,76 @@ impl Session<'_> {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
+}
+
+/// Relative paths whose bytes differ between `pristine` and `current`, including
+/// additions and deletions, sorted. Symlinks, special files and unreadable
+/// entries are reported as differences rather than followed. This is the ground
+/// truth for `modified_files.json`: a path that merely exists is not a change.
+pub fn changed_paths(pristine: &Path, current: &Path) -> Result<Vec<String>, String> {
+    fn collect(
+        root: &Path,
+        out: &mut Vec<(String, Option<Vec<u8>>)>,
+        prefix: &Path,
+    ) -> Result<(), String> {
+        let entries = fs::read_dir(root).map_err(|error| format!("{}: {error}", root.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("{}: {error}", root.display()))?;
+            let name = entry
+                .file_name()
+                .to_str()
+                .ok_or_else(|| format!("{}: non-UTF-8 name", root.display()))?
+                .to_owned();
+            if name == crate::check::CHECK_FILE || name == ".git" {
+                continue;
+            }
+            let relative = prefix.join(&name);
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+            if metadata.file_type().is_symlink() {
+                out.push((
+                    relative.to_string_lossy().into_owned(),
+                    Some(b"<symlink>".to_vec()),
+                ));
+            } else if metadata.is_dir() {
+                collect(&entry.path(), out, &relative)?;
+            } else if metadata.is_file() {
+                let bytes = fs::read(entry.path())
+                    .map_err(|error| format!("{}: {error}", entry.path().display()))?;
+                out.push((relative.to_string_lossy().into_owned(), Some(bytes)));
+            } else {
+                out.push((
+                    relative.to_string_lossy().into_owned(),
+                    Some(b"<special>".to_vec()),
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut pristine_files = Vec::new();
+    let mut current_files = Vec::new();
+    collect(pristine, &mut pristine_files, Path::new(""))?;
+    collect(current, &mut current_files, Path::new(""))?;
+    let to_map = |files: Vec<(String, Option<Vec<u8>>)>| -> BTreeMap<String, Option<Vec<u8>>> {
+        files.into_iter().collect()
+    };
+    let pristine = to_map(pristine_files);
+    let current = to_map(current_files);
+    let mut changed = BTreeSet::new();
+    for (path, bytes) in &current {
+        match pristine.get(path) {
+            Some(previous) if previous == bytes => {}
+            _ => {
+                changed.insert(path.clone());
+            }
+        }
+    }
+    for path in pristine.keys() {
+        if !current.contains_key(path) {
+            changed.insert(path.clone());
+        }
+    }
+    Ok(changed.into_iter().collect())
 }
 
 struct Score {
@@ -601,6 +892,16 @@ fn render_projection(snapshot: &SessionSnapshot, report: &ContextReport) -> Stri
         }
     }
     parts.join("\n")
+}
+
+/// Render only the dialogue of a projection, skipping the fixed instructions.
+fn render_dialogue(items: &[ContextItem]) -> String {
+    let dialogue: Vec<ContextItem> = items
+        .iter()
+        .filter(|item| !matches!(item, ContextItem::Instructions { .. }))
+        .cloned()
+        .collect();
+    render_items(&dialogue)
 }
 
 fn render_items(items: &[ContextItem]) -> String {
