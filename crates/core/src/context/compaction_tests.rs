@@ -494,7 +494,7 @@ async fn summarizer_never_receives_a_controlled_entry() {
         );
     }
     // Only the instructions, the two covered turns and the fixed request turn
-    // are sent; the synthetic request identity is not covered source.
+    // are sent; the request-only prompt has no source identity.
     assert_eq!(request.input.items.len(), 6);
     let json = serde_json::to_string(&request.input.items).unwrap();
     for covered in [&turns[0], &turns[3]] {

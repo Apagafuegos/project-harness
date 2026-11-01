@@ -276,7 +276,7 @@ Read on 2026-10-31:
 
 - Selection and formats: `context::tests::compaction_tests` —
   `strategy_identity_is_closed_and_recorded` (versions 2, 1, 2),
-  `model_based_requests_end_with_one_fixed_request_only_user_turn` (decision 16:
+  `model_based_requests_end_with_one_fixed_request_only_prompt` (decision 16:
   the explicit fresh request on completed source ending in an assistant turn),
   `observation_masking_is_a_deterministic_zero_stream_golden` (checked-in
   golden, zero streams, `model` absent), `observation_masking_over_budget_fails_explicitly`
@@ -284,7 +284,7 @@ Read on 2026-10-31:
   `structured_state_extracts_are_ordered_and_untouchable`,
   `structured_state_extracts_are_bounded_with_explicit_elision`, and
   `every_strategy_skips_pinned_and_excluded_turns`.
-- Adapter: `harness_providers::anthropic::tests::deepseek::a_summary_request_ends_in_a_user_turn_over_loopback`
+- Adapter: `harness_providers::anthropic::tests::deepseek::a_summary_request_ends_in_a_user_turn_after_an_assistant_response`
   submits the shared request through the real DeepSeek Messages adapter over
   attributed loopback: a final user turn, a complete tool pair, no credential.
 - Runtime: `runtime::tests::compaction` —

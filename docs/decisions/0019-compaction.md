@@ -434,7 +434,8 @@ exactly as before. Consumers account for the item without giving it provenance
 or access: artifact enumeration adds no reference for it, masking renders nothing
 for it (a request prompt is never covered source), the builder's report check
 rejects it as `request_item_in_projection` because a projection can never contain
-one, and the eval renderer and the driver's test helper read its literal text.
+one, the eval renderer reads its literal text, and the driver's test helper labels
+it as a request.
 
 Everything else the request guarantees is unchanged: ancestral source order,
 paired calls and results with identity/status/provenance, the independent summary
