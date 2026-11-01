@@ -1,0 +1,24 @@
+{
+  "schema": 2,
+  "harness_commit": "cd14762332ad459617bd518ed9f55d08a0cab0ec",
+  "task_fingerprint": "5c9d7c792a317ab08433d49a9a1c4b8d5849e5781e37bcda871f59e899c47f21",
+  "task": "multi-file-change",
+  "shape": "multi_file",
+  "strategy": "rolling_summary",
+  "strategy_version": "1",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "repetition": 0,
+  "seed": 0,
+  "durations_ms": {
+    "total_ms": 822,
+    "replay_ms": 166,
+    "compaction_ms": 0,
+    "probe_ms": 0,
+    "continuation_ms": 0,
+    "check_ms": 0
+  },
+  "errors": {
+    "compaction": "provider_failure"
+  }
+}

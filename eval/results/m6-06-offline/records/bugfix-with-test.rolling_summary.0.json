@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "harness_commit": "cd14762332ad459617bd518ed9f55d08a0cab0ec",
+  "task_fingerprint": "bba58395cf9b5554ed8bfb6640c80f9be8503302953de8cd1340258950ab04ad",
+  "task": "bugfix-with-test",
+  "shape": "bug_fix",
+  "strategy": "rolling_summary",
+  "strategy_version": "1",
+  "session_model": "mock/scripted",
+  "summary_model": "mock/summary",
+  "session_configuration": "8e3fba7da52e5811c496425e06990347dbd6af6dfad0430e861e4225f7a5b165",
+  "compaction_policy": "93233b8a1324f2b8fac7382562b756a64831ebd9cb4fa4f7168418cca4a84872",
+  "estimator": {
+    "method": "heuristic",
+    "version": "bytes4-flat-media-v1"
+  },
+  "repetition": 0,
+  "seed": 0,
+  "tokens": {
+    "before": 650,
+    "after": 409
+  },
+  "metrics": {
+    "requirements_retained_projection": 3,
+    "requirements_retained_probe": 3,
+    "requirements_total": 3,
+    "files_recalled_projection": 2,
+    "files_recalled_probe": 2,
+    "files_total": 2,
+    "completion": true
+  },
+  "durations_ms": {
+    "total_ms": 972,
+    "replay_ms": 182,
+    "compaction_ms": 10,
+    "probe_ms": 9,
+    "continuation_ms": 121,
+    "check_ms": 178
+  },
+  "errors": {}
+}

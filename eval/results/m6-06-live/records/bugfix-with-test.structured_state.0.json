@@ -1,0 +1,24 @@
+{
+  "schema": 2,
+  "harness_commit": "cd14762332ad459617bd518ed9f55d08a0cab0ec",
+  "task_fingerprint": "bba58395cf9b5554ed8bfb6640c80f9be8503302953de8cd1340258950ab04ad",
+  "task": "bugfix-with-test",
+  "shape": "bug_fix",
+  "strategy": "structured_state",
+  "strategy_version": "1",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "repetition": 0,
+  "seed": 0,
+  "durations_ms": {
+    "total_ms": 973,
+    "replay_ms": 216,
+    "compaction_ms": 0,
+    "probe_ms": 0,
+    "continuation_ms": 0,
+    "check_ms": 0
+  },
+  "errors": {
+    "compaction": "provider_failure"
+  }
+}

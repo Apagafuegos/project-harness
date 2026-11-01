@@ -1,0 +1,24 @@
+{
+  "schema": 2,
+  "harness_commit": "cd14762332ad459617bd518ed9f55d08a0cab0ec",
+  "task_fingerprint": "82d578a2ebba9044d0206fea04d7a53e9856463a917f91f0c3e87ba102093617",
+  "task": "refactor-constraint",
+  "shape": "refactor",
+  "strategy": "structured_state",
+  "strategy_version": "1",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "repetition": 0,
+  "seed": 0,
+  "durations_ms": {
+    "total_ms": 1250,
+    "replay_ms": 181,
+    "compaction_ms": 0,
+    "probe_ms": 0,
+    "continuation_ms": 0,
+    "check_ms": 0
+  },
+  "errors": {
+    "compaction": "provider_failure"
+  }
+}

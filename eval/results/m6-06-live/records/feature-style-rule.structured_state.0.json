@@ -1,0 +1,24 @@
+{
+  "schema": 2,
+  "harness_commit": "cd14762332ad459617bd518ed9f55d08a0cab0ec",
+  "task_fingerprint": "a24fe083c6e215c5b0e7fe0e7e8a46c6f13d5004767f2da2d681f485db7f0424",
+  "task": "feature-style-rule",
+  "shape": "feature",
+  "strategy": "structured_state",
+  "strategy_version": "1",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "repetition": 0,
+  "seed": 0,
+  "durations_ms": {
+    "total_ms": 900,
+    "replay_ms": 173,
+    "compaction_ms": 0,
+    "probe_ms": 0,
+    "continuation_ms": 0,
+    "check_ms": 0
+  },
+  "errors": {
+    "compaction": "provider_failure"
+  }
+}
