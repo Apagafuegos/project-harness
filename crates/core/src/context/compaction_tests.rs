@@ -493,8 +493,9 @@ async fn summarizer_never_receives_a_controlled_entry() {
             "controlled entry {id} reached the summarizer"
         );
     }
-    // Only the instructions and the two covered turns are sent.
-    assert_eq!(request.input.items.len(), 5);
+    // Only the instructions, the two covered turns and the fixed request turn
+    // are sent; the synthetic request identity is not covered source.
+    assert_eq!(request.input.items.len(), 6);
     let json = serde_json::to_string(&request.input.items).unwrap();
     for covered in [&turns[0], &turns[3]] {
         for id in turn_entries(&journal, covered) {
@@ -1150,7 +1151,7 @@ async fn rolling_request_contains_prior_summary_and_only_new_eligible_dialogue()
     assert!(
         matches!(&request.input.items[1], ContextItem::Summary { entry_id, summary } if entry_id == &first.entry.id && summary == SUMMARY)
     );
-    assert_eq!(request.input.items.len(), 4); // fixed instructions, prior summary, one new whole turn
+    assert_eq!(request.input.items.len(), 5); // fixed instructions, prior summary, one new whole turn, the request turn
     assert_eq!(request.input.model.provider_instance, "summary");
     assert!(
         matches!(&request.input.items[0], ContextItem::Instructions { instructions } if instructions[1].text.contains("session instruction"))
@@ -1471,7 +1472,13 @@ fn strategy_identity_is_closed_and_recorded() {
     for strategy in StrategyId::ALL {
         let parsed = parse(&strategy_policy(strategy)).unwrap();
         assert_eq!(parsed.compaction().strategy, strategy);
-        assert_eq!(strategy.version(), "1");
+        // Decision 16 bumped only the two model-based prompts; masking's output
+        // did not change, so its records keep version 1.
+        let version = match strategy {
+            StrategyId::ObservationMasking => "1",
+            StrategyId::RollingSummary | StrategyId::StructuredState => "2",
+        };
+        assert_eq!(strategy.version(), version);
         assert_eq!(strategy.to_string(), strategy.as_str());
         assert_eq!(strategy.as_str().parse::<StrategyId>().unwrap(), strategy);
     }
@@ -1768,4 +1775,132 @@ async fn every_strategy_skips_pinned_and_excluded_turns() {
         assert_eq!(compaction.covered_entry_ids.len(), 4, "{id}");
         assert_accepted(&mut journal, &proposed);
     }
+}
+
+// ----- m6-side: the explicit fresh summary request (decision 16) --------------
+
+/// Both model-based strategies ask for the summary with one fixed,
+/// request-only prompt after the narrowed source. The completed source can end
+/// with an assistant response, and a request ending there is assistant prefill,
+/// which the provider rejected in the first live matrix. The prompt is not
+/// history: it carries no entry identity at all, and it is absent from coverage,
+/// the manifest, the committed entry, the projection and the artifact allowlist.
+#[tokio::test]
+async fn model_based_requests_end_with_one_fixed_request_only_prompt() {
+    for strategy in [StrategyId::RollingSummary, StrategyId::StructuredState] {
+        let mut journal = match strategy {
+            StrategyId::RollingSummary => prepared(),
+            _ => extracts_journal(),
+        };
+        let sequence = journal.snapshot().sequence();
+        let provider = Arc::new(ScriptedProvider::new([script(SUMMARY)]));
+        let proposed = propose(&journal, strategy, provider.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{strategy}: {}", error.code()));
+        assert_eq!(provider.streams().len(), 1, "{strategy}: one summary call");
+        // Generation is pure: the preview appended nothing to the journal.
+        assert_eq!(journal.snapshot().sequence(), sequence, "{strategy}");
+        let request = &provider.streams()[0].request;
+        let items = &request.input.items;
+        // The request closes with exactly one request-only prompt...
+        let Some(ContextItem::Request { text }) = items.last() else {
+            panic!("{strategy}: the request does not end with a request-only prompt")
+        };
+        assert_eq!(
+            text, SUMMARY_REQUEST_INSTRUCTION,
+            "{strategy}: the request text is fixed and quotes no source"
+        );
+        // ...which reports no source identity, so it cannot be mistaken for an
+        // entry even when an imported journal happens to hold similar bytes.
+        assert_eq!(items.last().and_then(ContextItem::entry_id), None);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(item, ContextItem::Request { .. }))
+                .count(),
+            1,
+            "{strategy}: exactly one request-only item"
+        );
+        // Every item that does name an identity names a real journal entry.
+        for item in items {
+            if let Some(id) = item.entry_id() {
+                assert!(
+                    journal.snapshot().has_identity(id.as_str()),
+                    "{strategy}: {id} is not a journal entry"
+                );
+            }
+        }
+        // ...after the narrowed source, which ends with the assistant response
+        // of a completed turn: exactly the shape the first matrix sent.
+        assert!(
+            matches!(
+                items.get(items.len() - 2),
+                Some(ContextItem::Assistant { .. })
+            ),
+            "{strategy}: the source should end with an assistant response"
+        );
+        // The prompt change is recorded in the committed strategy version: both
+        // model-based strategies are at 2, masking stays at 1.
+        let compaction = compaction_of(&proposed);
+        assert_eq!(compaction.strategy_version, "2", "{strategy}");
+        // The request-only prompt never becomes coverage, manifest or entry text.
+        assert!(
+            !String::from_utf8(proposed.manifest_bytes.clone())
+                .unwrap()
+                .contains(SUMMARY_REQUEST_INSTRUCTION),
+            "{strategy}: the manifest contains the request prompt"
+        );
+        assert!(
+            !serde_json::to_string(compaction)
+                .unwrap()
+                .contains(SUMMARY_REQUEST_INSTRUCTION),
+            "{strategy}: the committed entry contains the request prompt"
+        );
+        // The request adds no capability and no model input beyond the plan.
+        assert!(request.input.tools.is_empty(), "{strategy}");
+        assert!(request.input.continuation.is_none(), "{strategy}");
+        // The narrowed source has no media here, so an empty allowlist proves
+        // the request required no artifact capability of its own.
+        assert!(request.artifacts.references().is_empty(), "{strategy}");
+        assert_accepted(&mut journal, &proposed);
+        // The committed projection contains no request-only item.
+        let built = journal.build();
+        assert!(
+            !built
+                .projection
+                .input
+                .items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Request { .. })),
+            "{strategy}: the request leaked into the projection"
+        );
+    }
+}
+
+/// Adding the request-only variant must not disturb the projection format: no
+/// existing variant's bytes change, no projection contains the new item, and
+/// neither version constant moves, so old journals and fingerprints replay.
+#[test]
+fn request_only_item_leaves_projection_bytes_and_versions_alone() {
+    assert_eq!(PROJECTION_VERSION, 4);
+    assert_eq!(BUILDER_VERSION, 5);
+    let request = summary_request_item();
+    assert_eq!(request.entry_id(), None);
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        serde_json::json!({"kind": "request", "text": SUMMARY_REQUEST_INSTRUCTION})
+    );
+    // A user item still serializes exactly as it always did.
+    let user = ContextItem::User {
+        entry_id: EntryId::new(),
+        content: vec![text("hi")],
+    };
+    assert_eq!(
+        serde_json::to_value(&user).unwrap(),
+        serde_json::json!({
+            "kind": "user",
+            "entry_id": user.entry_id().unwrap(),
+            "content": [{"kind": "text", "text": "hi"}],
+        })
+    );
 }

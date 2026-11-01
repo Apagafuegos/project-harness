@@ -1,9 +1,11 @@
 # 0019: Rolling compaction
 
-Status: Implemented for Milestone 4, steps 05–06, and amended for Milestone 6,
-step 02 (m6-02: coverage skips controlled turns). The original preview-only
-scope is preserved below; the m4-06 amendment adds runtime commitment and
-triggers, and the m6-02 amendment replaces decision 9's interim refusal.
+Status: Implemented for Milestone 4, steps 05–06, amended for Milestone 6,
+step 02 (m6-02: coverage skips controlled turns) and by m6-side-summary-request
+(decision 16: an explicit fresh summary request and strategy versions 2). The
+original preview-only scope is preserved below; the m4-06 amendment adds runtime
+commitment and triggers, and the m6-02 amendment replaces decision 9's interim
+refusal.
 
 Date: 2026-10-29
 
@@ -391,3 +393,101 @@ All mutations were applied individually, observed failing, and reverted:
 | Omit rolling `supersedes` | `storage_acceptance_normal_and_rolling`: builder first rejects `overlapping_active_summaries`; independent storage-oracle test rejects the same missing-supersession entry |
 | Leave session native blocks in summary input | `exact_request_has_independent_model_no_tools_or_native_state`: request artifact allowlist assertion fails |
 | Disable heading validation | `generation_errors_are_coded_and_never_produce_previews`: malformed-summary case incorrectly returns a preview |
+
+## m6-side amendment
+
+M6 decision 16, implemented in m6-side-summary-request. The first live matrix
+(m6-06, experiment source `cd14762`) had its eight model-based compaction cells
+fail at the provider: the completed-dialogue request ended with an **assistant**
+turn, which the Messages API treats as assistant prefill and rejected with HTTP
+400, while the same body with an appended user request was accepted. Observation
+masking, the only model-free arm, was unaffected. That evidence is not changed or
+rerun; this amendment implements and verifies the fix offline, with no paid
+request.
+
+### Explicit fresh request
+
+`summary_input` is the one shared composition both model-based strategies use,
+and it now ends the request with **one fixed, request-only prompt** after the
+narrowed source and their instructions. The text is the constant
+`SUMMARY_REQUEST_INSTRUCTION`: it asks for the configured summary of the
+preceding completed source and restates the fixed system instruction's
+untrusted-data rule, and it interpolates nothing, so it can never quote a source
+entry, a controlled turn or an artifact name.
+
+The prompt is a new provider-independent item variant, `ContextItem::Request
+{ text }`, and deliberately **not** a `ContextItem::User` with some made-up
+identity. `ContextItem::User.entry_id` means "the source journal entry this item
+comes from"; a request-only prompt comes from no entry, and no UUID is reserved
+by storage, so any fixed value could collide with entries of an imported
+journal, and any generated value would be a fabricated source identity.
+`ContextItem::Request` carries no entry identity at all (`entry_id()` returns
+`None`), no provenance, no artifact reference and no capability. Both adapters
+map it to one plain user turn, so no wire format, transport or provider profile
+changed.
+
+Adding a variant does not change any projection: the builder never creates a
+request item, so existing serialized items keep their exact bytes,
+`PROJECTION_VERSION`/`BUILDER_VERSION` are unchanged, projection fingerprints
+are unchanged, the journal schema is untouched, and recorded summaries replay
+exactly as before. Consumers account for the item without giving it provenance
+or access: artifact enumeration adds no reference for it, masking renders nothing
+for it (a request prompt is never covered source), the builder's report check
+rejects it as `request_item_in_projection` because a projection can never contain
+one, and the eval renderer and the driver's test helper read its literal text.
+
+Everything else the request guarantees is unchanged: ancestral source order,
+paired calls and results with identity/status/provenance, the independent summary
+model, the caller's output budget, no tools, no reasoning or provider controls,
+no native continuation or session-owned native state, cancellation and the
+absolute deadline, pinned/excluded turns never sent, and artifact access narrowed
+to exactly the sanitized source. Selection, coverage validation, the manifest,
+the journal schema, control rules and the preview binding are untouched.
+
+### Strategy versions
+
+The prompt changed, so `StrategyId::version` is now **2** for `rolling_summary`
+and `structured_state` and stays **1** for `observation_masking`, whose selection
+and output are unchanged. A committed compaction records the version it was
+written with, and readers never reinterpret it: a summary recorded under version
+1 still projects, inspects and reprojects as originally recorded. Because the
+version joins `policy_fingerprint`, an outstanding preview of either model-based
+strategy made before the upgrade is stale (`stale_preview`, field
+`policy_fingerprint`) rather than silently reusable.
+
+### Evidence (m6-side)
+
+- `context::tests::compaction_tests::model_based_requests_end_with_one_fixed_request_only_prompt`:
+  for both model-based strategies over a completed source that **ends with an
+  assistant response**, the recorded request's last item is exactly the fixed
+  request-only prompt, `entry_id()` on it is `None`, every other item names a real
+  journal entry, and the prompt text is absent from coverage, the manifest, the
+  committed entry and the rebuilt projection; generation appends nothing; the
+  artifact allowlist is empty and tools/continuation are empty; the entry records
+  version 2.
+- `strategy_identity_is_closed_and_recorded` pins the three versions (2, 1, 2).
+- `providers::anthropic::tests::deepseek::a_summary_request_ends_in_a_user_turn_after_an_assistant_response`
+  builds the body from the real shared item, then submits it through the real
+  DeepSeek Messages adapter on attributed loopback. The source is user, a paired
+  tool call and result, and a **completed final assistant response**: without the
+  request the body ends with that assistant turn (prefill), with it the body ends
+  with one standalone user turn carrying only the fixed text, and the earlier
+  pair and the assistant response survive in order. A second case keeps a source
+  ending at a tool result, where the request joins that existing user turn. The
+  stream's last event is asserted to be `Finished`/`Completed`/`Stop` (not merely
+  a poll count), the submitted body equals the built one, and no credential or
+  network is used.
+- Existing request/report goldens changed only where the version is recorded
+  (`compaction-preview-after.json`). The eval record's per-strategy version is
+  asserted per arm (`1` for masking, `2` for the model-based arms) and the
+  checked-in markdown row follows the record.
+
+### Break-on-purpose results (m6-side)
+
+Each mutation was applied individually, the named test failed, and it was
+reverted:
+
+| Mutation | Failing test and observation |
+| --- | --- |
+| Remove the fixed request item from `summary_input` | `model_based_requests_end_with_one_fixed_request_only_prompt`: `rolling_summary: the request does not end with a request-only prompt` |
+| Keep the item but drop it in the adapter's message builder | `deepseek::a_summary_request_ends_in_a_user_turn_after_an_assistant_response`: the built body's last turn was the assistant response again, so the final-role assertion failed |

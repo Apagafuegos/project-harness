@@ -2043,6 +2043,197 @@ mod deepseek {
         assert!(!body.to_string().contains("block_binding"));
     }
 
+    /// A narrowed summary source: one user message, an answered tool call, and
+    /// a completed final assistant text response. That is the shape the first
+    /// live matrix submitted as a summary request.
+    fn summary_source() -> (ModelInput, CallId) {
+        let call_id = CallId::new();
+        let input = ModelInput {
+            model: ds_model(),
+            items: vec![
+                user("Read notes.txt"),
+                ContextItem::Assistant {
+                    entry_id: EntryId::new(),
+                    outcome: harness_core::session::ResponseOutcome::Completed,
+                    content: vec![ContentBlock::ToolCall {
+                        call_id: call_id.clone(),
+                        name: "read".into(),
+                        arguments: serde_json::from_value(json!({"path": "notes.txt"}))
+                            .expect("args"),
+                        provider_call_id: Some("toolu_summary_1".into()),
+                    }],
+                },
+                ContextItem::ToolResult {
+                    entry_id: EntryId::new(),
+                    provenance: Provenance::Executor,
+                    result: ToolResult {
+                        call: CallRef {
+                            response_entry_id: EntryId::new(),
+                            call_id: call_id.clone(),
+                        },
+                        invocation_id: None,
+                        status: ToolStatus::Succeeded,
+                        content: vec![ContentBlock::Text {
+                            text: "file contents".into(),
+                        }],
+                        metadata: ToolMetadata {
+                            exit_code: Some(0),
+                            duration_ms: Some(3),
+                            output_truncated: false,
+                            provenance: Provenance::Executor,
+                            artifacts: Vec::new(),
+                            code: None,
+                        },
+                    },
+                },
+                // The completed final assistant response the matrix sent.
+                ContextItem::Assistant {
+                    entry_id: EntryId::new(),
+                    outcome: harness_core::session::ResponseOutcome::Completed,
+                    content: vec![ContentBlock::Text {
+                        text: "The file says hello.".into(),
+                    }],
+                },
+            ],
+            tools: Vec::new(),
+            options: options(256),
+            continuation: None,
+        };
+        (input, call_id)
+    }
+
+    /// M6 decision 16 on the real adapter. The completed source ends with an
+    /// assistant response, so without the shared request-only prompt the body is
+    /// assistant prefill; with it, the adapter submits a standalone final user
+    /// turn while the paired call/result and the final assistant response stay
+    /// intact. Offline: loopback transport only.
+    #[tokio::test]
+    async fn a_summary_request_ends_in_a_user_turn_after_an_assistant_response() {
+        use harness_core::{
+            context::compaction::{SUMMARY_REQUEST_INSTRUCTION, summary_request_item},
+            model::{ProviderEvent, ProviderOutcome},
+        };
+        let (input, _) = summary_source();
+
+        // Without the request item the completed source really is prefill: the
+        // body ends with the assistant's own final response.
+        let without = request::build(Profile::DeepSeek, &input, &Reads::default()).expect("build");
+        let messages = without["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4, "{without}");
+        assert_eq!(messages.last().expect("last")["role"], json!("assistant"));
+        assert_eq!(
+            messages.last().expect("last")["content"],
+            json!([{"type": "text", "text": "The file says hello."}])
+        );
+
+        // With the shared request-only item the request closes in a user turn.
+        let mut with_request = summary_source().0;
+        with_request.items.push(summary_request_item());
+        let body =
+            request::build(Profile::DeepSeek, &with_request, &Reads::default()).expect("build");
+        let messages = body["messages"].as_array().expect("messages");
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|message| message["role"].as_str().expect("role"))
+            .collect();
+        assert_eq!(
+            roles,
+            ["user", "assistant", "user", "assistant", "user"],
+            "{body}"
+        );
+        // The paired call and result survive, complete and in order.
+        assert_eq!(
+            messages[1]["content"][0],
+            json!({"type": "tool_use", "id": "toolu_summary_1", "name": "read", "input": {"path": "notes.txt"}})
+        );
+        assert_eq!(
+            messages[2]["content"][0]["tool_use_id"],
+            json!("toolu_summary_1")
+        );
+        // The completed final assistant response is still there, verbatim...
+        assert_eq!(
+            messages[3]["content"],
+            json!([{"type": "text", "text": "The file says hello."}])
+        );
+        // ...followed by one standalone user turn carrying only the fixed text.
+        assert_eq!(
+            messages[4]["content"],
+            json!([{"type": "text", "text": SUMMARY_REQUEST_INSTRUCTION}]),
+            "{body}"
+        );
+
+        // A source that ends at a tool result is already a user turn, so the
+        // request joins that turn instead of opening a new one; the pair stays
+        // complete and the prompt stays the last thing the model reads.
+        let mut merging = summary_source().0;
+        merging.items.pop();
+        merging.items.push(summary_request_item());
+        let merged = request::build(Profile::DeepSeek, &merging, &Reads::default()).expect("build");
+        let messages = merged["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3, "{merged}");
+        assert_eq!(messages[2]["role"], json!("user"));
+        let blocks = messages[2]["content"].as_array().expect("content");
+        assert_eq!(blocks.len(), 2, "{merged}");
+        assert_eq!(blocks[0]["type"], json!("tool_result"));
+        assert_eq!(
+            blocks[1],
+            json!({"type": "text", "text": SUMMARY_REQUEST_INSTRUCTION})
+        );
+
+        // And through the real adapter and transport: the submitted body is that
+        // same shape, and the stream really completes successfully.
+        let server = Server::start(parse_fixture(ds_fixture_text("text")));
+        let mut stream = ds_adapter(server.url.clone()).stream(
+            ModelRequest {
+                response_id: ResponseId::new(),
+                artifacts: ArtifactSource::default(),
+                input: with_request,
+            },
+            Default::default(),
+        );
+        let mut events = Vec::new();
+        while let Some(event) = futures_util::StreamExt::next(&mut stream).await {
+            events.push(event);
+        }
+        assert!(
+            matches!(
+                events.last(),
+                Some(ProviderEvent::Finished {
+                    outcome: ProviderOutcome::Completed,
+                    finish_reason: Some(FinishReason::Stop),
+                    ..
+                })
+            ),
+            "expected a successful terminal event, got {:?}",
+            events.last()
+        );
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                ProviderEvent::Finished {
+                    outcome: ProviderOutcome::Failed,
+                    ..
+                }
+            )),
+            "the loopback fixture must not fail: {events:?}"
+        );
+        let submitted = server
+            .submitted
+            .lock()
+            .expect("record")
+            .clone()
+            .expect("the adapter submitted a request");
+        assert_eq!(submitted, body);
+        let messages = submitted["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[3]["content"][0]["type"], json!("text"));
+        assert_eq!(messages[4]["role"], json!("user"));
+        assert_eq!(
+            messages[4]["content"],
+            json!([{"type": "text", "text": SUMMARY_REQUEST_INSTRUCTION}])
+        );
+    }
+
     /// The profile keeps images user-side only: `deepseek-flash` accepts them in
     /// user input, `deepseek-v4-pro` does not process them at all.
     #[test]

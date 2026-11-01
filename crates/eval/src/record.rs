@@ -654,7 +654,7 @@ mod tests {
             Aggregate::new(&records, "commit").to_json().unwrap()
         );
         let markdown = aggregate.to_markdown();
-        assert!(markdown.contains("| rolling_summary | 1 | 1 | 2/2 (1.000) |"));
+        assert!(markdown.contains("| rolling_summary | 2 | 1 | 2/2 (1.000) |"));
         assert!(markdown.contains("| observation_masking |"));
     }
 

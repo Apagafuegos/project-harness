@@ -233,8 +233,17 @@ impl StrategyId {
     }
 
     /// Selection, prompt and output policy version, recorded beside the name.
+    ///
+    /// Both model-based strategies are version `2` since M6 decision 16: their
+    /// request now ends with one fixed request-only user instruction, which is a
+    /// prompt change. Masking stays at `1` because neither its selection nor its
+    /// output changed, and a recorded version is never rewritten: a summary
+    /// made under `1` still projects exactly as it was recorded.
     pub const fn version(self) -> &'static str {
-        "1"
+        match self {
+            Self::ObservationMasking => "1",
+            Self::RollingSummary | Self::StructuredState => "2",
+        }
     }
 
     /// Whether generation needs a configured summary model.

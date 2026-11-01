@@ -96,7 +96,7 @@
       "entry_id": "019a0000-0000-7000-8000-000000000999",
       "included": true,
       "strategy": "rolling_summary",
-      "strategy_version": "1",
+      "strategy_version": "2",
       "covered_entry_ids": [
         "019a0000-0000-7000-8000-0000000001f5",
         "019a0000-0000-7000-8000-0000000001f7"

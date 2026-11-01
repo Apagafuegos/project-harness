@@ -81,6 +81,10 @@ fn agrees(items: &[ContextItem], report: &ContextReport) -> Result<(), &'static 
             ContextItem::Assistant { .. } => ItemKind::Assistant,
             ContextItem::ToolResult { .. } => ItemKind::ToolResult,
             ContextItem::Summary { .. } => ItemKind::Summary,
+            // A request-only prompt has no entry and no report record, so a
+            // projection that contains one is a builder bug, not a report
+            // mismatch to be explained away.
+            ContextItem::Request { .. } => return Err("request_item_in_projection"),
         };
         if kind != record.kind || item.entry_id() != record.entry_id.as_ref() {
             return Err("report_disagrees_with_projection");

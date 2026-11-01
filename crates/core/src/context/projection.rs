@@ -82,13 +82,26 @@ pub enum ContextItem {
         /// Summary text.
         summary: String,
     },
+    /// A request-only user prompt: fixed text asking for the answer to the input
+    /// that precedes it, with no journal entry behind it.
+    ///
+    /// Only summary generation uses this item, to ask for the summary instead
+    /// of leaving the request prefilled by the source's last assistant turn
+    /// (M6 decision 16). It is never built into a session projection, carries
+    /// no provenance, references no artifact and grants no capability; both
+    /// adapters submit it as one user turn.
+    Request {
+        /// The fixed request text; never interpolated with source content.
+        text: String,
+    },
 }
 
 impl ContextItem {
-    /// The journal entry this item comes from; `None` for instructions.
+    /// The journal entry this item comes from; `None` for instructions and for a
+    /// request-only prompt, which has no journal entry at all.
     pub fn entry_id(&self) -> Option<&EntryId> {
         match self {
-            Self::Instructions { .. } => None,
+            Self::Instructions { .. } | Self::Request { .. } => None,
             Self::User { entry_id, .. }
             | Self::Assistant { entry_id, .. }
             | Self::ToolResult { entry_id, .. }

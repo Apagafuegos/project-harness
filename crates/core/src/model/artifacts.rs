@@ -72,7 +72,11 @@ impl ArtifactSource {
                     }
                     &result.content
                 }
-                _ => continue,
+                // Instructions, summaries and a request-only prompt reference no
+                // artifact, so they add no read capability to the request.
+                ContextItem::Instructions { .. }
+                | ContextItem::Summary { .. }
+                | ContextItem::Request { .. } => continue,
             };
             for block in content {
                 match block {

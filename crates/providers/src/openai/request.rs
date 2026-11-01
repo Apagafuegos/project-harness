@@ -136,6 +136,13 @@ pub(crate) fn build(
                     "text": format!("Summary of earlier conversation:\n\n{summary}"),
                 }],
             })),
+            // A request-only prompt is one plain user message, with no entry,
+            // artifact or provider state behind it.
+            ContextItem::Request { text } => items.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            })),
         }
     }
 

@@ -1618,6 +1618,7 @@ async fn requests_carry_the_projection_and_inspection_reads_any_branch() {
                 ContextItem::Assistant { .. } => "assistant",
                 ContextItem::ToolResult { .. } => "tool_result",
                 ContextItem::Summary { .. } => "summary",
+                ContextItem::Request { .. } => "request",
             })
             .collect()
     };

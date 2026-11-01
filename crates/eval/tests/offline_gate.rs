@@ -286,7 +286,13 @@ fn offline_pipeline_is_deterministic_complete_and_does_not_leak_the_check() {
         assert!(strategies.contains(&strategy), "missing {strategy}");
     }
     for record in &first.records {
-        assert_eq!(record.strategy_version, "1");
+        // Decision 16 bumped only the prompts of the two model-based strategies.
+        let version = if record.strategy == "observation_masking" {
+            "1"
+        } else {
+            "2"
+        };
+        assert_eq!(record.strategy_version, version, "{}", record.strategy);
         assert_eq!(record.harness_commit, COMMIT);
         let summary_model = record.summary_model.as_deref();
         if record.strategy == "observation_masking" {

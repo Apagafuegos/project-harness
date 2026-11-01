@@ -935,6 +935,9 @@ fn render_items(items: &[ContextItem]) -> String {
             }
             ContextItem::ToolResult { result, .. } => parts.extend(text_blocks(&result.content)),
             ContextItem::Summary { summary, .. } => parts.push(summary.clone()),
+            // A request-only prompt is text the model reads; it has no entry, so
+            // it is rendered as its literal bytes when it ever appears.
+            ContextItem::Request { text } => parts.push(text.clone()),
         }
     }
     parts.join("\n")

@@ -159,6 +159,13 @@ pub(crate) fn build(
                 })],
                 &mut messages,
             ),
+            // A request-only prompt is one plain user turn. It has no entry, no
+            // artifact and no provider state, so it maps to text and nothing else.
+            ContextItem::Request { text } => Message::push(
+                "user",
+                [json!({"type": "text", "text": text})],
+                &mut messages,
+            ),
         }
     }
     if messages.is_empty() {

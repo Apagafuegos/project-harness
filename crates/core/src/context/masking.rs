@@ -113,6 +113,10 @@ pub(super) fn masked_span(items: &[ContextItem]) -> String {
                     out.push('\n');
                 }
             }
+            // A request-only prompt is never covered source: masking renders the
+            // narrowed span and receives no request item, so it contributes
+            // nothing to the rendered text.
+            ContextItem::Request { .. } => {}
         }
     }
     out

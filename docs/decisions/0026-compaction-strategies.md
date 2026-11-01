@@ -1,8 +1,10 @@
 # 0026: Compaction strategy selection and alternative strategies
 
-Status: Implemented for Milestone 6, step 04 (m6-04). Milestone 6 settled
-decisions 3, 4 and 12; the two alternatives exist so m6-05 can compare them and
-the user can pick the default before acceptance.
+Status: Implemented for Milestone 6, step 04 (m6-04), and amended by
+m6-side-summary-request (decision 16: one explicit fresh request for both
+model-based strategies, versions 2 and 1). Milestone 6 settled decisions 3, 4
+and 12; the two alternatives exist so m6-05 can compare them and the user can
+pick the default before acceptance.
 
 Date: 2026-10-31
 
@@ -22,8 +24,9 @@ the session configuration object:
 configuration written before this step keeps its meaning and no record version
 changes; an unknown name is `invalid_compaction`, never a silent fallback. The
 name is the journal's `Compaction.strategy` value and the version is
-`Compaction.strategy_version` (`"1"` for all three), so a committed entry states
-exactly which strategy wrote it.
+`Compaction.strategy_version` (`"1"` for `observation_masking`, `"2"` for the two
+model-based strategies since decision 16's prompt change), so a committed entry
+states exactly which strategy wrote it.
 
 The harness records the strategy **at session creation**, in the same
 configuration artifact as the tool policy; `--compaction-strategy` selects it.
@@ -67,6 +70,40 @@ and superseded summaries only, no continuation, no session-owned native state,
 no tools) and, at the end, the manifest, the entry, the hypothetical after
 report and the bindings. A strategy therefore supplies only its summary text and
 its model: `assemble(input, prepared, summary, model)`.
+
+### The explicit fresh summary request (decision 16, version 2)
+
+`summary_input` — shared by `rolling_summary` and `structured_state`, and used by
+no other strategy — appends **one fixed, request-only prompt** after the narrowed
+source and the fixed instructions. Its text is the constant
+`SUMMARY_REQUEST_INSTRUCTION`, which asks for the configured summary of the
+preceding completed source and restates the fixed system instruction's
+untrusted-data rule; it interpolates nothing, so it cannot quote a source entry,
+include a pinned or excluded turn, or name an artifact.
+
+The prompt is a new provider-independent item variant, `ContextItem::Request
+{ text }`. It has no entry identity, because there is no source entry behind it
+and no identity is reserved for a prompt: a fixed UUID could collide with an
+imported journal's entries, and a generated one would fabricate a source
+identity. It carries no provenance, no artifact reference and no capability, and
+both adapters map it to one plain user turn, so no wire format, transport or
+profile changed. The builder never creates one, so existing projected item bytes,
+`PROJECTION_VERSION`/`BUILDER_VERSION`, projection fingerprints, old summary
+replay and the journal schema are all unchanged. Every consumer handles it
+without access: artifact enumeration adds nothing, masking renders nothing, the
+builder's report check rejects it as `request_item_in_projection`, and the eval
+renderer prints its literal text.
+
+Why: a completed source can end with an assistant response, and a Messages
+request whose final turn is the assistant's is assistant prefill, which the
+provider rejects. The first live matrix's eight model-based cells failed exactly
+that way; the four masking cells completed. The request therefore has to be
+asked for by a user turn, and both model-based strategies ask the same way.
+Because the prompt changed, their `StrategyId::version` is **2**; masking stays
+**1** because neither its selection nor its rendering changed. A recorded version
+is never rewritten: older summaries project and inspect exactly as recorded, and
+an outstanding preview of either model-based strategy becomes stale through the
+policy fingerprint rather than being silently reused.
 
 ### `observation_masking`: deterministic, model-free
 
@@ -142,8 +179,9 @@ covered journal entries/events, with no artifact I/O:
   the safe fallback the settled decision allows: the harness does not try to
   classify which sentences are requirements.
 
-Exact committed text (version 1): the extracts block, verbatim, then the
-narrative:
+Exact committed text for `structured_state` (this block did not change with the
+version bump): the deterministic extracts block, verbatim, then the model
+narrative, whose request now ends with the shared request-only prompt:
 
 ```text
 ## Deterministic extracts
@@ -178,7 +216,8 @@ narrative:
   narrowed source, with the rendered extracts supplied as **quoted JSON data in a
   separate system instruction**. Its output budget is `max_summary_tokens` minus
   the extracts' estimate, and the combined text is re-checked against the limit
-  (`summary_too_long`).
+  (`summary_too_long`). The request itself ends with the fixed request-only user
+  instruction described above, not with the source's last assistant turn.
 - **The extracts are inserted by the strategy, never echoed by the model**, so
   the narrative cannot alter, drop or reorder them; a model that restates them
   only adds text after the block. `Compaction.model` is set.
@@ -236,13 +275,18 @@ Read on 2026-10-31:
 ## Evidence
 
 - Selection and formats: `context::tests::compaction_tests` —
-  `strategy_identity_is_closed_and_recorded`,
+  `strategy_identity_is_closed_and_recorded` (versions 2, 1, 2),
+  `model_based_requests_end_with_one_fixed_request_only_user_turn` (decision 16:
+  the explicit fresh request on completed source ending in an assistant turn),
   `observation_masking_is_a_deterministic_zero_stream_golden` (checked-in
   golden, zero streams, `model` absent), `observation_masking_over_budget_fails_explicitly`
   (`masked_span_too_long`),
   `structured_state_extracts_are_ordered_and_untouchable`,
   `structured_state_extracts_are_bounded_with_explicit_elision`, and
   `every_strategy_skips_pinned_and_excluded_turns`.
+- Adapter: `harness_providers::anthropic::tests::deepseek::a_summary_request_ends_in_a_user_turn_over_loopback`
+  submits the shared request through the real DeepSeek Messages adapter over
+  attributed loopback: a final user turn, a complete tool pair, no credential.
 - Runtime: `runtime::tests::compaction` —
   `c02_manual_preview_leaves_journal_and_workspace_unchanged`,
   `c02_stale_*`, `c02_automatic_retains_configured_recent_turns`,
