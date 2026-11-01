@@ -741,6 +741,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "harness-eval"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "harness",
+ "harness-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "harness-providers"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,6 @@
+{
+  "paths": [
+    "lib/util.sh",
+    "main.sh"
+  ]
+}

@@ -66,6 +66,7 @@ jobs:
           ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
           ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
           ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
+          ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh cargo test --locked -p harness-eval --test offline_gate -- --ignored --test-threads=1
       - name: Summary
         if: always()
         run: |

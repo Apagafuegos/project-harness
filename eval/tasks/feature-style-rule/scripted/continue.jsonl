@@ -1,0 +1,3 @@
+{"type": "tool_call", "tool": "write", "arguments": {"path": "greet.sh", "overwrite": true, "text": "#!/bin/sh\n# Print a greeting, or a JSON object when --json is given.\nif [ \"$1\" = \"--json\" ]; then\n  name=${2:-world}\n  printf '{\"greeting\":\"Hello, %s!\"}\\n' \"$name\"\nelse\n  name=${1:-world}\n  printf 'Hello, %s!\\n' \"$name\"\nfi\n"}, "say": "Adding the flag with two-space indentation."}
+{"type": "tool_call", "tool": "bash", "arguments": {"command": "sh greet.sh --json Alice && sh greet.sh Alice"}}
+{"type": "assistant", "text": "greet.sh prints the JSON form for --json and keeps the plain greeting, with two-space indentation and no tabs."}

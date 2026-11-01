@@ -1,0 +1,5 @@
+{
+  "name": "bugfix-with-test",
+  "shape": "bug_fix",
+  "description": "Fix an off-by-one in slug.sh that cuts long titles one character short, and pin it with a regression test."
+}

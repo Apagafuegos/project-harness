@@ -1,0 +1,21 @@
+[package]
+name = "harness-eval"
+description = "Dev-only evaluation harness comparing context-compaction strategies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+harness-core.workspace = true
+harness = { path = "../cli" }
+clap.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

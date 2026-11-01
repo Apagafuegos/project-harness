@@ -1,0 +1,5 @@
+{
+  "name": "multi-file-change",
+  "shape": "multi_file",
+  "description": "Rename clamp to clamp_range in lib/util.sh and at every call site without changing main.sh's output."
+}

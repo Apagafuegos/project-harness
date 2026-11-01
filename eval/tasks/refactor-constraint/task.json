@@ -1,0 +1,5 @@
+{
+  "name": "refactor-constraint",
+  "shape": "refactor",
+  "description": "Extract the repeated row formatting in report.sh into one helper, keeping the output byte-identical."
+}

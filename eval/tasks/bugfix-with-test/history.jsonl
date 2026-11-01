@@ -1,0 +1,14 @@
+{"type": "user", "text": "slug.sh cuts long titles one character too short. A title must be cut to 16 characters, not 15. Fix slugify, and add a regression test to test.sh that pins the long-title case. The existing two tests in test.sh must keep passing."}
+{"type": "tool_call", "tool": "read", "arguments": {"path": "slug.sh"}, "say": "Reading slug.sh first."}
+{"type": "assistant", "text": "The pipeline ends in cut -c1-15, so the slug is cut to 15 characters. It must be cut to 16 characters."}
+{"type": "user", "text": "What does it produce for a long title right now?"}
+{"type": "tool_call", "tool": "bash", "arguments": {"command": "sh slug.sh 'Hello World Example Title'"}, "say": "Checking the current behaviour on a long title."}
+{"type": "assistant", "text": "hello-world-exa: fifteen characters, one short of the sixteen a long title may keep."}
+{"type": "user", "text": "And the test suite?"}
+{"type": "tool_call", "tool": "bash", "arguments": {"command": "sh test.sh"}}
+{"type": "assistant", "text": "Both existing cases pass, so the suite does not catch the off-by-one at all."}
+{"type": "user", "text": "Use the same check helper for the new case and keep the CLI contract: one slug per argument on stdout."}
+{"type": "tool_call", "tool": "read", "arguments": {"path": "test.sh"}}
+{"type": "assistant", "text": "I will add one check line with the long title and keep the existing two lines untouched."}
+{"type": "user", "text": "Perfect. Apply it when we resume."}
+{"type": "assistant", "text": "Ready to fix slugify and extend the tests."}

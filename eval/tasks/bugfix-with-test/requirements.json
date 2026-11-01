@@ -1,0 +1,26 @@
+{
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "a title must be cut to 16 characters, not 15",
+      "all_of": [
+        "16 characters"
+      ]
+    },
+    {
+      "id": "R2",
+      "text": "add a regression test to test.sh that pins the long-title case",
+      "all_of": [
+        "regression test",
+        "test.sh"
+      ]
+    },
+    {
+      "id": "R3",
+      "text": "the existing two tests in test.sh must keep passing",
+      "all_of": [
+        "existing two tests"
+      ]
+    }
+  ]
+}

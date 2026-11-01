@@ -1,0 +1,3 @@
+{"type": "tool_call", "tool": "write", "arguments": {"path": "report.sh", "overwrite": true, "text": "#!/bin/sh\n# Print a three-row report: a header, then two data rows.\nemit() {\n  printf '%-12s %s\\n' \"$1\" \"$2\"\n}\nemit 'name' 'value'\nemit 'alpha' '1'\nemit 'beta' '2'\n"}, "say": "Extracting the format into emit and calling it three times."}
+{"type": "tool_call", "tool": "bash", "arguments": {"command": "sh report.sh"}, "say": "Checking the output is unchanged."}
+{"type": "assistant", "text": "report.sh now has one emit helper with exactly one copy of the row format, and the output is unchanged."}

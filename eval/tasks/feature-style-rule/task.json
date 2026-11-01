@@ -1,0 +1,5 @@
+{
+  "name": "feature-style-rule",
+  "shape": "feature",
+  "description": "Add a --json flag to greet.sh under a hard style rule: two-space indentation, no tabs, 80 columns."
+}

@@ -1,4 +1,6 @@
 /target/
+# Evaluation run output: records, aggregates and scratch workspaces.
+/eval/results/
 !/Cargo.lock
 .env
 .env.*

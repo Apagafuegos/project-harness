@@ -487,7 +487,9 @@ for pre-C1 budget checking, pending-start deduplication, events and failure code
 ## Not implemented
 
 - Real tokenizers (estimates remain explicitly heuristic).
-- Comparing the three strategies on live models (m6-05, `crates/eval`).
+- Comparing the three strategies on live models (m6-06; the offline harness
+  that m6-06 runs live is `crates/eval`, see
+  [decision 0027](decisions/0027-evaluation-harness.md)).
 
 ## Tests
 

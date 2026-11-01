@@ -22,7 +22,7 @@ esac
 exit 0
 CARGO
 chmod +x "$scratch/cargo"
-for SECURITY_TARGET in sandbox tool_host doctor; do
+for SECURITY_TARGET in sandbox tool_host doctor offline_gate; do
     export SECURITY_TARGET
     status=0
     (unset HARNESS_ALLOW_NO_SANDBOX; PATH="$scratch"; export PATH; /bin/sh scripts/check.sh) >"$scratch/output" 2>&1 || status=$?

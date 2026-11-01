@@ -1,0 +1,25 @@
+{
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "the printed output must stay byte-identical",
+      "all_of": [
+        "byte-identical"
+      ]
+    },
+    {
+      "id": "R2",
+      "text": "exactly one copy of the row format string must be left",
+      "all_of": [
+        "one copy of the row format"
+      ]
+    },
+    {
+      "id": "R3",
+      "text": "the helper must be named emit",
+      "all_of": [
+        "named emit"
+      ]
+    }
+  ]
+}

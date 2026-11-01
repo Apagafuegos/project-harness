@@ -1,0 +1,29 @@
+{
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "a --json flag that prints {\"greeting\":\"Hello, <name>!\"}",
+      "all_of": [
+        "--json flag"
+      ]
+    },
+    {
+      "id": "R2",
+      "text": "keep every line at most 80 columns",
+      "all_of": [
+        "80 columns"
+      ]
+    },
+    {
+      "id": "R3",
+      "text": "indent with two spaces and never a tab",
+      "all_of": [
+        "two spaces"
+      ],
+      "any_of": [
+        "never a tab",
+        "no tab"
+      ]
+    }
+  ]
+}

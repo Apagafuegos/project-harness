@@ -235,6 +235,9 @@ terminal event arm and the Ctrl-C signal arm. It is a conservative source scan,
 not a security sandbox, and it self-tests that each mutation fails. The shell
 `crates/cli/src/tui_cli.rs` may use `wiring`; the model and loop may not.
 
+`scripts/eval.sh` wraps the opt-in compaction evaluation in `crates/eval`
+(live mode spends money; offline mode is in `scripts/check.sh`).
+
 `scripts/live-check.sh tui` is a separate, opt-in Codex subscription smoke. It
 starts the real binary under a PTY, types the fixed pong request, observes the
 completed answer, sends Ctrl-D, and verifies exit zero and terminal restoration.

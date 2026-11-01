@@ -27,6 +27,9 @@ else
     cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1
     cargo test --locked -p harness-core --test tool_host -- --ignored --test-threads=1
     cargo test --locked -p harness --test doctor -- --ignored --test-threads=1
+    # M6-05: the offline evaluation pipeline, including the hidden check run in
+    # the same Bubblewrap sandbox. It fails, never skips, without a backend.
+    cargo test --locked -p harness-eval --test offline_gate -- --ignored --test-threads=1
 fi
 ./scripts/test-security-gate.sh
 cargo build --workspace --locked

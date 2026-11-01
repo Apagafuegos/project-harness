@@ -1,0 +1,25 @@
+{
+  "requirements": [
+    {
+      "id": "R1",
+      "text": "rename clamp to clamp_range in lib/util.sh and fix every call site",
+      "all_of": [
+        "rename clamp to clamp_range"
+      ]
+    },
+    {
+      "id": "R2",
+      "text": "keep the output of main.sh identical",
+      "all_of": [
+        "output of main.sh"
+      ]
+    },
+    {
+      "id": "R3",
+      "text": "do not rename add in lib/math.sh",
+      "all_of": [
+        "do not rename add"
+      ]
+    }
+  ]
+}
