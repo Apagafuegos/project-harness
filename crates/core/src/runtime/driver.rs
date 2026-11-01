@@ -15,7 +15,7 @@ use super::{
 use crate::{
     context::{
         ContextBuilder, ContextReport,
-        compaction::{CompactionError, CompactionPreview, CompactionStrategy, RollingSummary},
+        compaction::{CompactionError, CompactionPreview, strategy},
     },
     model::{
         ArtifactReadError, ArtifactSource, ModelEventStream, ModelProvider, ModelRequest,
@@ -970,7 +970,10 @@ impl<E: Env + Send + 'static> Driver<E> {
                         epoch: self.runtime.epoch().clone(),
                         cancel,
                         future: Box::pin(async move {
-                            RollingSummary::new(provider).propose(input, control).await
+                            // The configured strategy, from the one registry: the
+                            // runtime core has no strategy-specific branch.
+                            let id = input.configuration.compaction().strategy;
+                            strategy(id, provider).propose(input, control).await
                         }),
                     });
                 }

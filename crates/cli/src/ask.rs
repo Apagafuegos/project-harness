@@ -9,7 +9,7 @@ use std::{
 };
 
 use harness_core::{
-    context::{Part, PreviewReport, RequiredCapability},
+    context::{Part, PreviewReport, RequiredCapability, StrategyId},
     model::ModelProvider,
     runtime::*,
     session::*,
@@ -43,6 +43,11 @@ pub struct Options {
     pub known_instances: Vec<String>,
     /// Independent summary model, enabling automatic compaction only when set.
     pub summary_model: Option<ModelRef>,
+    /// Compaction strategy for a new session.
+    pub compaction_strategy: StrategyId,
+    /// Whether the user supplied a strategy override; a differing explicit
+    /// value is refused on continuation.
+    pub explicit_strategy: bool,
     /// Literal prompt, or `-` to read bounded UTF-8 from the supplied stdin.
     pub prompt: String,
     /// Auto-approve registry-declared read-only tools, only with a terminal.
@@ -663,6 +668,8 @@ fn session_options(o: &Options) -> crate::wiring::SessionOptions {
         switch_policy: o.switch_policy,
         known_instances: o.known_instances.clone(),
         summary_model: o.summary_model.clone(),
+        compaction_strategy: o.compaction_strategy,
+        explicit_strategy: o.explicit_strategy,
         driver: o.driver.clone(),
         sandbox: o.sandbox.clone(),
     }

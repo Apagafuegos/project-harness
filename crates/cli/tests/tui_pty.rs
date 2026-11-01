@@ -4,9 +4,9 @@
 mod support;
 
 /// Decisions 1 and 3: plain `harness` is the terminal client, it has no `tui`
-/// alias, and its only options are the six shared with `ask` (no config file).
+/// alias, and its only options are the seven shared with `ask` (no config file).
 #[test]
-fn plain_harness_is_the_tui_with_six_flags_and_no_config_file() {
+fn plain_harness_is_the_tui_with_seven_flags_and_no_config_file() {
     let binary = env!("CARGO_BIN_EXE_harness");
     let help = std::process::Command::new(binary)
         .arg("--help")
@@ -20,6 +20,7 @@ fn plain_harness_is_the_tui_with_six_flags_and_no_config_file() {
         "--auth",
         "--model",
         "--summary-model",
+        "--compaction-strategy",
         "--session",
     ] {
         assert!(text.contains(flag), "missing {flag} in {text}");
@@ -29,7 +30,7 @@ fn plain_harness_is_the_tui_with_six_flags_and_no_config_file() {
         .lines()
         .filter(|line| line.trim_start().starts_with("--"))
         .count();
-    assert_eq!(options, 6, "unexpected top-level option:\n{text}");
+    assert_eq!(options, 7, "unexpected top-level option:\n{text}");
     for args in [&["tui"][..], &["--config", "harness.toml"][..]] {
         let out = std::process::Command::new(binary)
             .args(args)

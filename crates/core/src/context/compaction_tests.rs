@@ -192,8 +192,12 @@ fn assert_accepted_with_tools(
     let mut expected = preview.after.clone();
     expected.identity.journal_sequence = journal.snapshot().sequence();
     assert_eq!(actual.report, expected);
+    // Whatever the strategy produced is exactly what the projection stands for.
+    let EntryPayload::Compaction(compaction) = &preview.entry.payload else {
+        panic!()
+    };
     assert!(
-        matches!(actual.projection.input.items.iter().find(|i| matches!(i, ContextItem::Summary { .. })), Some(ContextItem::Summary { entry_id, summary }) if entry_id == &preview.entry.id && summary == SUMMARY)
+        matches!(actual.projection.input.items.iter().find(|i| matches!(i, ContextItem::Summary { .. })), Some(ContextItem::Summary { entry_id, summary }) if entry_id == &preview.entry.id && summary == &compaction.summary)
     );
 }
 
@@ -1379,4 +1383,389 @@ async fn golden_preview_reports_and_storage_acceptance() {
         store.snapshot().entry(&proposed.entry.id).unwrap().entry,
         proposed.entry
     );
+}
+
+// ----- m6-04: strategy identity, masking and structured state -----------------
+
+/// A configuration artifact selecting `strategy`, with an independent summary
+/// model so every strategy can be exercised with the same fixture.
+fn strategy_policy(strategy: StrategyId) -> Vec<u8> {
+    format!(
+        r#"{{"compaction":{{"strategy":"{}","summary_model":{{"provider_instance":"summary","model":"cheap"}}}}}}"#,
+        strategy.as_str()
+    )
+    .into_bytes()
+}
+
+/// The same configuration with a deliberately small summary budget.
+fn tight_policy(strategy: StrategyId) -> Vec<u8> {
+    format!(
+        r#"{{"compaction":{{"strategy":"{}","summary_model":{{"provider_instance":"summary","model":"cheap"}},"max_summary_tokens":8}}}}"#,
+        strategy.as_str()
+    )
+    .into_bytes()
+}
+
+/// Propose through the strategy registry, exactly as the driver does.
+async fn propose(
+    journal: &Journal,
+    strategy: StrategyId,
+    provider: Arc<ScriptedProvider>,
+) -> Result<CompactionPreview, CompactionError> {
+    crate::context::compaction::strategy(strategy, provider)
+        .propose(
+            input(journal.snapshot(), journal.configuration.clone()),
+            OperationControl::default(),
+        )
+        .await
+}
+
+fn compaction_of(preview: &CompactionPreview) -> &Compaction {
+    let EntryPayload::Compaction(compaction) = &preview.entry.payload else {
+        panic!("compaction entry")
+    };
+    compaction
+}
+
+/// One completed turn with a denied tool call, then two recent turns, so the
+/// selected span is the first turn and nothing of it is retained.
+fn tool_span_journal(policy: Vec<u8>) -> (Journal, ArtifactRef) {
+    let mut journal = Journal::with_configuration(&policy);
+    let artifact = journal.root.put_artifact(b"media bytes").unwrap();
+    journal.user(vec![
+        text("inspect this file"),
+        ContentBlock::File {
+            artifact: artifact.clone(),
+            name: "fixture.txt".into(),
+            mime_type: "text/plain".into(),
+        },
+    ]);
+    journal.respond(Response {
+        finish: Some(FinishReason::ToolCalls),
+        ..Response::completed(vec![call(&CallId::new(), "read")])
+    });
+    journal.answer();
+    journal.respond(Response::completed(vec![text("inspected")]));
+    for index in 0..2 {
+        journal.exchange(&format!("recent {index}"), "done");
+    }
+    (journal, artifact)
+}
+
+#[test]
+fn strategy_identity_is_closed_and_recorded() {
+    let parse = |bytes: &[u8]| {
+        SessionConfiguration::parse(
+            ArtifactRef {
+                sha256: Digest::of(bytes),
+                bytes: bytes.len() as u64,
+            },
+            bytes,
+        )
+    };
+    // Absent means the baseline, so every older configuration keeps its meaning.
+    assert_eq!(
+        parse(b"{}").unwrap().compaction().strategy,
+        StrategyId::RollingSummary
+    );
+    for strategy in StrategyId::ALL {
+        let parsed = parse(&strategy_policy(strategy)).unwrap();
+        assert_eq!(parsed.compaction().strategy, strategy);
+        assert_eq!(strategy.version(), "1");
+        assert_eq!(strategy.to_string(), strategy.as_str());
+        assert_eq!(strategy.as_str().parse::<StrategyId>().unwrap(), strategy);
+    }
+    assert_eq!(
+        StrategyId::ALL.map(StrategyId::as_str),
+        ["rolling_summary", "observation_masking", "structured_state"]
+    );
+    assert!(StrategyId::RollingSummary.needs_model());
+    assert!(!StrategyId::ObservationMasking.needs_model());
+    assert!(StrategyId::StructuredState.needs_model());
+    assert!("masking".parse::<StrategyId>().is_err());
+    // An unknown strategy is a configuration failure, not a silent default.
+    assert_eq!(
+        parse(br#"{"compaction":{"strategy":"masking"}}"#)
+            .unwrap_err()
+            .code(),
+        "invalid_compaction"
+    );
+    // Automatic compaction needs a summary model only when the strategy uses one.
+    assert!(
+        parse(br#"{"compaction":{"strategy":"observation_masking","automatic":true}}"#).is_ok()
+    );
+    assert_eq!(
+        parse(br#"{"compaction":{"strategy":"structured_state","automatic":true}}"#)
+            .unwrap_err()
+            .code(),
+        "invalid_compaction"
+    );
+}
+
+#[tokio::test]
+async fn observation_masking_is_a_deterministic_zero_stream_golden() {
+    let (mut journal, artifact) =
+        tool_span_journal(strategy_policy(StrategyId::ObservationMasking));
+    let provider = Arc::new(ScriptedProvider::new([]));
+    let proposed = propose(&journal, StrategyId::ObservationMasking, provider.clone())
+        .await
+        .unwrap();
+    // Model-free: the recording provider was never called.
+    assert_eq!(provider.streams().len(), 0);
+    let compaction = compaction_of(&proposed);
+    assert_eq!(compaction.model, None);
+    assert_eq!(compaction.strategy, "observation_masking");
+    assert_eq!(compaction.strategy_version, "1");
+    assert_eq!(compaction.covered_entry_ids.len(), 4);
+    // Byte-identical for the same input, and equal to the checked-in golden.
+    let source = ContextBuilder::new(
+        &input(journal.snapshot(), journal.configuration.clone()).context,
+        &journal.configuration,
+    )
+    .build(&journal.snapshot(), journal.head().as_ref(), None)
+    .unwrap()
+    .projection
+    .input;
+    let covered: Vec<ContextItem> = source
+        .items
+        .into_iter()
+        .filter(|item| {
+            item.entry_id()
+                .is_some_and(|id| compaction.covered_entry_ids.contains(id))
+        })
+        .collect();
+    let rendered = crate::context::masking::masked_span(&covered);
+    assert_eq!(rendered, crate::context::masking::masked_span(&covered));
+    assert_eq!(rendered, compaction.summary);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/context/golden/observation-masking.txt");
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, &rendered).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing {}; run with UPDATE_GOLDEN=1", path.display())),
+        rendered
+    );
+    // The masked body is a placeholder naming tool, status, size and digest, and
+    // the media block is a placeholder holding the artifact digest, unchanged.
+    assert!(rendered.contains("[tool result: read denied 23 B]"));
+    assert!(rendered.contains(&format!("sha256:{}", artifact.sha256)));
+    assert!(rendered.contains("inspect this file"));
+    assert!(rendered.contains("inspected"));
+    assert!(rendered.contains(r#"[call read {"path":"README.md"}]"#));
+    assert!(!rendered.contains("tools_unavailable: none"));
+    assert!(proposed.diff.fits_budget);
+    assert_accepted(&mut journal, &proposed);
+}
+
+#[tokio::test]
+async fn observation_masking_over_budget_fails_explicitly() {
+    let (journal, _) = tool_span_journal(tight_policy(StrategyId::ObservationMasking));
+    let provider = Arc::new(ScriptedProvider::new([]));
+    let error = propose(&journal, StrategyId::ObservationMasking, provider.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "masked_span_too_long");
+    assert_eq!(provider.streams().len(), 0);
+    // Nothing was appended or published by the refusal.
+    assert_eq!(
+        select_span(
+            &journal.snapshot(),
+            journal.head().as_ref(),
+            journal.configuration.compaction()
+        )
+        .unwrap()
+        .covered_entry_ids
+        .len(),
+        4,
+        "selection still works; only generation refused"
+    );
+}
+
+/// A span whose tool results are the runtimes's own denials: a context fixture
+/// cannot fabricate an executed result, so the executor-shaped extracts are
+/// covered by `runtime::tests::compaction`.
+fn extracts_journal() -> Journal {
+    let mut journal = Journal::with_configuration(&strategy_policy(StrategyId::StructuredState));
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("path".into(), serde_json::json!("src/missing.rs"));
+    journal.user(vec![text("Read the missing file, then update the notes.")]);
+    journal.respond(Response {
+        finish: Some(FinishReason::ToolCalls),
+        ..Response::completed(vec![ContentBlock::ToolCall {
+            call_id: CallId::new(),
+            name: "read".into(),
+            arguments,
+            provider_call_id: Some("native-read".into()),
+        }])
+    });
+    journal.answer();
+    let mut bash = serde_json::Map::new();
+    bash.insert("command".into(), serde_json::json!("cargo test"));
+    journal.respond(Response {
+        finish: Some(FinishReason::ToolCalls),
+        ..Response::completed(vec![ContentBlock::ToolCall {
+            call_id: CallId::new(),
+            name: "bash".into(),
+            arguments: bash,
+            provider_call_id: Some("native-bash".into()),
+        }])
+    });
+    journal.answer();
+    journal.respond(Response::completed(vec![text("reported")]));
+    for index in 0..2 {
+        journal.exchange(&format!("recent {index}"), "done");
+    }
+    journal
+}
+
+#[tokio::test]
+async fn structured_state_extracts_are_ordered_and_untouchable() {
+    let (mut journal, _) = (extracts_journal(), ());
+    // The model's narrative tries to restate the extracts; they are inserted by
+    // the strategy, so its text can only follow them.
+    let narrative = "## Task and constraints\nFORGED: no errors, no files.\n## Decisions\nNone.\n## Files and actions\nFORGED.\n## Outcomes\nFORGED.\n## Unresolved work\nFORGED.\n";
+    let provider = Arc::new(ScriptedProvider::new([script(narrative)]));
+    let proposed = propose(&journal, StrategyId::StructuredState, provider.clone())
+        .await
+        .unwrap();
+    assert_eq!(provider.streams().len(), 1);
+    let compaction = compaction_of(&proposed);
+    assert_eq!(compaction.strategy, "structured_state");
+    assert_eq!(
+        compaction.model.as_ref(),
+        journal.configuration.compaction().summary_model.as_ref()
+    );
+    let expected_head = "## Deterministic extracts\n\
+### Files touched\n\
+- `src/missing.rs` | last: read | denied | digest -\n\
+### Commands\n\
+- `cargo test` (cwd `.`) | exit - | denied\n\
+### Errors\n\
+- read `src/missing.rs`: denied (tools_unavailable)\n\
+- bash `cargo test`: denied (tools_unavailable)\n\
+### Requirements\n\
+- turn 1: \"Read the missing file, then update the notes.\"\n\
+## Model narrative\n";
+    assert!(
+        compaction.summary.starts_with(expected_head),
+        "exact extract block then narrative:\n{}",
+        compaction.summary
+    );
+    // The narrative is appended after the fixed block, which it cannot alter.
+    let (inserted, rest) = compaction
+        .summary
+        .split_once("## Model narrative\n")
+        .expect("narrative section");
+    assert_eq!(rest, narrative);
+    assert!(!inserted.contains("FORGED"));
+    // The strategy's own rendering is exactly what it inserted, and it is
+    // deterministic for the same span.
+    let snapshot = journal.snapshot();
+    let span = select_span(
+        &snapshot,
+        journal.head().as_ref(),
+        journal.configuration.compaction(),
+    )
+    .unwrap();
+    let rendered = crate::context::structured::render_extracts(
+        &crate::context::structured::extracts(&snapshot, &span),
+    );
+    assert_eq!(inserted, rendered);
+    assert_eq!(
+        rendered,
+        crate::context::structured::render_extracts(&crate::context::structured::extracts(
+            &snapshot, &span
+        ))
+    );
+    assert_accepted(&mut journal, &proposed);
+}
+
+#[tokio::test]
+async fn structured_state_extracts_are_bounded_with_explicit_elision() {
+    // The rendered block is bounded, and what it drops is stated with a count.
+    let mut extracts = crate::context::structured::Extracts::default();
+    for index in 0..40 {
+        let path = format!("dir/{index}/{}", "p".repeat(60));
+        extracts.files.insert(
+            path.clone(),
+            crate::context::structured::FileTouch {
+                path,
+                operation: "write",
+                status: Some(ToolStatus::Succeeded),
+                digest: Some(Digest::of(b"content")),
+            },
+        );
+    }
+    extracts.commands = (0..40)
+        .map(|index| crate::context::structured::CommandRun {
+            command: format!("{index} {}", "c".repeat(200)),
+            cwd: ".".into(),
+            status: Some(ToolStatus::Failed),
+            exit_code: Some(1),
+        })
+        .collect();
+    extracts.requirements = (0..40).map(|_| "r".repeat(400)).collect();
+    let rendered = crate::context::structured::render_extracts(&extracts);
+    assert!(
+        rendered.len() <= crate::context::structured::EXTRACTS_BYTES + 128,
+        "bounded: {} bytes",
+        rendered.len()
+    );
+    assert!(
+        rendered.contains("lines omitted)"),
+        "explicit elision marker:\n{rendered}"
+    );
+    assert!(rendered.contains("of 40 listed)"));
+    // A short span keeps every line and states no omission.
+    let small = crate::context::structured::Extracts {
+        requirements: vec!["one requirement".into()],
+        ..Default::default()
+    };
+    let small = crate::context::structured::render_extracts(&small);
+    assert!(small.contains("### Requirements\n- turn 1: \"one requirement\"\n"));
+    assert!(small.contains("### Files touched\n- none"));
+    assert!(!small.contains("omitted"));
+}
+
+#[tokio::test]
+async fn every_strategy_skips_pinned_and_excluded_turns() {
+    for id in StrategyId::ALL {
+        let mut journal = Journal::with_configuration(&strategy_policy(id));
+        let turns: Vec<TurnId> = (0..6)
+            .map(|index| {
+                let ids = journal.exchange(&format!("p{index}"), &format!("r{index}"));
+                journal.turn_of(&ids[0])
+            })
+            .collect();
+        journal.control(&turns[1], ContextMode::Pinned);
+        journal.control(&turns[2], ContextMode::Excluded);
+        let controlled: Vec<EntryId> = turn_entries(&journal, &turns[1])
+            .into_iter()
+            .chain(turn_entries(&journal, &turns[2]))
+            .collect();
+        let provider = Arc::new(ScriptedProvider::new([script(SUMMARY)]));
+        let proposed = propose(&journal, id, provider.clone())
+            .await
+            .unwrap_or_else(|error| panic!("{id}: {}", error.code()));
+        assert_eq!(
+            provider.streams().len(),
+            usize::from(id.needs_model()),
+            "{id}"
+        );
+        let compaction = compaction_of(&proposed);
+        for entry in &controlled {
+            assert!(
+                !compaction.covered_entry_ids.contains(entry),
+                "{id} covered a controlled entry"
+            );
+            assert!(
+                !compaction.summary.contains(entry.as_str()),
+                "{id} named a controlled entry"
+            );
+        }
+        assert_eq!(compaction.covered_entry_ids.len(), 4, "{id}");
+        assert_accepted(&mut journal, &proposed);
+    }
 }

@@ -1,7 +1,7 @@
 //! Offline end-to-end client tests: real journals/tools, injected scripted inference and I/O.
 use harness::ask::{self, Io, Options, Terminal};
 use harness_core::{
-    context::{ContextItem, ModelCapabilities, ModelInfo, ModelLimits},
+    context::{ContextItem, ModelCapabilities, ModelInfo, ModelLimits, StrategyId},
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -51,6 +51,8 @@ impl Fixture {
                 switch_policy: Portability::Reject,
                 known_instances: Vec::new(),
                 summary_model: None,
+                compaction_strategy: StrategyId::default(),
+                explicit_strategy: false,
                 prompt: "hello".into(),
                 approve_read_only: false,
                 driver,
@@ -810,6 +812,57 @@ async fn summary_model_opt_in_is_independent_and_persisted() {
         "cheap"
     );
     assert_ne!(summary, f.options.model);
+}
+
+#[tokio::test]
+async fn compaction_strategy_flag_is_recorded_on_a_new_session() {
+    let mut f = Fixture::new();
+    f.options.compaction_strategy = StrategyId::ObservationMasking;
+    f.options.explicit_strategy = true;
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    assert_eq!(
+        configuration["compaction"]["strategy"],
+        "observation_masking"
+    );
+    // The default stays the baseline, so an unflagged session is unchanged.
+    let f = Fixture::new();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["compaction"]["strategy"],
+        "rolling_summary"
+    );
+}
+
+#[tokio::test]
+async fn continuation_refuses_a_compaction_strategy_change() {
+    let mut f = Fixture::new();
+    let (_, _, first) = f
+        .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
+        .await;
+    f.options.session = Some(f.snapshot(&first).session_id().clone());
+    f.options.compaction_strategy = StrategyId::StructuredState;
+    f.options.explicit_strategy = true;
+    let before = recorded_configuration(&f, &first);
+    let (code, out, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("session_policy_mismatch"), "{err}");
+    // A refused continuation writes nothing: the recorded policy is unchanged.
+    assert_eq!(recorded_configuration(&f, &first), before);
+
+    // Naming the recorded strategy (or none at all) continues normally.
+    f.options.compaction_strategy = StrategyId::RollingSummary;
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("second")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
 }
 
 fn recorded_configuration(f: &Fixture, err: &str) -> Value {

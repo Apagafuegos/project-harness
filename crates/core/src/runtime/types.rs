@@ -277,6 +277,12 @@ pub enum Command {
         /// Its effective mode: `default`, `pinned` or `excluded`.
         mode: crate::session::ContextMode,
     },
+    /// Durably select the compaction strategy for later previews at the current
+    /// head while idle. Recorded as one `ConfigurationChanged`, never a rewrite.
+    SetCompactionStrategy {
+        /// The strategy later previews and commits use.
+        strategy: crate::context::StrategyId,
+    },
     /// State what happened to an invocation whose outcome is unknown. Only
     /// accepted while the runtime awaits resolution.
     ResolveUncertain {
@@ -458,7 +464,8 @@ impl PersistError {
 /// Side effects the driver performs. The core does nothing else.
 #[derive(Clone, Debug)]
 pub enum Effect {
-    /// Generate through RollingSummary in the driver, never in the core.
+    /// Generate through the configured compaction strategy in the driver, never
+    /// in the core.
     ProposeCompaction {
         /// Fresh generation identity.
         token: CompactionToken,
@@ -640,6 +647,13 @@ pub enum Accepted {
         /// Its newly effective mode.
         mode: crate::session::ContextMode,
     },
+    /// The configuration change selecting another compaction strategy is durable.
+    CompactionStrategySet {
+        /// The commit holding the change.
+        ack: CommitAck,
+        /// The strategy later previews use.
+        strategy: crate::context::StrategyId,
+    },
 }
 
 /// Why a command was refused. Refused commands change nothing.
@@ -727,6 +741,11 @@ pub enum EventKind {
         turn_id: TurnId,
         /// Its newly effective mode.
         mode: crate::session::ContextMode,
+    },
+    /// A compaction strategy change is durable. `Committed` follows.
+    CompactionStrategySet {
+        /// The strategy later previews and commits use.
+        strategy: crate::context::StrategyId,
     },
     /// A commit is durable. One per `Persisted`.
     Committed {

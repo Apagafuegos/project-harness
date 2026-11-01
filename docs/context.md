@@ -383,8 +383,17 @@ the record holds. An excluded turn is neither covered nor sent, and stays
 The optional session configuration object is independently shape-checked:
 
 ```json
-{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2,"automatic":true}}
+{"compaction":{"strategy":"rolling_summary","summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2,"automatic":true}}
 ```
+
+`strategy` is a closed enum recorded at session creation, defaulting to
+`rolling_summary` when absent. `observation_masking` and `structured_state` are
+the Milestone 6 alternatives ([decision 0026](decisions/0026-compaction-strategies.md));
+an unknown name fails loading as `invalid_compaction`. Changing the strategy
+mid-session is one recorded, idle-only `ConfigurationChanged` through
+`Command::SetCompactionStrategy`: a fresh configuration artifact and policy
+revision, never a rewritten entry. The strategy is part of the preview policy
+fingerprint, so a change makes outstanding previews stale.
 
 Without `summary_model`, selection still works but generation returns
 `summary_model_unconfigured`; the session model is never used by default.
@@ -395,12 +404,36 @@ configured and false otherwise; explicitly enabling it without a summary model
 is invalid. `automatic: false` keeps manual preview/commit available, but refuses
 overflowing starts rather than silently generating a summary.
 
-`RollingSummary::new(Arc<dyn ModelProvider>)` implements `CompactionStrategy`.
-`propose(CompactionInput, OperationControl)` uses the existing builder's source
-projection and prior summaries, fixed structured-section instructions, no tools
-and no session-owned native state or continuation. Cancellation and deadlines
-return `Cancelled` without a preview. Provider failures, refusals, empty,
-over-budget or malformed summaries are coded errors, not truncated results.
+`context::compaction::strategy(id, provider)` is the single registry that maps a
+`StrategyId` to an implementation, and the driver's `ProposeCompaction` effect
+resolves it from the session configuration, so nothing in the runtime core
+branches on the strategy. `RollingSummary::new(Arc<dyn ModelProvider>)`
+implements `CompactionStrategy`. `propose(CompactionInput, OperationControl)`
+uses the existing builder's source projection and prior summaries, fixed
+structured-section instructions, no tools and no session-owned native state or
+continuation. Cancellation and deadlines return `Cancelled` without a preview.
+Provider failures, refusals, empty, over-budget or malformed summaries are coded
+errors, not truncated results.
+
+The two alternatives share the same preparation and assembly, so they differ
+only in the summary they produce:
+
+- **`observation_masking`** is deterministic and model-free: it renders the
+  covered span with each tool result body replaced by a placeholder naming the
+  tool, its status, the body size and the artifact digest when there is one, and
+  tool calls as one bounded line. It opens no provider stream and records no
+  `Compaction.model`. An over-budget rendering fails with
+  `masked_span_too_long`; nothing is truncated silently. The exact format is in
+  the ADR and pinned by `context/golden/observation-masking.txt`.
+- **`structured_state`** inserts deterministic extracts — files touched with the
+  last operation and last known digest, shell commands with exit status,
+  non-succeeded calls, and the first user message of each covered turn — then
+  the model's narrative over the same source, with the extracts supplied as
+  fixed quoted context. The extracts are inserted by the strategy and cannot be
+  altered by the model. `Compaction.model` is set.
+
+Both respect pins and exclusions exactly as the baseline does, and `automatic`
+needs a summary model only for the strategies that use one.
 
 The result is data only: the unchanged proposed compaction entry, exact manifest
 artifact bytes and reference, session-model before/after reports, and bindings
@@ -441,13 +474,18 @@ append. The ID-only commit command has no durable command receipt, whereas the
 subsequent `StartTurn` retains its normal C1 receipt and retry behavior. Automatic
 generation never runs merely because a session was reopened or inspected.
 
+`--compaction-strategy` selects the strategy for a new session in `ask` and the
+TUI. On continuation an explicitly different strategy is refused with
+`session_policy_mismatch`, exactly like an explicit summary-model change; the
+recorded strategy is kept when the flag is absent.
+
 See [runtime compaction commands](runtime.md#compaction-commands-and-automatic-triggers)
 for pre-C1 budget checking, pending-start deduplication, events and failure codes.
 
 ## Not implemented
 
 - Real tokenizers (estimates remain explicitly heuristic).
-- Alternative compaction strategies (m6-04).
+- Comparing the three strategies on live models (m6-05, `crates/eval`).
 
 ## Tests
 

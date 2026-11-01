@@ -1064,6 +1064,9 @@ fn normalized(finished: &Finished) -> Vec<String> {
                     Accepted::ContextControlSet {
                         ack: a, turn_id, ..
                     } => format!("ContextControlSet({turn_id}, {})", ack(a)),
+                    Accepted::CompactionStrategySet { ack: a, strategy } => {
+                        format!("CompactionStrategySet({strategy}, {})", ack(a))
+                    }
                     Accepted::ApprovalSubmitted {
                         approval_id,
                         ack: a,

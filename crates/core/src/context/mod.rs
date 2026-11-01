@@ -50,19 +50,24 @@ mod check;
 pub mod compaction;
 mod config;
 mod estimate;
+mod masking;
 mod projection;
 mod report;
+mod structured;
 
 pub use builder::{BuiltContext, ContextBuilder, ContextError};
 pub use config::{
     CompactionConfig, ConfigurationError, ContextConfig, InputMediaKind, ModelCapabilities,
-    ModelCatalog, ModelInfo, ModelLimits, SessionConfiguration,
+    ModelCatalog, ModelInfo, ModelLimits, SessionConfiguration, StrategyId,
+    with_compaction_strategy,
 };
 pub use estimate::{
     Estimate, EstimateMethod, EstimatorInfo, HeuristicEstimator, MediaKind, TokenEstimator,
 };
+pub use masking::ObservationMasking;
 pub use projection::{ContextItem, Instruction, InstructionLevel, Projection, fingerprint};
 pub use report::*;
+pub use structured::StructuredState;
 
 /// Version of the inclusion rules and item shapes, hashed into every
 /// fingerprint. Bump it whenever a rule or item changes, so fingerprints of

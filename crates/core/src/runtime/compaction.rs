@@ -1,8 +1,11 @@
 //! Idle-only compaction orchestration. All generation is a driver effect.
 use super::*;
 use crate::context::compaction::*;
+use crate::context::{CompactionConfig, SessionConfiguration, StrategyId};
 use crate::model::ArtifactSource;
-use crate::session::{Record, RecordPayload, compaction_manifest};
+use crate::session::{
+    ConfigurationChanged, JournalEvent, Record, RecordPayload, compaction_manifest,
+};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -90,7 +93,8 @@ impl Runtime {
             self.configuration.compaction(),
         )
         .map_err(CompactionError::NotEligible)?;
-        if self.configuration.compaction().summary_model.is_none() {
+        let config = self.configuration.compaction();
+        if config.strategy.needs_model() && config.summary_model.is_none() {
             return Err(CompactionError::Invalid("summary_model_unconfigured"));
         }
         Ok(())
@@ -214,14 +218,16 @@ impl Runtime {
         if binding.head.as_ref() != snapshot.head() || preview.entry.parent_id != binding.head {
             return Err("head");
         }
-        if binding.journal_sequence != snapshot.sequence() {
-            return Err("journal_sequence");
-        }
         if snapshot.model_at(snapshot.head()).ok() != Some(&binding.session_model) {
             return Err("session_model");
         }
+        // Policy first: a recorded configuration change also advances the
+        // sequence, and the strategy it selects is the reason the preview died.
         if binding.policy_fingerprint != policy_fingerprint(self.configuration.compaction()) {
             return Err("policy_fingerprint");
+        }
+        if binding.journal_sequence != snapshot.sequence() {
+            return Err("journal_sequence");
         }
         let EntryPayload::Compaction(c) = &preview.entry.payload else {
             return Err("source_fingerprint");
@@ -246,9 +252,9 @@ impl Runtime {
         {
             return Err("source_fingerprint");
         }
-        if c.strategy != RollingSummary::NAME
-            || c.strategy_version != RollingSummary::VERSION
-            || c.model.as_ref() != self.configuration.compaction().summary_model.as_ref()
+        if c.strategy != self.configuration.compaction().strategy.as_str()
+            || c.strategy_version != self.configuration.compaction().strategy.version()
+            || c.model.as_ref() != expected_summary_model(self.configuration.compaction())
         {
             return Err("policy_fingerprint");
         }
@@ -313,6 +319,71 @@ impl Runtime {
                 tool_events: vec![event],
                 compaction_start: start,
                 ..idle_flight()
+            },
+            None,
+            env,
+        );
+        None
+    }
+
+    /// Durably select another compaction strategy while idle. The exact
+    /// configuration bytes are rewritten, published and bound by one
+    /// `ConfigurationChanged` at a fresh policy revision; nothing else in the
+    /// configuration changes and no entry is rewritten. Every outstanding
+    /// preview becomes stale, because the strategy is part of its policy
+    /// fingerprint.
+    pub(super) fn set_compaction_strategy(
+        &mut self,
+        request: RequestId,
+        strategy: StrategyId,
+        env: &mut dyn Env,
+    ) -> Option<Result<Accepted, Rejection>> {
+        if let Err(rejection) = self.idle_check() {
+            return Some(Err(rejection));
+        }
+        let snapshot = self.snapshot().clone();
+        if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
+            return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
+        }
+        if self.configuration.compaction().strategy == strategy {
+            return Some(Err(Rejection::Invalid("strategy_unchanged")));
+        }
+        let revision = env.policy_revision();
+        let bytes = match crate::context::with_compaction_strategy(
+            self.configuration.bytes(),
+            strategy,
+            &revision,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(Err(Rejection::Invalid(error.code()))),
+        };
+        let reference = ArtifactRef {
+            sha256: Digest::of(&bytes),
+            bytes: bytes.len() as u64,
+        };
+        let configuration = match SessionConfiguration::parse(reference.clone(), &bytes) {
+            Ok(configuration) => configuration,
+            Err(error) => return Some(Err(Rejection::Invalid(error.code()))),
+        };
+        // A strategy that needs a model cannot be selected without one: the
+        // recorded configuration must always be able to generate.
+        let compaction = configuration.compaction();
+        if compaction.strategy.needs_model() && compaction.summary_model.is_none() {
+            return Some(Err(Rejection::Invalid("summary_model_unconfigured")));
+        }
+        let commit = audit(
+            &snapshot,
+            vec![JournalEvent::ConfigurationChanged(ConfigurationChanged {
+                configuration: reference,
+                policy_revision: revision,
+            })],
+        );
+        self.persist(
+            commit,
+            InFlight {
+                artifacts: vec![bytes],
+                configuration: Some(configuration),
+                ..waiting(request, Waiter::CompactionStrategySet(strategy))
             },
             None,
             env,
@@ -451,6 +522,16 @@ impl Runtime {
         );
     }
 }
+/// The model a committed compaction must record for this policy: the configured
+/// summary model for the strategies that use one, and nothing otherwise.
+fn expected_summary_model(config: &CompactionConfig) -> Option<&ModelRef> {
+    config
+        .strategy
+        .needs_model()
+        .then_some(config.summary_model.as_ref())
+        .flatten()
+}
+
 fn record_commit_head(record: &Record) -> Option<&EntryId> {
     match &record.payload {
         RecordPayload::Commit(commit) => commit.head.to.as_ref(),

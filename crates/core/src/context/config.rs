@@ -1,7 +1,7 @@
 //! What the builder reads besides the snapshot: runtime configuration, model
 //! limits, and the decoded session configuration artifact.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
@@ -201,11 +201,74 @@ pub struct SessionConfiguration {
     compaction: CompactionConfig,
 }
 
+/// Closed compaction strategy identity. Recorded in the session configuration,
+/// bound into every compaction entry and into the preview policy fingerprint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StrategyId {
+    /// The Milestone 4 baseline: a model-written rolling summary.
+    #[default]
+    RollingSummary,
+    /// Deterministic, model-free masking of tool result bodies.
+    ObservationMasking,
+    /// Deterministic extracts anchored by a model narrative.
+    StructuredState,
+}
+
+impl StrategyId {
+    /// Every strategy, in the order clients should offer them.
+    pub const ALL: [Self; 3] = [
+        Self::RollingSummary,
+        Self::ObservationMasking,
+        Self::StructuredState,
+    ];
+
+    /// Stable journal and configuration name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RollingSummary => "rolling_summary",
+            Self::ObservationMasking => "observation_masking",
+            Self::StructuredState => "structured_state",
+        }
+    }
+
+    /// Selection, prompt and output policy version, recorded beside the name.
+    pub const fn version(self) -> &'static str {
+        "1"
+    }
+
+    /// Whether generation needs a configured summary model.
+    pub const fn needs_model(self) -> bool {
+        match self {
+            Self::ObservationMasking => false,
+            Self::RollingSummary | Self::StructuredState => true,
+        }
+    }
+}
+
+impl fmt::Display for StrategyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for StrategyId {
+    type Err = ();
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|strategy| strategy.as_str() == name)
+            .ok_or(())
+    }
+}
+
 /// Independently configured summary generation; never defaults to the session model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ConfiguredCompaction")]
 pub struct CompactionConfig {
-    /// Required for generation, but not for pure selection.
+    /// Selected strategy; defaults to `rolling_summary`.
+    pub strategy: StrategyId,
+    /// Required by the strategies that use a model, not by pure selection.
     pub summary_model: Option<ModelRef>,
     /// Maximum estimated summary tokens; defaults to 2048.
     pub max_summary_tokens: u32,
@@ -218,6 +281,7 @@ pub struct CompactionConfig {
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
+            strategy: StrategyId::default(),
             summary_model: None,
             max_summary_tokens: 2048,
             retain_recent_turns: 2,
@@ -232,9 +296,22 @@ impl CompactionConfig {
         self.automatic
     }
 
+    /// Decode a configuration artifact's optional `compaction` object, applying
+    /// defaults exactly as [`SessionConfiguration::parse`] does.
+    pub fn from_value(value: Option<&serde_json::Value>) -> Result<Self, ConfigurationError> {
+        match value {
+            None => Ok(Self::default()),
+            Some(value) if value.is_object() => serde_json::from_value(value.clone())
+                .map_err(|_| ConfigurationError::InvalidCompaction),
+            Some(_) => Err(ConfigurationError::InvalidCompaction),
+        }
+    }
+
     /// Validate programmatically constructed values as well as decoded values.
+    /// Automatic compaction requires a summary model only when the selected
+    /// strategy uses one.
     pub fn validate(&self) -> Result<(), ConfigurationError> {
-        if (self.automatic() && self.summary_model.is_none())
+        if (self.automatic() && self.strategy.needs_model() && self.summary_model.is_none())
             || self.retain_recent_turns < 2
             || self.max_summary_tokens == 0
             || self
@@ -251,6 +328,7 @@ impl CompactionConfig {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ConfiguredCompaction {
+    strategy: StrategyId,
     summary_model: Option<ModelRef>,
     max_summary_tokens: u32,
     retain_recent_turns: usize,
@@ -260,6 +338,7 @@ impl Default for ConfiguredCompaction {
     fn default() -> Self {
         let defaults = CompactionConfig::default();
         Self {
+            strategy: StrategyId::default(),
             summary_model: None,
             max_summary_tokens: defaults.max_summary_tokens,
             retain_recent_turns: defaults.retain_recent_turns,
@@ -271,6 +350,7 @@ impl TryFrom<ConfiguredCompaction> for CompactionConfig {
     type Error = ConfigurationError;
     fn try_from(raw: ConfiguredCompaction) -> Result<Self, Self::Error> {
         let config = Self {
+            strategy: raw.strategy,
             automatic: raw.automatic.unwrap_or(raw.summary_model.is_some()),
             summary_model: raw.summary_model,
             max_summary_tokens: raw.max_summary_tokens,
@@ -288,6 +368,41 @@ struct ConfiguredInference {
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     provider_options: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Rewrite exact configuration bytes to select another compaction strategy and
+/// bind a fresh policy revision, changing nothing else. The caller must decode
+/// the result through [`SessionConfiguration::parse`] before installing it, so
+/// an unusable rewrite can never be recorded.
+pub fn with_compaction_strategy(
+    bytes: &[u8],
+    strategy: StrategyId,
+    policy_revision: &str,
+) -> Result<Vec<u8>, ConfigurationError> {
+    let Ok(serde_json::Value::Object(mut object)) = codec::unique_json(bytes) else {
+        return Err(ConfigurationError::NotAnObject);
+    };
+    match object.get_mut("compaction") {
+        Some(serde_json::Value::Object(compaction)) => {
+            compaction.insert(
+                "strategy".into(),
+                serde_json::Value::String(strategy.as_str().into()),
+            );
+        }
+        Some(_) => return Err(ConfigurationError::InvalidCompaction),
+        None => {
+            object.insert(
+                "compaction".into(),
+                serde_json::json!({"strategy": strategy.as_str()}),
+            );
+        }
+    }
+    object.insert(
+        "policy_revision".into(),
+        serde_json::Value::String(policy_revision.into()),
+    );
+    serde_json::to_vec(&serde_json::Value::Object(object))
+        .map_err(|_| ConfigurationError::NotAnObject)
 }
 
 impl SessionConfiguration {

@@ -9,7 +9,7 @@ use harness::{
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    context::ModelLimits,
+    context::{ModelLimits, StrategyId},
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -79,6 +79,8 @@ impl Fixture {
             switch_policy: Portability::Reject,
             known_instances: vec![],
             summary_model: None,
+            compaction_strategy: StrategyId::default(),
+            explicit_strategy: false,
             driver,
             sandbox: None,
         };

@@ -74,6 +74,8 @@ active turn, timers, and a requested cancel.
 Commands are `StartTurn { command_id, content }`, `Cancel { turn_id }`,
 `SelectHead { head }`, `SwitchModel { model, policy }`,
 `SetContextControl { turn_id, mode }` (see [context controls](#context-controls)),
+`SetCompactionStrategy { strategy }` (see
+[compaction commands](#compaction-commands-and-automatic-triggers)),
 `ResolveUncertain { invocation_id, resolution }` (see [Recovery](#recovery)), and
 `SubmitApproval { approval_id, plan_digest, decision, remember }`. `RequestId`, `CommitToken`,
 `InferenceId`, `TimerId` and `CompactionToken` are `u64` values local to one runtime and never
@@ -157,6 +159,17 @@ A tombstone may retain an ID and differing field, never the discarded proposal.
 There is no durable command receipt for this ID-only command: after a crash
 before reply, replay rejects the ephemeral ID instead of writing another summary.
 `StartTurn` continues to use ordinary durable command receipts for C1.
+
+`SetCompactionStrategy { strategy }` is idle-only and appends no entry: it
+publishes a rewritten configuration artifact (only `compaction.strategy` and a
+fresh `policy_revision` differ), records one `ConfigurationChanged`, installs the
+decoded configuration after the acknowledgement and replies
+`Accepted::CompactionStrategySet { ack, strategy }` followed by
+`EventKind::CompactionStrategySet`. Refusals write nothing: `Busy` while a turn is
+open, `head_inside_tool_exchange`, `strategy_unchanged` for the current strategy,
+`summary_model_unconfigured` when a model-based strategy has no summary model,
+and the configuration codes of an unusable rewrite. Every outstanding preview
+becomes `stale_preview` on `policy_fingerprint`.
 
 `CancelCompaction` cancels a running generation and replies
 `CompactionCancelled`; its pending preview/start request receives `cancelled`

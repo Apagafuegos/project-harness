@@ -61,6 +61,7 @@ fn ask_help_and_usage_errors() {
     assert!(out.status.success());
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--summary-model"));
+    assert!(help.contains("--compaction-strategy"));
     assert!(help.contains("--switch-policy"));
     assert!(help.contains("anthropic"));
     assert!(help.contains("deepseek"));
@@ -74,6 +75,14 @@ fn ask_help_and_usage_errors() {
             ".",
             "--switch-policy",
             "convert-supported",
+            "hello",
+        ],
+        vec![
+            "ask",
+            "--workspace",
+            ".",
+            "--compaction-strategy",
+            "masking",
             "hello",
         ],
     ] {

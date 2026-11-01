@@ -130,6 +130,7 @@ enum Waiter {
     HeadSelected,
     ModelSwitched(Box<crate::context::PreviewReport>),
     ContextControlSet { turn_id: TurnId, mode: ContextMode },
+    CompactionStrategySet(crate::context::StrategyId),
     ApprovalSubmitted(crate::session::ApprovalId),
     CompactionCommitted(EntryId),
 }
@@ -500,6 +501,9 @@ impl Runtime {
             }
             Command::SetContextControl { turn_id, mode } => {
                 self.set_context_control(request, turn_id, mode, env)
+            }
+            Command::SetCompactionStrategy { strategy } => {
+                self.set_compaction_strategy(request, strategy, env)
             }
             Command::ResolveUncertain {
                 invocation_id,
@@ -1387,6 +1391,13 @@ impl Runtime {
                         ack: ack.clone(),
                         turn_id,
                         mode,
+                    }
+                }
+                Waiter::CompactionStrategySet(strategy) => {
+                    self.emit(EventKind::CompactionStrategySet { strategy });
+                    Accepted::CompactionStrategySet {
+                        ack: ack.clone(),
+                        strategy,
                     }
                 }
                 Waiter::ApprovalSubmitted(approval_id) => Accepted::ApprovalSubmitted {

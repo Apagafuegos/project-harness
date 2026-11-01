@@ -1,6 +1,6 @@
 //! Shared provider, model and durable session assembly for headless and terminal clients.
 use harness_core::{
-    context::{ModelCatalog, PreviewReport},
+    context::{CompactionConfig, ModelCatalog, PreviewReport, StrategyId},
     model::ModelProvider,
     runtime::*,
     session::*,
@@ -40,6 +40,12 @@ pub struct SessionOptions {
     pub known_instances: Vec<String>,
     /// Independent summary model, enabling automatic compaction only when set.
     pub summary_model: Option<ModelRef>,
+    /// Compaction strategy for a new session: recorded in its configuration.
+    pub compaction_strategy: StrategyId,
+    /// Whether the user supplied a strategy override. A continuation refuses an
+    /// explicit strategy that differs from the recorded one with
+    /// `session_policy_mismatch`, exactly as an explicit summary-model change.
+    pub explicit_strategy: bool,
     /// Runtime defaults and sourced catalog. No caller-installed tool host.
     pub driver: DriverConfig,
     /// Real host assembly settings (tests can disable the shell).
@@ -113,18 +119,30 @@ pub async fn open_session(
             .map_err(|_| configuration("configuration_unreadable"))?;
         let policy: Value =
             serde_json::from_slice(&bytes).map_err(|_| configuration("invalid_configuration"))?;
-        let expected = policy_json(o.summary_model.as_ref());
+        let expected = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
         for field in [
             "workspace_read",
             "workspace_mutation",
             "process",
             "network",
             "allowances",
-            "compaction",
         ] {
             if policy[field] != expected[field] {
                 return Err(configuration("session_policy_mismatch"));
             }
+        }
+        // The compaction policy is compared semantically, so an explicit default
+        // is not a mismatch and an explicit strategy is refused only when it
+        // differs from the recorded one.
+        let recorded = CompactionConfig::from_value(policy.get("compaction"))
+            .map_err(|_| configuration("invalid_configuration"))?;
+        let mut requested = CompactionConfig::from_value(expected.get("compaction"))
+            .map_err(|_| configuration("invalid_configuration"))?;
+        if !o.explicit_strategy {
+            requested.strategy = recorded.strategy;
+        }
+        if recorded != requested {
+            return Err(configuration("session_policy_mismatch"));
         }
         let head_model = snapshot
             .model_at(snapshot.head())
@@ -142,7 +160,7 @@ pub async fn open_session(
             .map_err(storage)?
     } else {
         known(o, &o.model)?;
-        let policy = policy_json(o.summary_model.as_ref());
+        let policy = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
         let policy_bytes =
             serde_json::to_vec(&policy).map_err(|_| configuration("invalid_configuration"))?;
         let parsed = PolicySnapshot::parse(
@@ -230,11 +248,11 @@ pub fn continuation_switch(o: &SessionOptions) -> Option<(ModelRef, Portability)
     Some((o.model.clone(), o.switch_policy))
 }
 
-fn policy_json(summary: Option<&ModelRef>) -> Value {
+fn policy_json(summary: Option<&ModelRef>, strategy: StrategyId) -> Value {
     json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash"],
         "workspace_read":"ask", "workspace_mutation":"ask", "process":"ask", "network":"deny",
         "protected_paths":[], "allowances":[],
-        "compaction":{"summary_model":summary,"automatic":summary.is_some()}})
+        "compaction":{"strategy":strategy.as_str(),"summary_model":summary,"automatic":summary.is_some()}})
 }
 
 /// Apply an explicit continuation switch after recovery and before starting a turn.
@@ -277,7 +295,7 @@ fn session_configuration(
     o: &SessionOptions,
     availability: &ToolAvailability,
 ) -> Result<(Value, Vec<String>), Failure> {
-    let mut value = policy_json(o.summary_model.as_ref());
+    let mut value = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
     let tools = available_tools(availability);
     let base = include_str!("base-instruction.txt")
         .replace(
