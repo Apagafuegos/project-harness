@@ -311,37 +311,37 @@ design, so these are force-added explicitly and nothing else from it is.
 
 Offline matrix (mechanics, label: offline):
 
-- `eval/results/m6-06-offline/aggregate.json`
-- `eval/results/m6-06-offline/aggregate.md`
-- `eval/results/m6-06-offline/records/bugfix-with-test.observation_masking.0.json`
-- `eval/results/m6-06-offline/records/bugfix-with-test.rolling_summary.0.json`
-- `eval/results/m6-06-offline/records/bugfix-with-test.structured_state.0.json`
-- `eval/results/m6-06-offline/records/feature-style-rule.observation_masking.0.json`
-- `eval/results/m6-06-offline/records/feature-style-rule.rolling_summary.0.json`
-- `eval/results/m6-06-offline/records/feature-style-rule.structured_state.0.json`
-- `eval/results/m6-06-offline/records/multi-file-change.observation_masking.0.json`
-- `eval/results/m6-06-offline/records/multi-file-change.rolling_summary.0.json`
-- `eval/results/m6-06-offline/records/multi-file-change.structured_state.0.json`
-- `eval/results/m6-06-offline/records/refactor-constraint.observation_masking.0.json`
-- `eval/results/m6-06-offline/records/refactor-constraint.rolling_summary.0.json`
-- `eval/results/m6-06-offline/records/refactor-constraint.structured_state.0.json`
+- [eval/results/m6-06-offline/aggregate.json](../eval/results/m6-06-offline/aggregate.json)
+- [eval/results/m6-06-offline/aggregate.md](../eval/results/m6-06-offline/aggregate.md)
+- [eval/results/m6-06-offline/records/bugfix-with-test.observation_masking.0.json](../eval/results/m6-06-offline/records/bugfix-with-test.observation_masking.0.json)
+- [eval/results/m6-06-offline/records/bugfix-with-test.rolling_summary.0.json](../eval/results/m6-06-offline/records/bugfix-with-test.rolling_summary.0.json)
+- [eval/results/m6-06-offline/records/bugfix-with-test.structured_state.0.json](../eval/results/m6-06-offline/records/bugfix-with-test.structured_state.0.json)
+- [eval/results/m6-06-offline/records/feature-style-rule.observation_masking.0.json](../eval/results/m6-06-offline/records/feature-style-rule.observation_masking.0.json)
+- [eval/results/m6-06-offline/records/feature-style-rule.rolling_summary.0.json](../eval/results/m6-06-offline/records/feature-style-rule.rolling_summary.0.json)
+- [eval/results/m6-06-offline/records/feature-style-rule.structured_state.0.json](../eval/results/m6-06-offline/records/feature-style-rule.structured_state.0.json)
+- [eval/results/m6-06-offline/records/multi-file-change.observation_masking.0.json](../eval/results/m6-06-offline/records/multi-file-change.observation_masking.0.json)
+- [eval/results/m6-06-offline/records/multi-file-change.rolling_summary.0.json](../eval/results/m6-06-offline/records/multi-file-change.rolling_summary.0.json)
+- [eval/results/m6-06-offline/records/multi-file-change.structured_state.0.json](../eval/results/m6-06-offline/records/multi-file-change.structured_state.0.json)
+- [eval/results/m6-06-offline/records/refactor-constraint.observation_masking.0.json](../eval/results/m6-06-offline/records/refactor-constraint.observation_masking.0.json)
+- [eval/results/m6-06-offline/records/refactor-constraint.rolling_summary.0.json](../eval/results/m6-06-offline/records/refactor-constraint.rolling_summary.0.json)
+- [eval/results/m6-06-offline/records/refactor-constraint.structured_state.0.json](../eval/results/m6-06-offline/records/refactor-constraint.structured_state.0.json)
 
 Live matrix (include the eight failed records):
 
-- `eval/results/m6-06-live/aggregate.json`
-- `eval/results/m6-06-live/aggregate.md`
-- `eval/results/m6-06-live/records/bugfix-with-test.observation_masking.0.json`
-- `eval/results/m6-06-live/records/bugfix-with-test.rolling_summary.0.json`
-- `eval/results/m6-06-live/records/bugfix-with-test.structured_state.0.json`
-- `eval/results/m6-06-live/records/feature-style-rule.observation_masking.0.json`
-- `eval/results/m6-06-live/records/feature-style-rule.rolling_summary.0.json`
-- `eval/results/m6-06-live/records/feature-style-rule.structured_state.0.json`
-- `eval/results/m6-06-live/records/multi-file-change.observation_masking.0.json`
-- `eval/results/m6-06-live/records/multi-file-change.rolling_summary.0.json`
-- `eval/results/m6-06-live/records/multi-file-change.structured_state.0.json`
-- `eval/results/m6-06-live/records/refactor-constraint.observation_masking.0.json`
-- `eval/results/m6-06-live/records/refactor-constraint.rolling_summary.0.json`
-- `eval/results/m6-06-live/records/refactor-constraint.structured_state.0.json`
+- [eval/results/m6-06-live/aggregate.json](../eval/results/m6-06-live/aggregate.json)
+- [eval/results/m6-06-live/aggregate.md](../eval/results/m6-06-live/aggregate.md)
+- [eval/results/m6-06-live/records/bugfix-with-test.observation_masking.0.json](../eval/results/m6-06-live/records/bugfix-with-test.observation_masking.0.json)
+- [eval/results/m6-06-live/records/bugfix-with-test.rolling_summary.0.json](../eval/results/m6-06-live/records/bugfix-with-test.rolling_summary.0.json)
+- [eval/results/m6-06-live/records/bugfix-with-test.structured_state.0.json](../eval/results/m6-06-live/records/bugfix-with-test.structured_state.0.json)
+- [eval/results/m6-06-live/records/feature-style-rule.observation_masking.0.json](../eval/results/m6-06-live/records/feature-style-rule.observation_masking.0.json)
+- [eval/results/m6-06-live/records/feature-style-rule.rolling_summary.0.json](../eval/results/m6-06-live/records/feature-style-rule.rolling_summary.0.json)
+- [eval/results/m6-06-live/records/feature-style-rule.structured_state.0.json](../eval/results/m6-06-live/records/feature-style-rule.structured_state.0.json)
+- [eval/results/m6-06-live/records/multi-file-change.observation_masking.0.json](../eval/results/m6-06-live/records/multi-file-change.observation_masking.0.json)
+- [eval/results/m6-06-live/records/multi-file-change.rolling_summary.0.json](../eval/results/m6-06-live/records/multi-file-change.rolling_summary.0.json)
+- [eval/results/m6-06-live/records/multi-file-change.structured_state.0.json](../eval/results/m6-06-live/records/multi-file-change.structured_state.0.json)
+- [eval/results/m6-06-live/records/refactor-constraint.observation_masking.0.json](../eval/results/m6-06-live/records/refactor-constraint.observation_masking.0.json)
+- [eval/results/m6-06-live/records/refactor-constraint.rolling_summary.0.json](../eval/results/m6-06-live/records/refactor-constraint.rolling_summary.0.json)
+- [eval/results/m6-06-live/records/refactor-constraint.structured_state.0.json](../eval/results/m6-06-live/records/refactor-constraint.structured_state.0.json)
 
 The dry run wrote no records (it exits before a run is written) and the scratch
 trees it and the live run kept are deliberately not committed.
@@ -354,7 +354,7 @@ used only as the auditor here; the project pipeline is Rust and unchanged):
 
 ```sh
 python3 - <<'PY'
-import json, glob, collections
+import json, glob, collections, itertools
 keys = ["requirements_retained_projection","requirements_retained_probe",
         "requirements_total","files_recalled_projection","files_recalled_probe",
         "files_total","completions","checkable","failures",
@@ -366,24 +366,37 @@ for root in ["eval/results/m6-06-offline","eval/results/m6-06-live"]:
     pertask = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))
     for r in recs:
         c = per[r["strategy"]]; c["runs"] += 1
+        pertask[r["task"]][r["strategy"]]["runs"] += 1
         m = r.get("metrics")
         if m:
             for k in keys[:6]:
                 c[k] += m[k]; pertask[r["task"]][r["strategy"]][k] += m[k]
             if m.get("completion") is not None:
                 c["checkable"] += 1; c["completions"] += int(m["completion"])
+                pertask[r["task"]][r["strategy"]]["checkable"] += 1
+                pertask[r["task"]][r["strategy"]]["completions"] += int(m["completion"])
         t = r.get("tokens")
         if t:
             c["tokens_before"] += t["before"]; c["tokens_after"] += t["after"]
+            pertask[r["task"]][r["strategy"]]["tokens_before"] += t["before"]
+            pertask[r["task"]][r["strategy"]]["tokens_after"] += t["after"]
         ok = all(r["errors"].get(k) is None for k in
                  ["replay","control","compaction","probe","continuation","check"]) and m is not None
         c["failures"] += 0 if ok else 1
+        pertask[r["task"]][r["strategy"]]["failures"] += 0 if ok else 1
     bad = [(e["strategy"], k, e[k], per[e["strategy"]][k])
-           for e in agg["strategies"] for k in keys if e[k] != per[e["strategy"]][k]]
+           for e in agg["strategies"] for k in ["runs"] + keys if e[k] != per[e["strategy"]][k]]
     bad += [(t["task"], e["strategy"], k, e[k], pertask[t["task"]][e["strategy"]][k])
-            for t in agg["tasks"] for e in t["strategies"] for k in keys[:8]
+            for t in agg["tasks"] for e in t["strategies"] for k in ["runs"] + keys
             if e[k] != pertask[t["task"]][e["strategy"]][k]]
     combos = collections.Counter((r["task"], r["strategy"], r["repetition"]) for r in recs)
+    expected = set(itertools.product(
+        ["bugfix-with-test", "feature-style-rule", "multi-file-change", "refactor-constraint"],
+        ["rolling_summary", "observation_masking", "structured_state"], [0]))
+    assert set(combos) == expected and all(v == 1 for v in combos.values())
+    assert len(recs) == agg["runs"] == 12 and not bad, bad
+    assert all(r["harness_commit"] == agg["harness_commit"] ==
+               "cd14762332ad459617bd518ed9f55d08a0cab0ec" for r in recs)
     print(root, "records:", len(recs), "aggregate.runs:", agg["runs"],
           "mismatches:", bad or "none",
           "duplicate/missing cells:", [k for k, v in combos.items() if v != 1] or "none")
