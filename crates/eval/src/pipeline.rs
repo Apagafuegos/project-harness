@@ -302,6 +302,7 @@ async fn drive(
     let phase = Arc::new(PhaseProvider {
         scripted: scripted.clone(),
         later,
+        script_post_history: matches!(plan, ModelPlan::Scripted),
         replaying_history: AtomicBool::new(true),
     });
     let mut known_instances = vec![options.model.provider_instance.clone()];
@@ -366,6 +367,7 @@ async fn drive(
 struct PhaseProvider {
     scripted: Arc<ScriptedProvider>,
     later: Arc<dyn ModelProvider>,
+    script_post_history: bool,
     replaying_history: AtomicBool,
 }
 
@@ -452,7 +454,7 @@ async fn run_stages(
     // The history has replayed, so the configured provider takes over here.
     session.begin_post_history();
     let compaction_started = Instant::now();
-    if strategy.needs_model() {
+    if strategy.needs_model() && session.phase.script_post_history {
         session
             .scripted
             .push(reply_script(&task.scripted().summary));
@@ -509,7 +511,9 @@ async fn run_stages(
 
     // 5. Ask the probe and score its answer.
     let probe_started = Instant::now();
-    session.scripted.push(reply_script(&task.scripted().probe));
+    if session.phase.script_post_history {
+        session.scripted.push(reply_script(&task.scripted().probe));
+    }
     let probe_turn = session.start(PROBE_PROMPT).await.at(Stage::Probe)?;
     session.settle().await.at(Stage::Probe)?;
     let snapshot = session.snapshot().await.at(Stage::Probe)?;
@@ -538,8 +542,10 @@ async fn run_stages(
     // 6. Continue the task through the normal tool loop.
     let continuation_started = Instant::now();
     let streams_before = session.scripted.streams().len();
-    for step in &task.scripted().continuation {
-        session.scripted.push(script_for(step));
+    if session.phase.script_post_history {
+        for step in &task.scripted().continuation {
+            session.scripted.push(script_for(step));
+        }
     }
     let continuation_turn = session
         .start(task.continue_prompt())

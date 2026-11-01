@@ -27,6 +27,76 @@ use harness_eval::{
 
 const COMMIT: &str = "970b9b566a256af9b50cd037297375d31e0f579f";
 
+#[test]
+#[ignore = "spawns the Bubblewrap sandbox; runs in the S02 gate"]
+fn hidden_check_cleanup_preserves_a_replaced_regular_file() {
+    let temp = scratch();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let script = temp.path().join("check.sh");
+    fs::write(
+        &script,
+        "rm .harness-eval-check.sh\nprintf replacement > .harness-eval-check.sh\n",
+    )
+    .unwrap();
+    let check = HiddenCheck::probe(temp.path()).unwrap();
+    let outcome = check.run_check(&script, &workspace);
+    assert!(!outcome.passed);
+    assert_eq!(outcome.code.as_deref(), Some("check_carrier_replaced"));
+    assert_eq!(
+        fs::read(workspace.join(check::CHECK_FILE)).unwrap(),
+        b"replacement"
+    );
+}
+
+#[test]
+#[ignore = "spawns the Bubblewrap sandbox; runs in the S02 gate"]
+fn a_successful_live_plan_reaches_completion_without_offline_reply_leakage() {
+    use harness_core::{
+        model::{
+            ProviderEvent,
+            scripted::{Script, Step},
+        },
+        session::FinishReason,
+    };
+    let reply = |text: &str| {
+        Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, text),
+            Step::completed(FinishReason::Stop),
+        ])
+    };
+    let temp = scratch();
+    let suite = Suite::load(suite_root()).unwrap();
+    let task = suite.task("bugfix-with-test").unwrap();
+    let check = HiddenCheck::probe(temp.path()).unwrap();
+    for (slot, strategy) in StrategyId::ALL.into_iter().enumerate() {
+        let mut replies = Vec::new();
+        if strategy.needs_model() {
+            replies.push(reply(&task.scripted().summary));
+        }
+        replies.push(reply(&task.scripted().probe));
+        replies.push(reply("No changes made."));
+        let live = Arc::new(ScriptedProvider::new(replies));
+        let run = runtime().block_on(harness_eval::run_task(
+            task,
+            strategy,
+            0,
+            &options(temp.path(), 100 + slot as u64),
+            &ModelPlan::Live(live.clone()),
+            &check,
+        ));
+        assert!(run.record.complete(), "{strategy}: {:?}", run.record.errors);
+        assert_eq!(run.record.metrics.as_ref().unwrap().completion, Some(false));
+        assert_eq!(run.compactions, 1);
+        assert_eq!(
+            live.streams().len(),
+            2 + usize::from(strategy.needs_model())
+        );
+        assert_eq!(live.remaining(), 0);
+    }
+}
+
 fn suite_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../eval/tasks")
 }

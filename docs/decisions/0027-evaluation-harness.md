@@ -349,7 +349,7 @@ These are stated here so a reader of the m6-06 report cannot mistake the numbers
 - Format and matchers: `crates/eval/src/task.rs`, `src/matcher.rs` unit tests and
   `crates/eval/tests/task_format.rs` (suite shape, requirement self-match,
   fingerprint, probe prompt, literal matchers).
-- Mechanics: `crates/eval/tests/offline_gate.rs` (seventeen ignored integration
+- Mechanics: `crates/eval/tests/offline_gate.rs` (nineteen ignored integration
   tests, listed above, including the review regressions for m6-05).
 - Gate wiring: `scripts/check.sh`, `scripts/test-security-gate.sh`,
   `.github/workflows/ci.yml`.
@@ -357,6 +357,13 @@ These are stated here so a reader of the m6-06 report cannot mistake the numbers
   `feature-style-rule`, `multi-file-change`.
 
 ## Review round 2 (m6-05 @ 970b9b5)
+
+The final review also exercises a successful injected-live path through all three
+strategies. Offline post-history replies are queued only for the scripted plan;
+the live plan consumes only its injected provider's responses. Carrier cleanup
+compares device and inode with the exclusively created file and preserves any
+replacement, reporting `check_carrier_replaced`. Its CLOEXEC handle stays open
+through execution to prevent unlink/recreation from reusing that inode.
 
 The first head was not accepted. Six findings, and what changed:
 

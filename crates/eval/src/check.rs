@@ -173,19 +173,26 @@ impl HiddenCheck {
                 return refused(code, "infrastructure_failure", error);
             }
         };
-        // Release the handle before the sandbox opens the path, so the check runs
-        // with no writer of ours alive.
-        drop(file);
+        use std::os::unix::fs::MetadataExt as _;
+        let identity = match file.metadata() {
+            Ok(metadata) => (metadata.dev(), metadata.ino()),
+            Err(error) => return refused("check_unwritable", "infrastructure_failure", error),
+        };
+        // Keep the CLOEXEC handle alive so unlink/recreation cannot reuse the
+        // carrier inode while the sandbox runs. It is never passed to the check.
         let mut outcome = self.run_command(workspace, CHECK_COMMAND);
         let published = workspace.join(CHECK_FILE);
-        use std::os::unix::fs::MetadataExt as _;
         match fs::symlink_metadata(&published) {
             // The carrier must still be the regular file this call created.
-            Ok(metadata) if metadata.file_type().is_file() && metadata.nlink() == 1 => {}
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && metadata.nlink() == 1
+                    && (metadata.dev(), metadata.ino()) == identity => {}
             Ok(_) => {
                 outcome.passed = false;
                 outcome.code = Some("check_carrier_replaced".into());
                 outcome.output.push_str("\ncheck_carrier_replaced");
+                return outcome;
             }
             Err(error) => {
                 outcome.passed = false;
@@ -195,6 +202,7 @@ impl HiddenCheck {
                     .push_str(&format!("\ncheck_carrier_missing: {error}"));
             }
         }
+        drop(file);
         if let Err(error) = fs::remove_file(&published) {
             outcome.passed = false;
             outcome.code = Some("check_cleanup_failed".into());
