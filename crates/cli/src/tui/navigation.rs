@@ -31,10 +31,14 @@ struct Branch {
     user: EntryId,
     parent: Option<EntryId>,
     head: EntryId,
+    turn: TurnId,
     depth: usize,
     text: String,
     model: ModelRef,
     current: bool,
+    /// Effective mode of this turn on the selected ancestry; `Default` when
+    /// no control applies. Toggling follows this value, never one press alone.
+    mode: ContextMode,
 }
 
 impl App {
@@ -107,6 +111,12 @@ impl App {
         if self.navigation.waiting {
             return Some(vec![]);
         }
+        // Keys the tree shares with a later dialog are only active while the
+        // tree is the open screen, so decision 9's map is unchanged elsewhere.
+        let tree = self
+            .navigation
+            .screen
+            .is_some_and(|s| matches!(s, Screen::Branches));
         if control {
             let screen = match key.code {
                 KeyCode::Char('o') => Some(Screen::Sessions),
@@ -220,6 +230,33 @@ impl App {
                     self.navigation.screen = None;
                 }
             }
+            // `p` and `x` are whole-turn controls: pin (or reset a pinned turn)
+            // and exclude (or reset an excluded one). A control that the app can
+            // already rule out sends nothing and shows the engine's own refusal.
+            KeyCode::Char(pressed @ ('p' | 'x')) if tree && !control => {
+                if let Some(branch) = branches.get(self.navigation.index) {
+                    let turn = branch.turn.clone();
+                    let refusal = self
+                        .view()
+                        .and_then(|view| super::control_refusal(view, &turn));
+                    if let Some(refusal) = refusal {
+                        self.set_error(super::runtime::rejection(refusal));
+                        return Some(vec![]);
+                    }
+                    let mode = match (pressed, branch.mode) {
+                        ('p', ContextMode::Pinned) | ('x', ContextMode::Excluded) => {
+                            ContextMode::Default
+                        }
+                        ('p', _) => ContextMode::Pinned,
+                        _ => ContextMode::Excluded,
+                    };
+                    self.navigation.waiting = true;
+                    return Some(vec![Action::Command(Command::SetContextControl {
+                        turn_id: turn,
+                        mode,
+                    })]);
+                }
+            }
             _ => {}
         }
         Some(vec![])
@@ -281,6 +318,7 @@ impl App {
             return vec![];
         };
         let s = &view.snapshot;
+        let modes = super::turn_modes(&s.ancestry(s.head()).unwrap_or_default());
         let current_user = s
             .ancestry(s.head())
             .unwrap_or_default()
@@ -313,6 +351,7 @@ impl App {
                 user: user.entry.id.clone(),
                 parent: user.entry.parent_id.clone(),
                 head,
+                turn: turn_id.clone(),
                 depth,
                 text: message
                     .content
@@ -330,6 +369,7 @@ impl App {
                     .unwrap_or(&self.info.model)
                     .clone(),
                 current: current_user == Some(&user.entry.id),
+                mode: modes.get(turn_id).copied().unwrap_or_default(),
             });
         }
         // Lexicographic ancestry paths put every descendant beside its parent,
@@ -414,15 +454,16 @@ impl App {
                 )
             }
             Screen::Branches => (
-                "branches · Enter select · e edit sibling · Esc close",
+                "branches · Enter select · e edit sibling · p pin · x exclude · Esc close",
                 self.branches()
                     .iter()
                     .map(|b| {
                         format!(
-                            "{}{}{} {}\n  {}",
+                            "{}{}{}{}{}\n  {}",
                             "  ".repeat(b.depth.min(20)),
                             if b.depth == 0 { "●" } else { "└─" },
                             if b.current { "*" } else { " " },
+                            mode_marker(b.mode),
                             bounded(&b.text, 44),
                             model_name(&b.model)
                         )
@@ -437,6 +478,17 @@ impl App {
             self.navigation.index,
             self.last_error.as_deref(),
         );
+    }
+}
+
+/// The marker shown before a tree row's title, padded to one column so titles
+/// stay aligned. ASCII brackets are chosen over an emoji: they are one cell per
+/// character in every terminal and stay visible at 20×5 (ADR 0023 Part 5).
+fn mode_marker(mode: ContextMode) -> &'static str {
+    match mode {
+        ContextMode::Pinned => "[pin] ",
+        ContextMode::Excluded => "[excl] ",
+        ContextMode::Default => "      ",
     }
 }
 

@@ -8,7 +8,7 @@ use harness_core::{
         compaction::{CompactionError, CompactionPreview},
     },
     runtime::{Accepted, EventKind, InspectError, Rejection},
-    session::{ContentBlock, EntryId, EntryPayload, ModelRef, SessionId},
+    session::{ContentBlock, ContextMode, EntryId, EntryPayload, ModelRef, SessionId, TurnId},
 };
 use ratatui::{
     Frame,
@@ -512,6 +512,20 @@ impl App {
                 code(&item.reason)
             )));
         }
+        // The controls that decided this projection: the turn, its effective
+        // mode and the entry that sets it. Only non-default turns are listed.
+        rows.push(Line::raw("Controls (effective on this branch):"));
+        if report.controls.is_empty() {
+            rows.push(Line::raw(" none"));
+        }
+        for control in &report.controls {
+            rows.push(Line::raw(format!(
+                " {} turn={} control={}",
+                mode_label(control.mode),
+                short_turn(&control.turn_id),
+                short(&control.control_entry_id)
+            )));
+        }
         rows.push(Line::raw(format!("Fingerprint: {}", report.fingerprint)));
         rows.push(Line::raw(format!(
             "Configuration: {}",
@@ -531,14 +545,32 @@ fn model_name(model: &ModelRef) -> String {
     bounded(&format!("{}/{}", model.provider_instance, model.model), 120)
 }
 fn short(id: &EntryId) -> String {
-    id.to_string()
-        .chars()
+    let text = id.to_string();
+    text.chars()
         .rev()
         .take(8)
         .collect::<String>()
         .chars()
         .rev()
         .collect()
+}
+fn short_turn(id: &TurnId) -> String {
+    let text = id.to_string();
+    text.chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+/// The persisted spelling, so the panel names the same value the journal does.
+fn mode_label(mode: ContextMode) -> &'static str {
+    match mode {
+        ContextMode::Default => "default",
+        ContextMode::Pinned => "pinned",
+        ContextMode::Excluded => "excluded",
+    }
 }
 fn code(value: &ExclusionReason) -> String {
     serde_json::to_value(value)

@@ -18,18 +18,18 @@ pub mod runtime;
 pub mod runtime_nav;
 mod transcript;
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use harness_core::{
     context::{Flags, Totals},
     runtime::{
-        ApplyOutcome, ClientView, Command, Phase, RuntimeDiagnostic, RuntimeView, SubscriptionItem,
-        UncertainInvocation, UserResolution,
+        ApplyOutcome, ClientView, Command, Phase, Rejection, RuntimeDiagnostic, RuntimeView,
+        SubscriptionItem, UncertainInvocation, UserResolution,
     },
     session::{
-        ApprovalId, CommandId, ContentBlock, Decision, InvocationId, ModelRef, RuntimeState,
-        ToolStatus, TurnId,
+        ApprovalId, CommandId, ContentBlock, ContextMode, Decision, EntryPayload, InvocationId,
+        ModelRef, RuntimeState, StoredEntry, ToolStatus, TurnId,
     },
 };
 use ratatui::{Frame, text::Line};
@@ -704,6 +704,40 @@ impl App {
             };
             self.cursor = previous_start + column.min(previous - previous_start);
         }
+    }
+}
+
+/// The effective mode of every turn on an ancestry, folded from its
+/// `context_control` entries: the last control for a turn on this ancestry wins
+/// (decision 5). A turn with no control in effect has `ContextMode::Default`.
+///
+/// Core folds the same map for storage and the builder; the client repeats the
+/// fold over the entries it already has because entries are immutable and no
+/// payload is read. Controls on sibling branches are never on this ancestry, so
+/// they never apply here either.
+pub(crate) fn turn_modes(ancestry: &[&StoredEntry]) -> BTreeMap<TurnId, ContextMode> {
+    let mut modes = BTreeMap::new();
+    for stored in ancestry {
+        if let EntryPayload::ContextControl(control) = &stored.entry.payload {
+            modes.insert(control.turn_id.clone(), control.mode);
+        }
+    }
+    modes
+}
+
+/// The refusal a `SetContextControl` for this turn would meet, from state the
+/// app already has, so a key that cannot work sends nothing. The order is the
+/// engine's own: a control is idle-only first (`busy`), and only then does the
+/// target turn have to be finished (`context_control_unfinished_turn`). `None`
+/// means the client cannot decide and the core must: every other semantic rule
+/// stays the engine's, and its code is shown verbatim.
+pub(crate) fn control_refusal(view: &RuntimeView, turn: &TurnId) -> Option<Rejection> {
+    if view.phase != Phase::Durable(RuntimeState::Idle) || view.active_turn.is_some() {
+        return Some(Rejection::Busy);
+    }
+    match view.snapshot.turn(turn).map(|info| info.outcome.is_some()) {
+        Some(true) => None,
+        _ => Some(Rejection::Invalid("context_control_unfinished_turn")),
     }
 }
 

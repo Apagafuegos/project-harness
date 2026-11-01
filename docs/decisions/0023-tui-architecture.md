@@ -1,6 +1,7 @@
 # 0023: TUI architecture — the pure model and the `Action` boundary
 
-Status: Parts 1 and 2 implemented for Milestone 5 steps 02 and 03.
+Status: Parts 1 and 2 implemented for Milestone 5 steps 02 and 03; Parts 3 to 5
+implemented for Milestone 5 steps 04 and 05 and Milestone 6 step 03.
 
 Date: 2026-10-31
 
@@ -460,3 +461,113 @@ reverted before the complete gate:
 No engine/provider behavior, persistence schema, dependency, toolchain or
 transport was changed by this step. The only core accessor in its ancestry is
 the orchestrator's separately reviewed decision-14 change.
+
+## Part 5: context controls in the branch tree (m6-03)
+
+The client can now pin, exclude and reset whole turns (decision
+[0025](0025-context-controls.md)). `p` and `x` live in the branch tree, not in
+the prompt editor: the editor owns printable keys, and the tree already lists
+the turns with a selection, so decision 9's key map is unchanged outside the
+tree. `p` and `x` are active only while `Ctrl-T`'s screen is open; everywhere
+else they are still prompt characters. No new action variant was needed: each
+key emits exactly one `Action::Command(SetContextControl { turn_id, mode })`
+and the app never inspects the reply.
+
+**Effective modes are folded in the client.** `tui::turn_modes` walks the
+selected ancestry's `context_control` entries and keeps the last mode per
+target turn, which is decision 5's rule; a turn with no control in effect is
+`default`. Core folds the same map for storage, the builder and the report, but
+exposes no public accessor for it, and this step may not change core. The
+client needs no journal bytes: entries are immutable and already in the
+snapshot, and controls on sibling branches are not on the ancestry, so they
+never apply. The fold is read at render time from the current snapshot, so a
+reset or an applied event is enough to redraw every marker.
+
+**Keys follow the current mode.** `p` pins a default turn and resets a pinned
+one; `x` excludes a default turn and resets an excluded one. A pinned turn
+becomes excluded with one `x` and an excluded turn becomes pinned with one `p`,
+because both name a different mode than the effective one; the core refuses only
+a control that would not change the mode (`context_control_noop`). Every key
+sends one command and nothing else; a refusal is never retried.
+
+**What the tree shows.** Each row carries its mode as a fixed-width ASCII
+marker before the title: `[pin]`, `[excl]`, or six spaces, so titles stay
+aligned. An emoji pin was rejected: `📌` renders two cells wide in most
+terminals, is not in every font, and cannot be asserted at 20×5 the way plain
+brackets can. Markers sit at the start of the row, before the title, because
+the tree chunks long rows at the pane width.
+
+**Refusals the app already knows.** A control is idle-only and needs a finished
+turn, so the app checks exactly those two rules before sending, in the engine's
+own order: a non-idle view (an active turn, recovery, a fault) is `busy`, and an
+idle view whose target turn has no terminal outcome is
+`context_control_unfinished_turn`. Both are shown as the engine would show them
+(`command rejected: <code>`) and nothing is written. Every other rule stays the
+engine's — `context_control_covered`, `context_control_not_ancestral` and
+`context_control_noop` arrive from the core and appear verbatim in the banner.
+The tree stops accepting keys until the reply (`navigation.waiting`), so a
+double press cannot race the fold the second press computed.
+
+**Transcript.** The durable one-line `Pinned turn …`, `Excluded turn …` and
+`Reset turn …` markers from m6-01 are unchanged. An excluded turn also gets one
+dim tag row, `── excluded turn (kept in history; never sent to the model) ──`,
+and every row that turn owns is patched with `DIM`. Exclusion is a projection
+choice (decision 7), so nothing is hidden or truncated: the tag and the dimming
+are the only difference, and the text stays readable. Both the line style and
+each span style are patched because `wrap_lines` keeps span styles when it
+splits a row.
+
+**Inspector.** The report already carried what the panel needed: included items
+belonging to a pinned turn are labelled `pinned`, and excluded entries appear in
+the exclusion list with `user_excluded`. The panel gains a
+`Controls (effective on this branch)` section listing each non-default turn's
+mode, turn prefix and the control entry that sets it, or `none`. No new
+invalidation was needed: a control entry advances the head and the journal
+sequence, and the existing request identity is
+`(session, sequence, head, model)`, so an open panel refreshes on its own after
+every control. A test keeps the inspector open across a pin to prove it.
+
+**`harness control` was not added.** A scriptable subcommand would have to open
+the session through `wiring::open_session` to get a `SessionHandle`, which needs
+a provider and a full tool-host assembly; this step may edit neither `wiring.rs`
+nor `providers`, and a stub provider or a sandbox re-probe inside a journal
+append would be worse than the gap it fills. The m6-05 evaluation can drive the
+same typed command in-process, as `crates/cli/tests/tui_controls.rs` does.
+`harness ask` gained no flags.
+
+### Evidence
+
+`crates/cli/tests/tui_controls.rs` adds nine offline tests with real JSONL
+storage and `ScriptedProvider`; no provider network, credential or clock is
+used. Pure `App` buffers cover the 80×24 tree with `[pin]`/`[excl]`, its 20×5
+form, the tagged and dimmed excluded transcript (asserted from cell modifiers,
+with the untouched turn asserted not dimmed), and the full key mapping through
+the real journal. The production loop covers a pin (journal control and
+`pinned` in an open inspector), an exclusion (inspector `user_excluded` and a
+following request whose serialized items lack the turn), a reset back to
+`default` with both controls kept, `context_control_covered` verbatim with
+byte-identical journal bytes after a committed compaction, a `busy` refusal on
+the active turn with nothing written, and pinned-to-excluded in one control.
+
+Each mutation was applied alone, the named test failed, and it was reverted
+before the complete gate:
+
+| Mutation | Test | Failure |
+| --- | --- | --- |
+| `p` on a pinned turn sends `pinned` again | `tree_keys_toggle_each_turns_effective_mode`, `loop_reset_returns_the_turn_to_default` | wrong command asserted; the core refuses the second pin as `context_control_noop` |
+| Hide excluded turns from the transcript | `excluded_turn_is_tagged_and_dimmed_but_still_readable` | the tag and the turn's text were absent |
+| Let the `App` write the journal directly | `tui_boundary` | `navigation.rs: pure model touches storage with DataRoot/JournalStore/StoreError` |
+| Do not refresh the inspector after a control | `loop_pin_journals_the_control_and_the_inspector_shows_pinned` | no `pinned`/controls row in the panel |
+
+The last mutation is why the ratchet grew a file-scoped storage rule: a
+control is the first client key that could plausibly "just append" an entry, and
+the previous scan would not have noticed a direct store write inside the pure
+model. `tui_boundary` now bars `DataRoot`, `JournalStore`, `StoreError` and
+`Timestamp` from `mod.rs`, `render.rs`, `transcript.rs`, `navigation.rs` and
+`inspector.rs` only; the shell files keep their read-only catalog scan and
+journal inspection, and that exception has its own assertion.
+
+No engine, provider, persistence, dependency or toolchain change was made. The
+only files touched are `crates/cli/src/tui/{mod,navigation,transcript,inspector}.rs`,
+`crates/cli/tests/{tui_controls,tui_boundary}.rs`, and this ADR plus
+`docs/development.md`.

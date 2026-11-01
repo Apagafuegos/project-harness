@@ -54,7 +54,32 @@ pub(crate) fn project(
     let (outcomes, approvals) = audit_rows(view, &branch);
 
     let mut emitted: BTreeSet<TurnId> = BTreeSet::new();
+    // An excluded turn stays in history, in this transcript and in the report;
+    // it is only kept out of the model's request (decision 7). Dimming and one
+    // tag row say so, while the text stays readable.
+    let modes = super::turn_modes(&ancestry);
+    let mut tagged: BTreeSet<TurnId> = BTreeSet::new();
     for (position, stored) in ancestry.iter().enumerate() {
+        let mode = stored
+            .entry
+            .turn_id
+            .as_ref()
+            .and_then(|turn| modes.get(turn))
+            .copied()
+            .unwrap_or_default();
+        let start = rows.len();
+        if mode == ContextMode::Excluded
+            && stored
+                .entry
+                .turn_id
+                .as_ref()
+                .is_some_and(|turn| tagged.insert(turn.clone()))
+        {
+            rows.push(Line::styled(
+                "── excluded turn (kept in history; never sent to the model) ──",
+                dim_style(),
+            ));
+        }
         match &stored.entry.payload {
             EntryPayload::UserMessage(message) => {
                 push_label(&mut rows, "you");
@@ -212,6 +237,9 @@ pub(crate) fn project(
                     emitted.insert(turn_id.clone());
                 }
             }
+        }
+        if mode == ContextMode::Excluded {
+            dim(&mut rows[start..]);
         }
     }
     // A turn may finish in a commit that carries no entry (cancellation or a
@@ -376,6 +404,18 @@ fn approval_rows(rows: &mut Vec<Line<'static>>, approvals: &Approvals, call: &Ca
             ),
             tool_style(),
         ));
+    }
+}
+
+/// Dim rows an excluded turn owns. Wrapping keeps span styles and the renderer
+/// patches them over the line style, so both are patched: the turn is visibly
+/// dimmed without hiding or truncating one character of it.
+fn dim(rows: &mut [Line<'static>]) {
+    for row in rows.iter_mut() {
+        row.style = row.style.patch(dim_style());
+        for span in &mut row.spans {
+            span.style = span.style.patch(dim_style());
+        }
     }
 }
 

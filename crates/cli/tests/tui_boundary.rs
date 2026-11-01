@@ -8,8 +8,10 @@
 //!
 //! Allowed in `tui/`: typed engine commands/events, the read-only inspection
 //! API and wiring-free rendering. Not allowed: provider adapters or requests,
-//! tool authorization/execution/planning types, a non-key approval decision, or
-//! a synthesized key that would let a timer approve or send.
+//! tool authorization/execution/planning types, a non-key approval decision, a
+//! synthesized key that would let a timer approve or send, or — in the pure
+//! model files — any direct storage access. A `context_control` reaches the
+//! journal only through the engine's typed command.
 use std::path::Path;
 
 /// Engine names that would mean the TUI had taken over an engine job.
@@ -43,6 +45,21 @@ fn calls_key_reducer(line: &str) -> bool {
     })
 }
 
+/// The pure model files: state, keys, actions and rendering, with no storage of
+/// any kind. The shell files (`runtime*.rs`, `inspector_shell.rs`) legitimately
+/// read the catalog and inspect journals, so this rule is file-scoped.
+const PURE_MODEL: &[&str] = &[
+    "mod.rs",
+    "render.rs",
+    "transcript.rs",
+    "navigation.rs",
+    "inspector.rs",
+];
+
+/// Storage names a direct journal write would need. A control is appended by
+/// the engine's typed command only; the app must never open a store.
+const STORAGE: &[&str] = &["DataRoot", "JournalStore", "StoreError", "Timestamp"];
+
 fn violations(path: &Path, source: &str) -> Vec<String> {
     let mut failures = Vec::new();
     let file = path.file_name().unwrap().to_str().unwrap();
@@ -57,6 +74,16 @@ fn violations(path: &Path, source: &str) -> Vec<String> {
                 "{}: forbidden engine identifier {forbidden}",
                 path.display()
             ));
+        }
+    }
+    if PURE_MODEL.contains(&file) {
+        for forbidden in STORAGE {
+            if identifiers.contains(forbidden) {
+                failures.push(format!(
+                    "{}: pure model touches storage with {forbidden}",
+                    path.display()
+                ));
+            }
         }
     }
 
@@ -158,15 +185,27 @@ fn boundary_guard_rejects_provider_execution_and_timer_approval_mutations() {
         "fn tick() { Command::SubmitApproval { decision: Decision::Allow }; }",
         "fn tick() { self.approval_key(key); }",
         "fn tick() { app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)); }",
+        // Writing a `context_control` entry directly instead of submitting it.
+        "fn control() { let store = JournalStore::open(root); store.append(entry); }",
+        "fn trail() { let root = DataRoot::open(path, true); }",
     ] {
         assert!(
-            !violations(Path::new("mod.rs"), source).is_empty(),
+            !violations(Path::new("navigation.rs"), source).is_empty(),
             "guard missed {source}"
         );
     }
     // A timer in the loop is a third key-reducer call.
     let loop_with_timer = "fn drive() {\n app.on_key(a);\n let actions = app.on_key(c);\n _ = tick.tick() => { app.on_key(approve); }\n}\n";
     assert!(!violations(Path::new("runtime.rs"), loop_with_timer).is_empty());
+
+    // The shell's reads stay allowed: only the pure model is barred from storage.
+    assert!(
+        violations(
+            Path::new("runtime_nav.rs"),
+            "fn list() { DataRoot::open(&options.data_root, false); JournalStore::inspect(&root, id); }"
+        )
+        .is_empty()
+    );
 
     // The shapes the design does allow stay clean.
     assert!(

@@ -121,6 +121,15 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
   sibling. An already-selected parent needs no redundant navigation. Original
   history remains immutable. Core refusals are shown without submitting a later
   StartTurn after a failed SelectHead.
+- In the branch tree, `p` pins the selected turn and `x` excludes it; pressing
+  the same key again resets it to the default mode. A pinned turn becomes
+  excluded in one step, and the reverse. Each key sends exactly one
+  `SetContextControl` for the whole turn, and its mode marker (`[pin]` or
+  `[excl]`) leads the row. A turn needs a finished outcome and an idle session,
+  so a key pressed on the active turn writes nothing and shows the engine's own
+  refusal; other refusals (`context_control_covered`, `context_control_noop`,
+  `context_control_not_ancestral`) arrive from the engine and appear verbatim in
+  the banner. `p` and `x` are ordinary prompt characters outside the tree.
 - Ctrl-L lists models from the registered providers' merged catalog, including
   sourced limits and capabilities. Enter always attempts `Reject` first. On
   portability loss, Up/Down scrolls the classified entry/part/owner/schema/byte
@@ -145,8 +154,18 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
 Ctrl-K opens/closes the read-only context inspector. PgUp/PgDn scrolls its
 included items in projection order, exclusions with reason codes, fingerprints
 and configuration identity. Budgets label used/remaining counts as **estimates**;
-opaque bytes are not tokens. Reports refresh asynchronously when the published
+opaque bytes are not tokens. Items of a pinned turn are labelled `pinned`,
+excluded entries carry `user_excluded`, and a `Controls (effective on this
+branch)` section lists each non-default turn's mode with the control entry that
+set it. The panel refreshes after every control, because a control entry
+advances the head. Reports refresh asynchronously when the published
 session/head/sequence/model changes, without waiting in the input loop.
+
+An excluded turn stays in the transcript, in history and in this report; it is
+only kept out of the model's request. Such a turn is tagged with one dim
+`excluded turn (kept in history; never sent to the model)` row, so it is
+visibly excluded and still readable. The durable `Pinned turn …`, `Excluded
+turn …` and `Reset turn …` markers are unchanged.
 
 Inside the inspector, `m` opens the merged catalog's model list. Up/Down selects
 and Enter previews that model's context; the panel explicitly says **nothing
@@ -182,6 +201,14 @@ model previews without switching, preview-first commitment, cancellation byte
 identity, stale fields, eligibility, automatic compaction, budget diagnostics,
 slow inspection responsiveness, live/stale preview reads and
 opaque-state/schema sentinel redaction.
+
+`cargo test -p harness --test tui_controls` runs nine offline context-control
+tests: the tree's `[pin]`/`[excl]` markers at 80×24 and 20×5, the tagged and
+dimmed excluded transcript (asserted from cell modifiers), the full `p`/`x`
+toggle mapping through the real journal, and the production loop for pin,
+exclude (with the next recorded request omitting the turn), reset, a
+`context_control_covered` refusal after a committed compaction, a `busy`
+refusal on the active turn and pinned-to-excluded in one control.
 
 `cargo test -p harness --test tui_runtime` exercises the injectable loop with
 TestBackend, scripted input/provider streams, and real storage.
