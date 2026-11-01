@@ -131,6 +131,8 @@ covered journal entries/events, with no artifact I/O:
   the pre-image state it was planned against), else `-`.
 - **Commands** — every `bash` call in span order with its command, cwd, the
   status of its result and the executor's exit status (`-` when absent).
+  Results are matched by call identity, including when one assistant response
+  proposes several commands with different outcomes.
 - **Errors** — every call whose result is not `succeeded` (or `cancelled`) in
   span order: tool, path or command, status and the stored code. A failed or
   interrupted *turn* is recorded the same way, though selection only ever covers

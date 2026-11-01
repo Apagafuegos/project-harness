@@ -209,6 +209,7 @@ pub(super) fn extracts(snapshot: &SessionSnapshot, span: &Span) -> Extracts {
     }
     let none = serde_json::Map::new();
     let mut result = Extracts::default();
+    let mut command_indices = BTreeMap::new();
     let mut turns: Vec<TurnId> = Vec::new();
     for id in covered {
         let Some(stored) = snapshot.entry(id) else {
@@ -224,7 +225,10 @@ pub(super) fn extracts(snapshot: &SessionSnapshot, span: &Span) -> Extracts {
             EntryPayload::AssistantResponse(response) => {
                 for block in &response.content {
                     let ContentBlock::ToolCall {
-                        name, arguments, ..
+                        call_id,
+                        name,
+                        arguments,
+                        ..
                     } = block
                     else {
                         continue;
@@ -233,6 +237,7 @@ pub(super) fn extracts(snapshot: &SessionSnapshot, span: &Span) -> Extracts {
                     if name == "bash"
                         && let Some(command) = arguments.get("command").and_then(|v| v.as_str())
                     {
+                        command_indices.insert(call_id.clone(), result.commands.len());
                         result.commands.push(CommandRun {
                             command: command.into(),
                             cwd: arguments
@@ -264,12 +269,9 @@ pub(super) fn extracts(snapshot: &SessionSnapshot, span: &Span) -> Extracts {
                         .or_else(|| plans.get(&value.call.call_id).cloned());
                 }
                 if tool == "bash"
-                    && let Some(run) = result
-                        .commands
-                        .iter_mut()
-                        .rev()
-                        .find(|run| run.status.is_none())
+                    && let Some(index) = command_indices.get(&value.call.call_id)
                 {
+                    let run = &mut result.commands[*index];
                     run.status = Some(value.status);
                     run.exit_code = value.metadata.exit_code;
                 }

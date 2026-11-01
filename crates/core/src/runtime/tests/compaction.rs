@@ -292,6 +292,51 @@ fn tool_driver(strategy: StrategyId) -> Driver {
 }
 
 #[test]
+fn structured_state_matches_batched_commands_to_their_own_results() {
+    let mut policy = super::pipeline::configuration();
+    policy["allowances"] = serde_json::json!([
+        {"tool": "bash", "command": "exit 17", "cwd": "."},
+        {"tool": "bash", "command": "printf done", "cwd": "."},
+    ]);
+    policy["compaction"] = serde_json::json!({
+        "strategy": "structured_state",
+        "summary_model": {"provider_instance": "summary", "model": "cheap"},
+        "automatic": false,
+    });
+    let mut d = super::pipeline::configured(policy);
+    let mut failed = super::pipeline::outcome(ToolStatus::Failed, Some(ResultCode::NonzeroExit));
+    failed.exit_code = Some(17);
+    d.executor.outcomes.lock().unwrap().extend([
+        failed,
+        super::pipeline::outcome(ToolStatus::Succeeded, None),
+    ]);
+    super::pipeline::propose(
+        &mut d,
+        &[
+            ("bash", serde_json::json!({"command":"exit 17"})),
+            ("bash", serde_json::json!({"command":"printf done"})),
+        ],
+    );
+    d.run_tools();
+    stop(&mut d);
+    for _ in 0..2 {
+        plain_turn(&mut d, "recent", "done");
+    }
+    let (_, preview, _) = d.manual_preview_for();
+    let EntryPayload::Compaction(compaction) = &preview.entry.payload else {
+        panic!()
+    };
+    assert!(
+        compaction.summary.contains(
+            "### Commands\n- `exit 17` (cwd `.`) | exit 17 | failed\n- `printf done` (cwd `.`) | exit 0 | succeeded"
+        ),
+        "commands must keep their own result, in call order:\n{}",
+        compaction.summary
+    );
+    checked(d);
+}
+
+#[test]
 fn structured_state_extracts_reads_writes_a_failed_command_and_a_denial() {
     // The brief's fixture span: a denied read, a successful write behind an
     // approval, a denied write, a successful read, and a failed shell command.

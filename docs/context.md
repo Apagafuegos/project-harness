@@ -395,14 +395,16 @@ mid-session is one recorded, idle-only `ConfigurationChanged` through
 revision, never a rewritten entry. The strategy is part of the preview policy
 fingerprint, so a change makes outstanding previews stale.
 
-Without `summary_model`, selection still works but generation returns
-`summary_model_unconfigured`; the session model is never used by default.
+For a model-based strategy without `summary_model`, selection still works but
+generation returns `summary_model_unconfigured`; the session model is never used
+by default. `observation_masking` needs no summary model.
 `max_summary_tokens` defaults to 2048 and must be positive; retention defaults
 to 2 and cannot be lower. Malformed compaction configuration fails loading as
 `invalid_compaction`. `automatic` defaults to true when `summary_model` is
 configured and false otherwise; explicitly enabling it without a summary model
-is invalid. `automatic: false` keeps manual preview/commit available, but refuses
-overflowing starts rather than silently generating a summary.
+is valid only for `observation_masking`. `automatic: false` keeps manual
+preview/commit available, but refuses overflowing starts rather than silently
+generating a summary.
 
 `context::compaction::strategy(id, provider)` is the single registry that maps a
 `StrategyId` to an implementation, and the driver's `ProposeCompaction` effect
