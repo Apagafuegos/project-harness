@@ -17,8 +17,8 @@ rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-# Loopback binding proves the CLI runtime really has an I/O driver.
-tokio = { workspace = true, features = ["net"] }
+# Loopback binding and a phase-scoped virtual clock for deadline regressions.
+tokio = { workspace = true, features = ["net", "test-util"] }
 
 [lints]
 workspace = true

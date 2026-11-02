@@ -103,6 +103,13 @@ groups, **1,257 tests passed, 0 failed**, including the required `sandbox`,
 `test-provider` PTY target. No paid provider call, live matrix or credential was
 used.
 
+Review found a timing flaw in the stalled-probe regression: its shared 250 ms
+deadline could expire during real filesystem replay. The test now keeps the
+ordinary replay deadline and pauses Tokio time only after the first live probe
+request is reached. Virtual time then drives the probe deadline; all assertions
+that continuation/check never run and no scores are published remain in place.
+This changes test timing only, not production deadlines or experiment records.
+
 Targeted suites for this step:
 
 ```sh

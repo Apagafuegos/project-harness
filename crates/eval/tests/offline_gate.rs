@@ -886,21 +886,50 @@ fn a_stalled_probe_times_out_and_the_continuation_never_runs() {
     let suite = Suite::load(suite_root()).unwrap();
     let task = suite.task("bugfix-with-test").unwrap();
     let check = HiddenCheck::probe(temp.path()).unwrap();
-    // One script that never yields and ignores cancellation: the probe inference
-    // hangs, so the injected short deadline must end the cell.
+    use harness_core::model::{ModelEventStream, ModelProvider, ModelRequest, OperationControl};
+
+    // The first live request is the probe: replay uses the pipeline's scripted
+    // history and masking has no provider. Signal that boundary before pausing
+    // Tokio time, so real filesystem replay keeps its ordinary deadline.
+    struct ProbeBoundary {
+        inner: Arc<ScriptedProvider>,
+        reached: Arc<tokio::sync::Notify>,
+    }
+    impl ModelProvider for ProbeBoundary {
+        fn stream(&self, request: ModelRequest, control: OperationControl) -> ModelEventStream {
+            self.reached.notify_one();
+            self.inner.stream(request, control)
+        }
+    }
     let stalled = Arc::new(ScriptedProvider::new([
         harness_core::model::scripted::Script::new([harness_core::model::scripted::Step::Stall]),
     ]));
-    let mut options = options(temp.path(), 32);
-    options.stage_timeout = std::time::Duration::from_millis(250);
-    let run = runtime().block_on(harness_eval::run_task(
-        task,
-        StrategyId::ObservationMasking,
-        0,
-        &options,
-        &ModelPlan::Live(stalled.clone()),
-        &check,
-    ));
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(ProbeBoundary {
+        inner: stalled.clone(),
+        reached: reached.clone(),
+    });
+    let options = options(temp.path(), 32);
+    let plan = ModelPlan::Live(provider);
+    let run = runtime().block_on(async {
+        let run = harness_eval::run_task(
+            task,
+            StrategyId::ObservationMasking,
+            0,
+            &options,
+            &plan,
+            &check,
+        );
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("cell ended before the probe boundary: {:?}", result.record.errors),
+            () = reached.notified() => {}
+        }
+        // Only the stalled probe remains. Tokio advances virtual time to its
+        // deadline without imposing a subsecond deadline on replay/storage.
+        tokio::time::pause();
+        run.await
+    });
     assert_eq!(
         run.record.errors.probe.as_deref(),
         Some("stage_timeout"),
