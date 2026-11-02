@@ -887,10 +887,8 @@ events that follow.
   configuration-change path; summary generation/commit, automatic compaction
   (m4-06), whole-turn context controls (m6-01/02) and the recorded strategy
   switch (`SetCompactionStrategy`, m6-04) are implemented.
-- A terminal UI beyond the Ratatui client (M5): `harness ask` streams one real
-  turn with terminal approvals, and plain `harness` owns the terminal lifecycle.
-  Recovery UI beyond the handle, events and CLI, and retrying a turn after
-  recovery: the user starts a new turn.
+- Automatic turn retry after recovery. The Ratatui client already exposes
+  uncertainty resolution; after resolving it, the user starts a new turn.
 
 ## Tests
 

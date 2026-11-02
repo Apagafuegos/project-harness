@@ -93,8 +93,9 @@ refusal is visible in the banner and retains the saved model. Repeat the saved
 
 A **new** session records `observation_masking` as its compaction strategy by
 default, in both the TUI and `ask`; `--compaction-strategy` overrides it. Masking
-is deterministic and needs no summary model, so it records no `Compaction.model`
-and leaves automatic compaction off. A continuation keeps the strategy already
+is deterministic and needs no summary model, so its compaction entries omit
+`Compaction.model`. Without `--summary-model`, new sessions leave automatic
+compaction off; supplying that option still enables it. A continuation keeps the strategy already
 recorded when the flag is omitted, and old configurations that never named a
 strategy keep their `rolling_summary` meaning; naming a different strategy on
 continuation is refused with `session_policy_mismatch`. Changing it is otherwise

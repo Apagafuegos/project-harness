@@ -491,8 +491,9 @@ explicitly different strategy is refused with `session_policy_mismatch`, exactly
 like an explicit summary-model change; the recorded strategy is kept when the
 flag is absent, including the legacy `rolling_summary` reading of an omitted
 field, and no configuration entry is appended. Choosing the default changed no
-`automatic` rule: masking records no summary model and leaves it off, and the
-model-based strategies still require a configured summary model.
+`automatic` rule: without `--summary-model`, a new masking session leaves it
+off; supplying a summary model still enables it. Model-based strategies require
+a configured summary model for generation.
 
 See [runtime compaction commands](runtime.md#compaction-commands-and-automatic-triggers)
 for pre-C1 budget checking, pending-start deduplication, events and failure codes.

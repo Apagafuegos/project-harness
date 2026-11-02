@@ -848,8 +848,9 @@ in a new session's configuration, while `StrategyId::default()` and
 Old journals, recorded strategies, explicit selections and recorded idle
 switching are unchanged; a continuation without an explicit flag keeps the
 recorded strategy and appends no configuration change. Automatic-compaction
-enablement is also unchanged: masking records no summary model and leaves
-`automatic: false`, and explicit model-based strategies still require one. The
+enablement is also unchanged: without `--summary-model`, new masking sessions
+record `automatic: false`; supplying that option still enables automatic
+compaction. Explicit model-based strategies require a summary model for generation. The
 details are in the m6-07 amendment to [ADR 0026](decisions/0026-compaction-strategies.md)
 and in [Milestone 6 acceptance](milestone-6-acceptance.md).
 

@@ -266,8 +266,8 @@ provider branch in the request or event mapping.
   exits **77**. It was unrun at m6-00 because that step had no key; the profile's
   live endpoint is instead evidenced by the two bounded DeepSeek Flash matrices
   in [context experiments](context-experiments.md), which made real summary,
-  probe and continuation requests (and stored/replayed native state through the
-  same profile) with zero mechanical errors in the second run.
+  probe and continuation requests with zero mechanical errors in the second run.
+  These count-only records do not independently establish native-state replay.
 - `--provider deepseek` is available to both `harness ask` and the plain
   `harness` TUI through the shared wiring, with `deepseek-flash` as the new-session
   model default. See [Milestone 6 acceptance](milestone-6-acceptance.md).

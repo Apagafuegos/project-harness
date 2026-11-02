@@ -14,7 +14,7 @@ means an uncovered in-scope requirement. There are no gap rows.
 
 Test names are Rust functions unless a target, script or example is named. The
 live provider evidence is DeepSeek-only and is described under
-[Live checks](#live-checks--opt-in-outside-the-gate).
+[context experiments](context-experiments.md), outside the offline gate.
 
 ## Scope
 
@@ -117,20 +117,26 @@ cargo test -p harness-core context::tests::compaction_tests
 cargo test -p harness-core runtime::tests::compaction
 ```
 
-## Break-on-purpose verification
+## Targeted falsification and other regression guards
 
-Each mutation was applied alone to the committed tree, the named evidence was
-observed failing, and the tree was restored before the gate.
+During review, the following two temporary mutations were individually applied,
+the named tests were observed failing, and the original source bytes restored:
 
-| Temporary violation | Named evidence that failed | Result |
+| Temporary violation | Observed failing test | Result |
 | --- | --- | --- |
-| Return the shared parser default to `rolling_summary` | `ask_parser_defaults_a_new_session_to_observation_masking`, `plain_harness_parser_defaults_a_new_session_to_observation_masking` | The parser no longer resolves the chosen default. |
-| Flip `StrategyId::default()`/`CompactionConfig` decoding to `observation_masking` | `creation_default_and_legacy_decoding_are_distinct`, `strategy_identity_is_closed_and_recorded`, and the legacy TUI inspector fixtures whose configuration omits a strategy | Old journals would be silently reinterpreted. |
-| Treat an omitted continuation flag as an explicit selection | `recorded_legacy_session_continues_without_an_implicit_strategy_change`, `omitted_strategy_session_continues_as_rolling_summary_untouched`, `continuation_refuses_a_compaction_strategy_change` | A continuation would be refused or rewritten. |
-| Let the client creation default also rewrite an existing configuration | `recorded_legacy_session_continues_without_an_implicit_strategy_change` (journal prefix and zero `configuration_changed` assertions) | Historical bytes changed. |
-| Let `observation_masking` call the provider | `observation_masking_is_a_deterministic_zero_stream_golden` | One stream was recorded instead of zero. |
-| Let a summary cover a pinned turn | `c02_automatic_summaries_respect_pins`, `storage_refuses_a_compaction_covering_a_pinned_turn` | Coverage validation accepted a controlled turn. |
-| Give an excluded turn's entries to the summarizer | `summarizer_never_receives_a_controlled_entry` | The narrowed source contained a controlled entry. |
+| Return `creation_compaction_strategy()` to `RollingSummary` | `ask_parser_defaults_a_new_session_to_observation_masking`, `plain_harness_parser_defaults_a_new_session_to_observation_masking` | Both entry-path defaults no longer match the chosen strategy. |
+| Flip the legacy `StrategyId::default()` to `ObservationMasking` | `creation_default_and_legacy_decoding_are_distinct` | The old-configuration fallback no longer matches `RollingSummary`. |
+
+The other guards below run in the gate; they were **not** independently mutated
+in this acceptance step. The table describes what their assertions protect.
+
+| Regression risk | Gate evidence | Guarded behavior |
+| --- | --- | --- |
+| Treat an omitted continuation flag as an override | `recorded_legacy_session_continues_without_an_implicit_strategy_change`, `omitted_strategy_session_continues_as_rolling_summary_untouched` | Continuation succeeds with the saved strategy. |
+| Rewrite existing configuration/history when applying a creation default | `recorded_legacy_session_continues_without_an_implicit_strategy_change` | Journal prefix stays intact and no configuration change is appended. |
+| Let masking call the provider | `observation_masking_is_a_deterministic_zero_stream_golden` | Zero provider streams. |
+| Cover a pinned turn | `c02_automatic_summaries_respect_pins`, `storage_refuses_a_compaction_covering_a_pinned_turn` | Controlled turns stay outside coverage. |
+| Send an excluded turn to the summarizer | `summarizer_never_receives_a_controlled_entry` | Controlled entries are absent from narrowed source. |
 
 ## Partial rows
 
@@ -146,7 +152,7 @@ observed failing, and the tree was restored before the gate.
 ## Known limits recorded by this milestone
 
 - **The chosen default is separate from decoding.** `StrategyId::default()` and
-  an omitted `compaction.strategy` remain `rolling_summary` forever; only the
+  an omitted `compaction.strategy` retain their legacy `rolling_summary` reading; only the
   clients' creation default is `observation_masking`. This is deliberate so old
   journals are never reinterpreted (ADR 0026 m6-07 amendment).
 - **Masking is not compression by guarantee.** It removes tool-result bodies and
