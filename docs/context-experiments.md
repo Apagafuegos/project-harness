@@ -223,12 +223,12 @@ not.
 
 ### How the first run's failure was resolved
 
-The ruling below was requested at the end of m6-06. It was answered by the user
-on 2026-11-01/02: **option (a)** — implement the request fix and, once accepted,
-run one more 12-cell matrix (settled decision 17). That fix is
+The ruling below was requested at the end of m6-06. The orchestrator implemented
+and accepted the request fix, then the user approved one additional 12-cell
+matrix on 2026-11-02 (settled decision 17). That fix is
 `m6-side-summary-request` @ `02bd561` (decision 16, ADR 0026 and ADR 0019's
 `m6-side` amendment), and the second matrix below is its live validation. The
-diagnosis is kept verbatim because it is the reason the fix exists.
+diagnosis is preserved below because it is the reason the fix exists.
 
 The model-based strategies could not compact on DeepSeek Flash. `provider_failure`
 in a compaction slot is the harness's collapsed code for *any* failed provider
@@ -338,7 +338,7 @@ records after the run.
 ### Commands and the estimate (second run)
 
 Every command ran from the accepted checkout at `02bd561` through
-`scripts/with-clean-fds.sh`, the descriptor-hygiene wrapper used by the first run
+`scripts/with-clean-fds.sh`, the repository descriptor-hygiene wrapper
 (see [Deviations](#deviations)).
 
 ```sh
@@ -390,9 +390,10 @@ probe and continuation texts are fixtures.
 | `observation_masking` | 1 | 4 | 12/12 (1.000) | 12/12 (1.000) | 6/6 (1.000) | 6/6 (1.000) | 4/4 (1.000) | 2321 | 2459 | 0 |
 | `structured_state` | 2 | 4 | 12/12 (1.000) | 12/12 (1.000) | 6/6 (1.000) | 6/6 (1.000) | 4/4 (1.000) | 2318 | 2338 | 0 |
 
-The offline aggregate reproduces the first run's offline aggregate exactly except
-for the recorded commit and the two bumped strategy versions (`diff` over the two
-`aggregate.json` files shows only those lines; same for `aggregate.md`). Wall
+The offline aggregate reproduces the first run's mechanics totals. JSON metadata
+changes comprise the source commit, the two model-based strategy versions (also
+in each per-task row), and their policy fingerprints. The Markdown aggregate
+also records the new commit and versions. Wall
 clock 2 m 48 s, of which about 2 m 35 s was the cold workspace build; the 12
 cells took 740–1420 ms each.
 
@@ -432,11 +433,12 @@ duration):
 Per-task caveats, stated for every cell rather than only the failing ones:
 
 - `bugfix-with-test` (3 requirements, `slug.sh` + `test.sh`): every arm kept all
-  three requirement phrasings in the projection, but neither model arm restated
-  the "existing two tests must keep passing" wording in the probe
-  (`structured_state` 1/3 is its lowest probe cell).
-- `feature-style-rule` (3 requirements, `greet.sh`): `rolling_summary` is the
-  **only** cell in the second run whose projection lost a requirement (2/3). The
+  three requirement phrasings in the projection. The probes matched 2/3 for
+  rolling summary and masking, and 1/3 for structured state. Counts do not
+  identify which requirement each probe omitted or paraphrased.
+- `feature-style-rule` (3 requirements, `greet.sh`): the `rolling_summary`
+  cell has 2/3 projection matches; its `multi-file-change` cell also lost
+  matches (0/3), as described below. The
   record keeps counts, not the projection text, so *which* requirement was worded
   differently cannot be audited without another paid run.
 - `multi-file-change` (3 requirements, `lib/util.sh` + `main.sh`): the harshest
@@ -481,15 +483,16 @@ model-based measurement and its masking arm is compared separately below.
   `multi-file-change`). That is the only projection difference in the matrix.
 - **The probe does not separate them meaningfully.** 6/12 (`masking`), 5/12
   (`rolling_summary`), 5/12 (`structured_state`) out of 12 possible requirement
-  matches. One requirement of difference is well inside what the lexical matcher,
-  one repetition and four small tasks can resolve, and `multi-file-change`
+  matches. One requirement of difference is observed, but this design cannot estimate
+  its repeatability or statistical significance. `multi-file-change`
   contributes 0/3 to every arm.
 - **No arm reduced the estimated projection on this suite; all three grew it.**
   `rolling_summary` 2317 → 3003 (+686, +29.6%), `observation_masking`
   2321 → 2459 (+138, +6.0%), `structured_state` 2318 → 3825 (+1507, +65.0%).
   These are short, prose-heavy histories, so a summary plus the two retained
   turns costs more than the span it replaces, and masking has almost no tool
-  bodies to drop. Cost does not favour any arm here either.
+  bodies to drop. Masking has the smallest measured post-compaction projection
+  and needs no summary-model call; actual billing is not recorded.
 - **`structured_state` keeps every requirement in the projection but grows the
   projection most**, and its probe score is not better than masking's
   (5/12 vs 6/12). Its deterministic extract block is the reason the projection
@@ -708,9 +711,9 @@ record carrying `02bd561`. Additional checks made on the same evidence:
   arms carry new fingerprints because their version changed.
 - Every live record has `errors: {}` and a full `durations_ms` set, so all six
   stages ran in all 12 cells.
-- The only `diff` between the first and second offline aggregates is the commit
-  line and the two model-based `strategy_version` values — the mechanics numbers
-  are reproduced exactly.
+- The first and second offline aggregate mechanics totals match. JSON metadata
+  differs in source commit, model-based versions and their policy fingerprints;
+  these provenance changes are expected and are not dropped from the evidence.
 - The committed result files contain no credential, no environment value and no
   scratch path (grep for `sk-`, `api_key`, `bearer`, `DEEPSEEK_API` and `/tmp/`
   returns nothing); records carry counts, digests and durations only.
@@ -724,8 +727,8 @@ record carrying `02bd561`. Additional checks made on the same evidence:
    invocation never reached a cell: the product's sandbox descriptor audit refused
    to start because the harness process had inherited a non-close-on-exec
    descriptor (`fd=49 → /dev/ptmx`) from the tool host. That refusal is correct
-   behaviour and was not patched. All runs in both steps were launched through
-   `scripts/with-clean-fds.sh`, which closes inherited descriptors before `exec`,
+   behaviour and was not patched. Both steps used descriptor-closing wrappers;
+   the second used `scripts/with-clean-fds.sh`, which closes descriptors before `exec`,
    so the harness saw only standard input, output and error. Nothing in the
    repository was changed for this, and the wrapper affects no measurement except
    that the sandbox can start.
@@ -764,12 +767,13 @@ construction (one repetition, four tasks) or measured by a lexical matcher:
 - Mechanical completion (12/12) and file recall (6/6 everywhere) are saturated, so
   they cannot separate the arms.
 - Projection retention separates them by four requirements out of twelve
-  (12/12, 12/12, 8/12) and the probe by one (6/12, 5/12, 5/12) — inside the noise
-  of four tasks, one repetition and literal substring matching, with one task
-  (`multi-file-change`) scoring 0/3 in every arm.
+  (12/12, 12/12, 8/12) and the probe by one (6/12, 5/12, 5/12). With four
+  tasks, one repetition and literal substring matching, variation and significance
+  cannot be estimated. One task (`multi-file-change`) scores 0/3 in every arm.
 - No arm reduced the estimated projection on this suite; all three grew it
   (`rolling_summary` +29.6%, `observation_masking` +6.0%, `structured_state`
-  +65.0%), so cost does not favour any of them either.
+  +65.0%). Masking has the smallest post-compaction estimate and no summary
+  inference, though actual API cost was not measured.
 
 What the evidence does support, stated as narrowly as possible:
 
@@ -778,8 +782,8 @@ What the evidence does support, stated as narrowly as possible:
   eight failures are a fixed defect and not a property of the strategies.
 - `observation_masking` is the only arm whose compaction is deterministic and
   model-free, and it reproduced its first-run numbers exactly (same policy
-  fingerprint, tokens, projection counts and probe counts). It also has the second
-  highest probe total (6/12).
+  fingerprint, tokens, projection counts and probe counts). It also has the highest
+  observed probe total (6/12).
 - `structured_state` kept every requirement in the projection (12/12) and grew the
   projection the most (+65%); its probe total (5/12) did not exceed masking's.
 - `rolling_summary`, today's default, is the only arm that lost requirement
@@ -807,7 +811,7 @@ implementation, the README, the roadmap or any acceptance record.
 - Counts: second matrix 12 attempted, 12 measured, 0 mechanical errors, 0
   retries, 0 diagnostic requests; first matrix preserved at 4 measured /
   8 `provider_failure` / 0 retried.
-- Evidence: the three `m6-06b` result directories are linked above; the first
+- Evidence: the two retained `m6-06b` result directories are linked above; the first
   run's files are unchanged.
 - Limits: one repetition of four small, prose-heavy tasks, lexical matchers,
   heuristic token estimates, one probe turn, no LLM judge, no workspace rollback,
