@@ -161,8 +161,8 @@ v2 payload:
 | `compaction.model` | optional; **absent** means no model was used | always present |
 
 `null` is not a spelling of "no model": a v3 compaction either names its model
-or omits the field. Every writer in this step still records a model; the
-rolling summary keeps doing so, and model-free strategies arrive in m6-04.
+or omits the field. The model-based strategies always name theirs; the
+model-free `observation_masking` (implemented in m6-04) omits it.
 
 The schema accepts any code matching the pattern, so readers keep codes they do
 not know. `ResultCode` names the ones this build writes: `tools_unavailable`,

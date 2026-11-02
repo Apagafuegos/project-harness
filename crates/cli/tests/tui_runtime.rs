@@ -9,7 +9,7 @@ use harness::{
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    context::{ModelLimits, StrategyId},
+    context::ModelLimits,
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -79,7 +79,7 @@ impl Fixture {
             switch_policy: Portability::Reject,
             known_instances: vec![],
             summary_model: None,
-            compaction_strategy: StrategyId::default(),
+            compaction_strategy: harness::wiring::creation_compaction_strategy(),
             explicit_strategy: false,
             driver,
             sandbox: None,
@@ -367,5 +367,30 @@ async fn lag_reset_does_not_duplicate_rows() {
     .await
     .unwrap();
     assert_eq!(text(&terminal).matches("unique-answer").count(), 1);
+    f.handle.shutdown().await;
+}
+
+/// The plain-harness entry path creates sessions through the same shared wiring
+/// as `ask`, so the chosen new-session strategy is persisted in the creation
+/// configuration. The parser default itself is proven in `ask_cli`'s tests.
+#[tokio::test]
+async fn plain_tui_new_session_records_the_shared_masking_default() {
+    let f = Fixture::new(Vec::new(), 16).await;
+    let view = f.handle.view().await.unwrap();
+    let root = DataRoot::open(&f.options.data_root, false).unwrap();
+    let bytes = root
+        .read_artifact(view.snapshot.configuration(), 1024 * 1024)
+        .unwrap();
+    let configuration: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        f.options.compaction_strategy,
+        harness::wiring::creation_compaction_strategy()
+    );
+    assert_eq!(
+        configuration["compaction"]["strategy"],
+        "observation_masking"
+    );
+    assert!(configuration["compaction"]["summary_model"].is_null());
+    assert_eq!(configuration["compaction"]["automatic"], false);
     f.handle.shutdown().await;
 }

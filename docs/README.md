@@ -56,6 +56,14 @@ describing a future component is not evidence that it is implemented.
   built-in base instruction and the root `AGENTS.md`, recorded at creation.
 - [TUI architecture](decisions/0023-tui-architecture.md): the pure model, the
   `Action` boundary, the terminal lifecycle, key map and navigation.
+- [DeepSeek profile](decisions/0024-deepseek-profile.md): the second Messages
+  endpoint profile, its credential, catalog and native-state owner.
+- [Context controls](decisions/0025-context-controls.md): whole-turn pins and
+  exclusions, record version 3 and branch-scoped replay.
+- [Compaction strategies](decisions/0026-compaction-strategies.md): the strategy
+  registry, masking and structured state, and the chosen new-session default.
+- [Evaluation harness](decisions/0027-evaluation-harness.md): the dev-only
+  offline pipeline, fixed tasks, provenance and opt-in live mode.
 - [Providers](providers.md): implemented adapters, router, credentials and opt-in checks.
 - [Built-in tools usage](tools.md): implemented file/shell backends and host assembly.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
@@ -86,6 +94,11 @@ describing a future component is not evidence that it is implemented.
   rendering, navigation, streaming, cancellation, approvals and inspector, the
   terminal-lifecycle and lag-coherence evidence, and the client/engine boundary
   guard.
+- [Context experiments](context-experiments.md): both bounded DeepSeek Flash
+  matrices, every raw value and limit, and the resolved default.
+- [Milestone 6 acceptance](milestone-6-acceptance.md): pins/exclusions, schema
+  v3, strategies, DeepSeek, the offline evaluation harness, the chosen default
+  and the live evidence, with partial rows stated.
 
 ## Document status
 
@@ -108,6 +121,10 @@ switching (0014/0015), transport/credentials (0016), both native adapters
 (0017/0018), compaction generation/runtime (0019) and headless ask (0020). M5
 implements the shared wiring and read-only session catalog (0021), recorded
 instructions (0022) and the Ratatui client with its terminal lifecycle (0023).
+M6 implements the DeepSeek profile (0024), whole-turn context controls and
+record version 3 (0025), compaction strategy selection (0026) and the offline
+evaluation harness (0027); the live matrices and the user's chosen
+default are recorded in [context experiments](context-experiments.md).
 Schema/examples alone are not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

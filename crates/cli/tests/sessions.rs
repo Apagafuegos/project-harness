@@ -1,8 +1,6 @@
 //! Process-level catalog/context checks stay separate from concurrent ask reopens.
 use harness::wiring::{self, SessionOptions};
-use harness_core::{
-    context::StrategyId, model::scripted::ScriptedProvider, runtime::DriverConfig, session::*,
-};
+use harness_core::{model::scripted::ScriptedProvider, runtime::DriverConfig, session::*};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -71,7 +69,7 @@ fn catalog_json_and_context_include_new_session_instructions_without_modificatio
                 switch_policy: Portability::Reject,
                 known_instances: vec!["mock".into()],
                 summary_model: None,
-                compaction_strategy: StrategyId::default(),
+                compaction_strategy: harness::wiring::creation_compaction_strategy(),
                 explicit_strategy: false,
                 driver: DriverConfig::default(),
                 sandbox: None,

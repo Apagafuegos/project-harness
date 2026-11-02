@@ -6,7 +6,7 @@ use harness_core::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
     },
-    runtime::DriverConfig,
+    runtime::{DriverConfig, SessionHandle},
     session::*,
 };
 use serde_json::{Value, json};
@@ -51,7 +51,7 @@ impl Fixture {
                 switch_policy: Portability::Reject,
                 known_instances: Vec::new(),
                 summary_model: None,
-                compaction_strategy: StrategyId::default(),
+                compaction_strategy: harness::wiring::creation_compaction_strategy(),
                 explicit_strategy: false,
                 prompt: "hello".into(),
                 approve_read_only: false,
@@ -815,10 +815,35 @@ async fn summary_model_opt_in_is_independent_and_persisted() {
 }
 
 #[tokio::test]
-async fn compaction_strategy_flag_is_recorded_on_a_new_session() {
+async fn explicit_compaction_strategy_is_recorded_and_the_new_session_default_is_masking() {
     let mut f = Fixture::new();
-    f.options.compaction_strategy = StrategyId::ObservationMasking;
+    f.options.compaction_strategy = StrategyId::StructuredState;
     f.options.explicit_strategy = true;
+    f.options.summary_model = Some(ModelRef {
+        provider_instance: f.options.model.provider_instance.clone(),
+        model: "summary".into(),
+    });
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    assert_eq!(configuration["compaction"]["strategy"], "structured_state");
+    // The model-based selection keeps its independent summary model and enables
+    // the automatic trigger exactly as before this step.
+    assert_eq!(
+        configuration["compaction"]["summary_model"]["model"],
+        "summary"
+    );
+    assert_eq!(configuration["compaction"]["automatic"], true);
+
+    // An unflagged new session records the shared client creation default, and
+    // model-free masking enables no automatic model-based work.
+    let f = Fixture::new();
+    assert_eq!(
+        f.options.compaction_strategy,
+        StrategyId::ObservationMasking
+    );
     let (code, _, err) = f
         .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
         .await;
@@ -828,16 +853,8 @@ async fn compaction_strategy_flag_is_recorded_on_a_new_session() {
         configuration["compaction"]["strategy"],
         "observation_masking"
     );
-    // The default stays the baseline, so an unflagged session is unchanged.
-    let f = Fixture::new();
-    let (code, _, err) = f
-        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
-        .await;
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(
-        recorded_configuration(&f, &err)["compaction"]["strategy"],
-        "rolling_summary"
-    );
+    assert!(configuration["compaction"]["summary_model"].is_null());
+    assert_eq!(configuration["compaction"]["automatic"], false);
 }
 
 #[tokio::test]
@@ -846,7 +863,8 @@ async fn continuation_refuses_a_compaction_strategy_change() {
     let (_, _, first) = f
         .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
         .await;
-    f.options.session = Some(f.snapshot(&first).session_id().clone());
+    let session = f.snapshot(&first).session_id().clone();
+    f.options.session = Some(session.clone());
     f.options.compaction_strategy = StrategyId::StructuredState;
     f.options.explicit_strategy = true;
     let before = recorded_configuration(&f, &first);
@@ -857,12 +875,26 @@ async fn continuation_refuses_a_compaction_strategy_change() {
     // A refused continuation writes nothing: the recorded policy is unchanged.
     assert_eq!(recorded_configuration(&f, &first), before);
 
-    // Naming the recorded strategy (or none at all) continues normally.
-    f.options.compaction_strategy = StrategyId::RollingSummary;
+    // Naming the recorded strategy (or none at all) continues normally; the
+    // omitted flag keeps the recorded masking strategy, not the legacy default.
+    f.options.compaction_strategy = StrategyId::ObservationMasking;
     let (code, _, err) = f
         .run(Arc::new(ScriptedProvider::new([reply("second")])), None)
         .await;
     assert_eq!(code, 0, "{err}");
+    f.options.explicit_strategy = false;
+    f.options.compaction_strategy = harness::wiring::creation_compaction_strategy();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("third")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["compaction"]["strategy"],
+        "observation_masking"
+    );
+    // Neither successful continuation appended a configuration change; only
+    // turns were recorded.
+    assert_eq!(configuration_changes(&journal_bytes(&f, &session)), 0);
 }
 
 fn recorded_configuration(f: &Fixture, err: &str) -> Value {
@@ -874,6 +906,177 @@ fn recorded_configuration(f: &Fixture, err: &str) -> Value {
             .unwrap(),
     )
     .unwrap()
+}
+
+fn journal_bytes(f: &Fixture, session: &SessionId) -> Vec<u8> {
+    fs::read(
+        DataRoot::open(&f.options.data_root, false)
+            .unwrap()
+            .path()
+            .join("sessions")
+            .join(format!("{session}.jsonl")),
+    )
+    .unwrap()
+}
+
+/// A pre-M6 session: its configuration has no `compaction` object at all, which
+/// is exactly what a client wrote when the strategy field did not exist.
+async fn legacy_session_without_a_strategy(f: &Fixture) -> SessionId {
+    let root = Arc::new(DataRoot::open(&f.options.data_root, true).unwrap());
+    let bytes = serde_json::to_vec(&json!({
+        "policy_revision": "ask-v1",
+        "enabled_tools": ["read", "write", "edit"],
+        "workspace_read": "ask",
+        "workspace_mutation": "ask",
+        "process": "ask",
+        "network": "deny",
+        "protected_paths": [],
+        "allowances": []
+    }))
+    .unwrap();
+    let artifact = root.put_artifact(&bytes).unwrap();
+    let session = SessionId::new();
+    let handle = SessionHandle::create(
+        root,
+        session.clone(),
+        SessionHeader {
+            workspace: f.options.workspace.to_str().unwrap().into(),
+            initial_model: f.options.model.clone(),
+            policy_revision: "ask-v1".into(),
+            configuration: artifact,
+        },
+        Arc::new(ScriptedProvider::new([])),
+        f.options.driver.clone(),
+    )
+    .await
+    .unwrap();
+    handle.shutdown().await;
+    session
+}
+
+fn configuration_changes(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes)
+        .matches("\"configuration_changed\"")
+        .count()
+}
+
+/// Falsification target: the client creation default and the legacy decoding
+/// default are deliberately different. Flipping either one must fail here.
+#[tokio::test]
+async fn creation_default_and_legacy_decoding_are_distinct() {
+    use harness_core::context::{CompactionConfig, SessionConfiguration};
+    assert_eq!(
+        harness::wiring::creation_compaction_strategy(),
+        StrategyId::ObservationMasking,
+        "a new session no longer defaults to the chosen strategy"
+    );
+    assert_eq!(
+        StrategyId::default(),
+        StrategyId::RollingSummary,
+        "the decoding default flipped; old journals would be reinterpreted"
+    );
+    assert_eq!(
+        CompactionConfig::default().strategy,
+        StrategyId::RollingSummary
+    );
+    assert_eq!(
+        CompactionConfig::from_value(None).unwrap().strategy,
+        StrategyId::RollingSummary
+    );
+    for absent in [
+        &b"{}"[..],
+        br#"{"compaction":{}}"#,
+        br#"{"compaction":{"summary_model":{"provider_instance":"summary","model":"cheap"}}}"#,
+    ] {
+        let artifact = ArtifactRef {
+            sha256: Digest::of(absent),
+            bytes: absent.len() as u64,
+        };
+        assert_eq!(
+            SessionConfiguration::parse(artifact, absent)
+                .unwrap()
+                .compaction()
+                .strategy,
+            StrategyId::RollingSummary,
+            "an omitted strategy must keep the legacy rolling_summary reading"
+        );
+    }
+}
+
+/// A recorded legacy session continues unchanged: the client's new default does
+/// not rewrite its configuration, and an omitted flag keeps the recorded
+/// strategy even though it differs from what a new session would record.
+#[tokio::test]
+async fn recorded_legacy_session_continues_without_an_implicit_strategy_change() {
+    let mut f = Fixture::new();
+    // Old clients recorded the baseline; this is the old creation behavior.
+    f.options.compaction_strategy = StrategyId::RollingSummary;
+    let (code, _, first) = f
+        .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
+        .await;
+    assert_eq!(code, 0, "{first}");
+    let session = f.snapshot(&first).session_id().clone();
+    let before = journal_bytes(&f, &session);
+
+    f.options.session = Some(session.clone());
+    f.options.compaction_strategy = harness::wiring::creation_compaction_strategy();
+    f.options.explicit_strategy = false;
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("second")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let after = journal_bytes(&f, &session);
+    assert!(
+        after.starts_with(&before),
+        "the continuation rewrote earlier journal bytes"
+    );
+    assert_eq!(configuration_changes(&after), 0);
+    assert_eq!(
+        recorded_configuration(&f, &err)["compaction"]["strategy"],
+        "rolling_summary"
+    );
+}
+
+/// The on-disk legacy omission: an old configuration without any strategy keeps
+/// decoding as `rolling_summary` and continues without an appended
+/// configuration change. `harness context` and the builder read the same bytes.
+#[tokio::test]
+async fn omitted_strategy_session_continues_as_rolling_summary_untouched() {
+    use harness_core::context::SessionConfiguration;
+    let mut f = Fixture::new();
+    let session = legacy_session_without_a_strategy(&f).await;
+    let before = journal_bytes(&f, &session);
+    f.options.session = Some(session.clone());
+    assert_eq!(
+        f.options.compaction_strategy,
+        StrategyId::ObservationMasking,
+        "the new-session default must not be what the continuation compares"
+    );
+    assert!(!f.options.explicit_strategy);
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("continued")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let snapshot = f.snapshot(&err);
+    assert_eq!(snapshot.session_id(), &session);
+    let after = journal_bytes(&f, &session);
+    assert!(after.starts_with(&before));
+    assert_eq!(configuration_changes(&after), 0);
+    let root = DataRoot::open(&f.options.data_root, false).unwrap();
+    let bytes = root
+        .read_artifact(snapshot.configuration(), 1024 * 1024)
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("\"strategy\""),
+        "the continuation added a strategy to an old configuration"
+    );
+    let configuration = SessionConfiguration::parse(snapshot.configuration().clone(), &bytes)
+        .expect("the untouched legacy configuration still decodes");
+    assert_eq!(
+        configuration.compaction().strategy,
+        StrategyId::RollingSummary
+    );
+    assert!(!configuration.compaction().automatic());
 }
 
 #[tokio::test]

@@ -12,7 +12,11 @@ inspection diffs and idle-only automatic triggering
 whole-turn pins and exclusions into the projection and report
 ([decision 0025](decisions/0025-context-controls.md)); step 02 makes compaction
 skip controlled turns instead of refusing a span that contains one, per the
-m6-02 amendment to decision 0019. Both native wire adapters are implemented in
+m6-02 amendment to decision 0019. Milestone 6 step 04 adds the compaction strategy
+registry and the two alternatives ([decision 0026](decisions/0026-compaction-strategies.md));
+step 07 makes `observation_masking` the recorded default for **new** client
+sessions while an omitted strategy in an older configuration still decodes as
+`rolling_summary`. Both native wire adapters are implemented in
 `harness-providers`; see [providers](providers.md).
 
 ## Three layers
@@ -386,11 +390,14 @@ The optional session configuration object is independently shape-checked:
 {"compaction":{"strategy":"rolling_summary","summary_model":{"provider_instance":"summary","model":"cheap"},"max_summary_tokens":2048,"retain_recent_turns":2,"automatic":true}}
 ```
 
-`strategy` is a closed enum recorded at session creation, defaulting to
-`rolling_summary` when absent. `observation_masking` and `structured_state` are
-the Milestone 6 alternatives ([decision 0026](decisions/0026-compaction-strategies.md));
-an unknown name fails loading as `invalid_compaction`. Changing the strategy
-mid-session is one recorded, idle-only `ConfigurationChanged` through
+`strategy` is a closed enum recorded at session creation. An **omitted** field,
+or a missing/empty `compaction` object, still decodes as `rolling_summary`: that
+is the legacy reading of every configuration written before the field existed,
+and it is deliberately independent of the clients' new-session default.
+`observation_masking` and `structured_state` are the Milestone 6 alternatives
+([decision 0026](decisions/0026-compaction-strategies.md)); an unknown name fails
+loading as `invalid_compaction`. Changing the strategy mid-session is one
+recorded, idle-only `ConfigurationChanged` through
 `Command::SetCompactionStrategy`: a fresh configuration artifact and policy
 revision, never a rewritten entry. The strategy is part of the preview policy
 fingerprint, so a change makes outstanding previews stale.
@@ -477,9 +484,15 @@ subsequent `StartTurn` retains its normal C1 receipt and retry behavior. Automat
 generation never runs merely because a session was reopened or inspected.
 
 `--compaction-strategy` selects the strategy for a new session in `ask` and the
-TUI. On continuation an explicitly different strategy is refused with
-`session_policy_mismatch`, exactly like an explicit summary-model change; the
-recorded strategy is kept when the flag is absent.
+TUI. Both parsers take their default from one definition,
+`harness::wiring::creation_compaction_strategy()`: a new session records
+`observation_masking` explicitly, with no TUI-specific policy. On continuation an
+explicitly different strategy is refused with `session_policy_mismatch`, exactly
+like an explicit summary-model change; the recorded strategy is kept when the
+flag is absent, including the legacy `rolling_summary` reading of an omitted
+field, and no configuration entry is appended. Choosing the default changed no
+`automatic` rule: masking records no summary model and leaves it off, and the
+model-based strategies still require a configured summary model.
 
 See [runtime compaction commands](runtime.md#compaction-commands-and-automatic-triggers)
 for pre-C1 budget checking, pending-start deduplication, events and failure codes.
@@ -487,9 +500,14 @@ for pre-C1 budget checking, pending-start deduplication, events and failure code
 ## Not implemented
 
 - Real tokenizers (estimates remain explicitly heuristic).
-- Comparing the three strategies on live models (m6-06; the offline harness
-  that m6-06 runs live is `crates/eval`, see
-  [decision 0027](decisions/0027-evaluation-harness.md)).
+- A general quality ranking of the strategies. The two bounded live matrices ran
+  four fixed tasks once each with lexical matchers and one probe turn; see
+  [context experiments](context-experiments.md) and
+  [Milestone 6 acceptance](milestone-6-acceptance.md#partial-rows). The chosen
+  `observation_masking` default is provisional and measured, not a universal
+  winner.
+- Workspace rollback. Compaction and masking change the projection only; the
+  harness never reverts files.
 
 ## Tests
 

@@ -11,8 +11,14 @@ separately:
   errors**. The fix is validated live; no arm can be named the winner on these
   scores (see [Recommendation](#recommendation-bounded)).
 
-The product default stays `rolling_summary` until the user explicitly picks one
-(settled decision 4). The user's choice is the only thing still open.
+**Resolved default (2026-11-02, settled decision 18).** After reviewing both
+runs, the user chose **`observation_masking`** as the M6 product default for new
+sessions in `ask` and the TUI. It is recorded explicitly in each new session's
+creation configuration. Decoding an omitted strategy in an old configuration
+still means `rolling_summary`, and a continuation keeps its recorded strategy;
+the default is not a reinterpretation of past journals or summaries. See
+[Resolved default](#resolved-default-2026-11-02-bounded-rationale) below and the
+m6-07 amendment to [ADR 0026](decisions/0026-compaction-strategies.md).
 
 Dates: 2026-11-01 (UTC) for the first run, 2026-11-02 (UTC) for the second.
 Branches: `m6-experiments` and `m6-experiments-rerun`.
@@ -795,9 +801,57 @@ What the evidence does support, stated as narrowly as possible:
   larger suite and more repetitions — not another paid run of this one, which is
   not authorized.
 
-**The default therefore stays `rolling_summary` and the choice remains the
-user's** (settled decision 4). Nothing in this step changed the default, the
-implementation, the README, the roadmap or any acceptance record.
+**The default then stayed `rolling_summary` and the choice remained the user's**
+(settled decision 4). Nothing in m6-06b changed the default, the implementation,
+the README, the roadmap or any acceptance record. The user resolved the open
+question on 2026-11-02; see the next section.
+
+## Resolved default (2026-11-02, bounded rationale)
+
+**Decision 18:** the user chose **`observation_masking`** as the product default
+for newly created sessions, in both `ask` and the plain-`harness` TUI. The choice
+was made after reviewing the two matrices above and is recorded here exactly as
+the user's decision, not as an inference this report makes.
+
+The bounded rationale, limited to what these runs measured:
+
+- Masking is the only arm that is deterministic and model-free in its compaction
+  path. It reproduced its first-run numbers exactly (same `compaction_policy`
+  fingerprint `9a22ff70…`, same per-task token estimates and projection counts)
+  and made zero summary requests, so there is no summary-model dependency, no
+  summary cost and no provider prompt to fail.
+- It had the highest observed probe total (6/12 versus 5/12 and 5/12), kept every
+  requirement in the projection (12/12), and had the smallest post-compaction
+  estimated projection of the three arms (2459, versus 3003 and 3825), though all
+  three grew relative to their pre-compaction estimate.
+- `rolling_summary`, the previous default, was the only arm that lost
+  requirement phrasings in the projection (8/12) and tied the lowest probe total.
+  That is a signal against it, not a verdict.
+
+What the decision does **not** claim:
+
+- **Not a general winner.** Four fixed, prose-heavy tasks × one repetition per
+  matrix and lexical matchers cannot establish repeatability or significance;
+  no arm reduced the estimated projection on this suite.
+- **Still lossy.** Masking replaces tool-result bodies with placeholders. It
+  preserves dialogue but discards observations, so it is not lossless memory and
+  it does not guarantee a shorter projection.
+- **No workspace rollback.** Completion is the hidden check on the workspace the
+  continuation left; the harness never reverts files.
+- **Provisional.** The user's measured choice is the M6 product default; a larger
+  suite with repetitions is the way to challenge it, not the scores above.
+
+The implementation is a **client creation default only**:
+`harness::wiring::creation_compaction_strategy()` records `observation_masking`
+in a new session's configuration, while `StrategyId::default()` and
+`CompactionConfig` decoding still read an omitted strategy as `rolling_summary`.
+Old journals, recorded strategies, explicit selections and recorded idle
+switching are unchanged; a continuation without an explicit flag keeps the
+recorded strategy and appends no configuration change. Automatic-compaction
+enablement is also unchanged: masking records no summary model and leaves
+`automatic: false`, and explicit model-based strategies still require one. The
+details are in the m6-07 amendment to [ADR 0026](decisions/0026-compaction-strategies.md)
+and in [Milestone 6 acceptance](milestone-6-acceptance.md).
 
 ## Handoff
 
@@ -816,8 +870,10 @@ implementation, the README, the roadmap or any acceptance record.
 - Limits: one repetition of four small, prose-heavy tasks, lexical matchers,
   heuristic token estimates, one probe turn, no LLM judge, no workspace rollback,
   and no retained projection/probe texts for the second run.
-- Recommendation: no winner; the bounded reading is that the fix is validated,
-  masking is the deterministic arm that reproduced, and `rolling_summary` shows
-  the weakest projection retention — with the caveats above.
-- **Open question for the user:** which strategy should be the product default for
-  M6? It stays `rolling_summary` until you choose explicitly.
+- Recommendation: no winner in the second matrix alone; the bounded reading is
+  that the fix is validated, masking is the deterministic arm that reproduced,
+  and `rolling_summary` shows the weakest projection retention — with the
+  caveats above.
+- **Open question resolved:** the user chose `observation_masking` as the M6
+  product default for new sessions on 2026-11-02 (decision 18), with the bounded
+  rationale and the legacy/decoding distinction recorded above.

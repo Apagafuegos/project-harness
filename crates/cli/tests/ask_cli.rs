@@ -62,6 +62,10 @@ fn ask_help_and_usage_errors() {
     let help = String::from_utf8_lossy(&out.stdout);
     assert!(help.contains("--summary-model"));
     assert!(help.contains("--compaction-strategy"));
+    assert!(
+        help.contains("default: observation_masking"),
+        "the new-session default is not shown in --help: {help}"
+    );
     assert!(help.contains("--switch-policy"));
     assert!(help.contains("anthropic"));
     assert!(help.contains("deepseek"));

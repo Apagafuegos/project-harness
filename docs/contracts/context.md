@@ -4,8 +4,13 @@ Status: Independent context projection, rolling summaries, automatic/manual
 compaction, and headless observability are provisionally agreed. Concrete types
 and algorithms are proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
 Projection of recorded history, the report, budgets and the inspection API are
-implemented under [decision 0006](../decisions/0006-context-builder.md); see
-[context](../context.md). Summary generation and compaction commands are not.
+implemented under [decision 0006](../decisions/0006-context-builder.md). Summary
+generation, preview/commit, automatic triggering, whole-turn pins/exclusions and
+the three compaction strategies are implemented under
+[decisions 0019](../decisions/0019-compaction.md),
+[0025](../decisions/0025-context-controls.md) and
+[0026](../decisions/0026-compaction-strategies.md); see [context](../context.md)
+and [Milestone 6 acceptance](../milestone-6-acceptance.md).
 
 ## Inputs and output
 

@@ -23,11 +23,26 @@ pub fn command() -> Command {
         .arg(Arg::new("auth").long("auth").value_parser(["codex", "api-key"]).default_value("codex").help("OpenAI authentication; not applicable to --provider anthropic or deepseek"))
         .arg(Arg::new("model").long("model").value_name("MODEL").help("Default: gpt-6.1-sol (codex), gpt-5.5 (api-key), claude-sonnet-5-5 (anthropic), deepseek-flash (deepseek); saved model on continuation"))
         .arg(Arg::new("summary-model").long("summary-model").value_name("MODEL").help("Independent summary model on the same provider instance; enables automatic compaction"))
-        .arg(Arg::new("compaction-strategy").long("compaction-strategy").value_parser(["rolling_summary", "observation_masking", "structured_state"]).default_value("rolling_summary").help("Compaction strategy for a new session; a different value on continuation is refused"))
+        .arg(Arg::new("compaction-strategy").long("compaction-strategy").value_parser(["rolling_summary", "observation_masking", "structured_state"]).default_value(harness::wiring::CREATION_COMPACTION_STRATEGY).help("Compaction strategy for a new session; a different value on continuation is refused"))
         .arg(Arg::new("switch-policy").long("switch-policy").value_parser(["reject", "omit-optional"]).default_value("reject").help("On continuation, whether a model switch may omit optional native state"))
         .arg(Arg::new("session").long("session").value_name("ID").value_parser(|s: &str| s.parse::<SessionId>()).help("Continue an existing durable session"))
         .arg(Arg::new("approve-read-only").long("approve-read-only").action(ArgAction::SetTrue).help("With a terminal, auto-approve only registry-declared read-only file tools"))
         .arg(Arg::new("prompt").value_name("PROMPT").required(true).help("Prompt text, or - to read stdin"))
+}
+
+/// The compaction strategy a client asks for, and whether the user named it.
+///
+/// Both parsers (`ask` and the plain-`harness` TUI share this one function) get
+/// their value from `wiring::creation_compaction_strategy`, so a new session
+/// records `observation_masking` by default while an omitted flag on a
+/// continuation stays an omission, never an override.
+pub(crate) fn strategy_selection(args: &ArgMatches) -> (StrategyId, bool) {
+    let explicit = args.value_source("compaction-strategy") == Some(ValueSource::CommandLine);
+    let strategy = args
+        .get_one::<String>("compaction-strategy")
+        .map(|name| StrategyId::from_str(name).expect("value parser"))
+        .unwrap_or_else(harness::wiring::creation_compaction_strategy);
+    (strategy, explicit)
 }
 
 pub fn run(args: &ArgMatches) -> ExitCode {
@@ -123,6 +138,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         "omit-optional" => Portability::OmitOptional,
         _ => Portability::Reject,
     };
+    let (compaction_strategy, explicit_strategy) = strategy_selection(args);
     let options = Options {
         data_root,
         workspace: args
@@ -142,13 +158,8 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
             provider_instance: selected.into(),
             model: m.clone(),
         }),
-        compaction_strategy: StrategyId::from_str(
-            args.get_one::<String>("compaction-strategy")
-                .expect("default"),
-        )
-        .expect("value parser"),
-        explicit_strategy: args.value_source("compaction-strategy")
-            == Some(ValueSource::CommandLine),
+        compaction_strategy,
+        explicit_strategy,
         prompt: args.get_one::<String>("prompt").expect("required").clone(),
         approve_read_only: args.get_flag("approve-read-only"),
         driver: wired.driver,
@@ -169,4 +180,77 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         },
     )
     .await
+}
+
+/// Both client parsers must resolve the same new-session creation default, and
+/// an omitted flag must stay omitted so a continuation follows its recorded
+/// strategy instead of overriding it.
+#[cfg(test)]
+mod strategy_selection_tests {
+    use super::*;
+
+    fn ask(args: &[&str]) -> ArgMatches {
+        command()
+            .try_get_matches_from(std::iter::once("ask").chain(args.iter().copied()))
+            .expect("ask arguments")
+    }
+
+    fn plain_harness(args: &[&str]) -> ArgMatches {
+        Command::new("harness")
+            .args(crate::tui_cli::args())
+            .try_get_matches_from(std::iter::once("harness").chain(args.iter().copied()))
+            .expect("plain harness arguments")
+    }
+
+    #[test]
+    fn ask_parser_defaults_a_new_session_to_observation_masking() {
+        let matches = ask(&["--workspace", "/tmp/workspace", "hello"]);
+        assert_eq!(
+            strategy_selection(&matches),
+            (StrategyId::ObservationMasking, false),
+            "the ask parser no longer defaults to the creation strategy"
+        );
+        assert_eq!(
+            harness::wiring::CREATION_COMPACTION_STRATEGY,
+            "observation_masking"
+        );
+    }
+
+    #[test]
+    fn plain_harness_parser_defaults_a_new_session_to_observation_masking() {
+        let matches = plain_harness(&[]);
+        assert_eq!(
+            strategy_selection(&matches),
+            (StrategyId::ObservationMasking, false),
+            "the plain-harness parser has its own, divergent default"
+        );
+    }
+
+    #[test]
+    fn both_parsers_detect_every_explicit_strategy_selection() {
+        for (name, strategy) in [
+            ("rolling_summary", StrategyId::RollingSummary),
+            ("observation_masking", StrategyId::ObservationMasking),
+            ("structured_state", StrategyId::StructuredState),
+        ] {
+            let ask = ask(&[
+                "--workspace",
+                "/tmp/workspace",
+                "--compaction-strategy",
+                name,
+                "hi",
+            ]);
+            assert_eq!(
+                strategy_selection(&ask),
+                (strategy, true),
+                "ask did not detect --compaction-strategy {name}"
+            );
+            let tui = plain_harness(&["--compaction-strategy", name]);
+            assert_eq!(
+                strategy_selection(&tui),
+                (strategy, true),
+                "plain harness did not detect --compaction-strategy {name}"
+            );
+        }
+    }
 }

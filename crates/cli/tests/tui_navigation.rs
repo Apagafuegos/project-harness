@@ -10,7 +10,7 @@ use harness::{
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    context::{ModelCapabilities, ModelInfo, ModelLimits, StrategyId},
+    context::{ModelCapabilities, ModelInfo, ModelLimits},
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -84,7 +84,7 @@ impl Fixture {
                 switch_policy: Portability::Reject,
                 known_instances: vec!["mock".into()],
                 summary_model: None,
-                compaction_strategy: StrategyId::default(),
+                compaction_strategy: harness::wiring::creation_compaction_strategy(),
                 explicit_strategy: false,
                 driver,
                 sandbox: None,

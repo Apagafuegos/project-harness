@@ -8,7 +8,6 @@ use harness::{
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    context::StrategyId,
     session::{ModelRef, Portability, SessionId},
     tools::SandboxConfig,
 };
@@ -17,7 +16,6 @@ use std::{
     io::{self, IsTerminal},
     path::PathBuf,
     process::ExitCode,
-    str::FromStr,
 };
 
 pub fn args() -> Vec<Arg> {
@@ -96,6 +94,7 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
             .cloned()
             .unwrap_or_else(|| wiring::default_model(provider_name, codex).into()),
     };
+    let (compaction_strategy, explicit_strategy) = super::ask_cli::strategy_selection(args);
     let options = SessionOptions {
         data_root: args
             .get_one::<PathBuf>("data-root")
@@ -112,12 +111,8 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
                 provider_instance: selected.into(),
                 model: model.clone(),
             }),
-        compaction_strategy: args
-            .get_one::<String>("compaction-strategy")
-            .map(|strategy| StrategyId::from_str(strategy).expect("value parser"))
-            .unwrap_or_default(),
-        explicit_strategy: args.value_source("compaction-strategy")
-            == Some(ValueSource::CommandLine),
+        compaction_strategy,
+        explicit_strategy,
         model: model.clone(),
         explicit_model: args.value_source("model") == Some(ValueSource::CommandLine),
         explicit_provider: args.value_source("provider") == Some(ValueSource::CommandLine),

@@ -3,11 +3,11 @@
 The scaffold, specification artifacts, headless storage (Milestone 1) and the
 headless mock lifecycle with context inspection (Milestone 2), and tools,
 selective security and recovery (Milestone 3), and native providers, rolling
-compaction and headless ask (Milestone 4), and the Ratatui terminal client
-(Milestone 5) are complete within their recorded scope. Live Anthropic evidence
-still needs an API key, and the live TUI smoke met the subscription's Codex quota
-limit; both are recorded rather than claimed.
-Later stages have acceptance criteria; they are not implemented features.
+compaction and headless ask (Milestone 4), the Ratatui terminal client
+(Milestone 5), and context controls, strategies, the DeepSeek profile and the
+bounded experiments (Milestone 6) are complete within their recorded scope. Live
+Anthropic evidence still needs an API key, and the live TUI smoke met the
+subscription's Codex quota limit; both are recorded rather than claimed.
 
 ## 0. Foundation and proposed specification — present
 
@@ -88,8 +88,9 @@ environment filtering, deadlines, bounded output and descendant cleanup.
 Missing enforcement fails closed. S02 and assembled tool-host tests are required
 in both pinned CI jobs, never a successful skip on an unavailable prerequisite.
 
-Schema v2 is implemented ([session storage](session-storage.md#record-versions));
-v1 records remain readable and journals continue as v2. The fixed registry,
+Schema v2 was implemented in M3 and is now v3 since M6 ([session
+storage](session-storage.md#record-versions)); v1 and v2 records remain readable
+and journals continue as v3. The fixed registry,
 canonical plans and policy, pure-core/async pipeline, descriptor-rooted files,
 sandbox and session-owned assembly, and recovery advice are recorded in
 ADRs [0008](decisions/0008-host-sandbox.md),
@@ -112,8 +113,8 @@ There are no gap rows; recorded partial capabilities/limits are:
   journal's immediate release/reopen (ADR 0012 amendment); no bypass or effect retry.
 
 Additional filesystem/sandbox threat-model limits are recorded in the acceptance
-notes and owning ADRs. Native providers and headless ask are implemented in M4;
-the Ratatui client remains M5.
+notes and owning ADRs. Native providers and headless ask were implemented in M4;
+the Ratatui client in M5.
 
 ## 4. Native providers and rolling compaction — complete
 
@@ -140,7 +141,9 @@ twice in the gate. Known partials/limits:
   `ANTHROPIC_API_KEY`; fixture coverage is complete, not live compatibility proof.
 - `ConvertSupported` is refused; continuation conversion needs a later decision
   (ADR 0015). Neither M4 adapter emits a response-level continuation (ADR 0014).
-- Pins do not exist yet (C02, ADR 0019; M6).
+- Pins did not exist in M4 (C02, ADR 0019). Closed by Milestone 6: whole-turn
+  pins/exclusions are implemented and mapped in
+  [Milestone 6 acceptance](milestone-6-acceptance.md).
 - Estimates are heuristic; provider-specific feature limits and the Codex
   backend-selected output budget are recorded in ADRs 0017/0018.
 - Preserved-thinking transformations are requested but not parsed/reported
@@ -194,15 +197,49 @@ partials/limits:
 - No syntax highlighting, no workspace switching, no session deletion/retention
   or export UI, and no credential UI. A torn journal is still repaired with
   `harness journal repair`, never automatically.
-- Inspector budgets are heuristic estimates, not tokenizer counts, and pins or
-  context experiments remain M6.
+- Inspector budgets are heuristic estimates, not tokenizer counts. Pins and
+  context experiments were M6 and are now implemented; see
+  [Milestone 6 acceptance](milestone-6-acceptance.md).
 
-## 6. Context experiments
+## 6. Context experiments — complete
 
-Expand pin/exclusion controls and evaluate summary strategies on fixed coding
-tasks. Measure requirement retention, modified-file recall, and completion after
-compaction with recorded configuration/input provenance. Do not confuse better
-summaries with lossless memory or workspace rollback.
+Implemented whole-turn pins and exclusions as append-only `context_control`
+branch entries (record version 3) folded by the projection. A pinned turn stays
+verbatim outside compaction coverage; an excluded turn stays in history and the
+transcript, is never covered and never reaches a summary model. Compaction skips
+controlled turns, and a span that cannot fit fails explicitly instead of being
+truncated. Three strategies share one registry — `rolling_summary`, the
+model-free `observation_masking` and `structured_state` — selected at creation
+and switchable only through a recorded idle `ConfigurationChanged`. A compaction
+records its strategy and version and omits `model` when it used none
+([ADR 0024](decisions/0024-deepseek-profile.md),
+[0025](decisions/0025-context-controls.md),
+[0026](decisions/0026-compaction-strategies.md)).
+
+`crates/eval` is a dev-only offline harness over four fixed coding tasks:
+requirement retention (from the projection and a probe turn), modified-file
+recall and completion after one compaction, with recorded configuration/input
+provenance ([ADR 0027](decisions/0027-evaluation-harness.md)). It proves
+mechanics, not quality, and is required in the gate. Two bounded DeepSeek Flash
+matrices are recorded in [context experiments](context-experiments.md): the
+first measured 4/12 cells (eight model-based mechanical failures, fixed by the
+explicit summary request); the second measured 12/12 with zero mechanical
+errors. No arm reduced the estimated projection on this suite. On 2026-11-02 the
+user chose `observation_masking` as the new-session default: both clients record
+it explicitly, while decoding an omitted strategy still means `rolling_summary`
+and a continuation keeps its recorded strategy.
+
+[Milestone 6 acceptance](milestone-6-acceptance.md) maps every §6 item and the
+relevant C01/C02/RFC 6.1 clauses to gate tests. Known partials/limits:
+
+- The comparison cannot establish a general quality winner: four prose-heavy
+  tasks, one repetition per matrix, lexical matchers and one probe turn.
+- Masking is lossy, guarantees neither a shorter projection nor workspace
+  rollback, and the default is the user's measured provisional choice.
+- Anthropic live compatibility and the live TUI end-to-end run remain partial
+  from M4/M5.
+- `scripts/live-check.sh deepseek` was unrun at m6-00 for lack of a key; the live
+  DeepSeek endpoint is evidenced by the two matrices instead.
 
 ## Outside v0.1
 

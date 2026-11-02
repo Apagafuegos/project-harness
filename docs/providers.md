@@ -263,7 +263,14 @@ provider branch in the request or event mapping.
   with a tool round trip and one follow-up turn that replays the stored thinking
   block, against `HARNESS_LIVE_DEEPSEEK_MODEL` (default `deepseek-flash`). With no
   `DEEPSEEK_API_KEY` it prints `live deepseek: skipped (no DEEPSEEK_API_KEY)` and
-  exits **77**.
+  exits **77**. It was unrun at m6-00 because that step had no key; the profile's
+  live endpoint is instead evidenced by the two bounded DeepSeek Flash matrices
+  in [context experiments](context-experiments.md), which made real summary,
+  probe and continuation requests (and stored/replayed native state through the
+  same profile) with zero mechanical errors in the second run.
+- `--provider deepseek` is available to both `harness ask` and the plain
+  `harness` TUI through the shared wiring, with `deepseek-flash` as the new-session
+  model default. See [Milestone 6 acceptance](milestone-6-acceptance.md).
 
 ADR 0024 holds the control list, the signature behavior, the catalog sources and
 the date read.

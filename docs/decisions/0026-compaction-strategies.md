@@ -1,10 +1,10 @@
 # 0026: Compaction strategy selection and alternative strategies
 
-Status: Implemented for Milestone 6, step 04 (m6-04), and amended by
+Status: Implemented for Milestone 6, step 04 (m6-04), amended by
 m6-side-summary-request (decision 16: one explicit fresh request for both
-model-based strategies, versions 2 and 1). Milestone 6 settled decisions 3, 4
-and 12; the two alternatives exist so m6-05 can compare them and the user can
-pick the default before acceptance.
+model-based strategies, versions 2 and 1) and by m6-07 (decision 18: the chosen
+new-session default is `observation_masking`, while decoding an omitted strategy
+still means `rolling_summary`). Milestone 6 settled decisions 3, 4, 12 and 18.
 
 Date: 2026-10-31
 
@@ -233,13 +233,50 @@ configuration.
 on continuation the recorded configuration is compared with the requested one
 *after decoding*, and an explicitly supplied strategy that differs from the
 recorded one is refused with `session_policy_mismatch` and writes nothing. An
-absent flag keeps the recorded strategy (the default value of the flag is not
+absent flag keeps the recorded strategy (the flag's default value is not
 treated as an override), and naming the recorded strategy is not a change. A
 mid-session change is the recorded `SetCompactionStrategy` command, not a client
 flag; the clients do not send it in this step (m6-03 owns the TUI controls).
 
 The status bar and inspector were left untouched: m6-03 runs in parallel in
 `crates/cli/src/tui/`.
+
+## m6-07 amendment: the chosen new-session default (decision 18)
+
+On 2026-11-02 the user chose `observation_masking` as the M6 product default
+after reviewing the second bounded matrix. The implementation keeps two defaults
+that are deliberately different:
+
+- **Creation.** `harness::wiring::creation_compaction_strategy()` is the single
+  client creation default (`ObservationMasking`). Both parsers — `ask` and the
+  plain-`harness` TUI — resolve their flag through `ask_cli::strategy_selection`,
+  so there is no separate TUI policy, and the existing shared wiring records the
+  strategy in the new session's configuration artifact. `--help` shows it as the
+  flag's default.
+- **Decoding.** `StrategyId::default()` and `CompactionConfig`'s serde default
+  stay `rolling_summary`. That is the legacy reading of a configuration that
+  omits the strategy — a missing `compaction` object, an empty one, or an old
+  summary-model policy. Changing it would silently reinterpret every journal
+  written before M6-04, so it must not follow the product default.
+- **Continuation.** Without an explicit selection, the recorded strategy wins
+  (`requested.strategy = recorded.strategy`), including the legacy
+  `rolling_summary` reading. No configuration entry is appended and earlier
+  journal bytes are unchanged. An explicit differing selection is still refused
+  with `session_policy_mismatch`, and a refusal writes nothing.
+- **Unchanged rules.** Versions stay `2`/`1`/`2`; no schema, artifact or record
+  is rewritten. Masking is model-free and leaves `automatic: false` when no
+  summary model is configured; explicit model-based strategies still require a
+  configured summary model. The default alone neither enables nor disables the
+  automatic trigger.
+
+This is the user's measured provisional choice, not an inferred winner. The
+second matrix cannot rank the strategies generally: four prose-heavy tasks, one
+repetition, lexical matchers and one probe turn. Masking's distinguishing
+measured properties are determinism, zero summary inference and the smallest
+post-compaction estimate, not better memory than a summary; it stays lossy,
+does not guarantee a shorter projection and provides no workspace rollback. See
+[context experiments](../context-experiments.md) and
+[Milestone 6 acceptance](../milestone-6-acceptance.md).
 
 ## Consequences
 

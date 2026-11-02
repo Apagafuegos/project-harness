@@ -881,18 +881,16 @@ events that follow.
 
 ## Not implemented yet
 
-- Compaction that skips pinned turns (m6-02); this step refuses any controlled
-  span instead. Client keys for controls (m6-03).
-- General configuration-update commands. Remember is the implemented
-  configuration-change path; summary generation/commit and automatic compaction
-  are implemented in m4-06.
 - Automatic reconciliation of uncertain side effects. Advisory file-image
   hints are implemented; resolution remains the user's statement.
-- A terminal client beyond `harness ask` (Milestone 5): the headless command
-  streams one real turn with terminal approvals, and
-  [decision 0020](decisions/0020-headless-ask.md) records its interface. Recovery
-  UI beyond the handle, events and CLI, and retrying a turn after recovery: the
-  user starts a new turn.
+- General configuration-update commands. Remember is the implemented
+  configuration-change path; summary generation/commit, automatic compaction
+  (m4-06), whole-turn context controls (m6-01/02) and the recorded strategy
+  switch (`SetCompactionStrategy`, m6-04) are implemented.
+- A terminal UI beyond the Ratatui client (M5): `harness ask` streams one real
+  turn with terminal approvals, and plain `harness` owns the terminal lifecycle.
+  Recovery UI beyond the handle, events and CLI, and retrying a turn after
+  recovery: the user starts a new turn.
 
 ## Tests
 

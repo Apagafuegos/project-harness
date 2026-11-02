@@ -207,6 +207,12 @@ pub struct SessionConfiguration {
 #[serde(rename_all = "snake_case")]
 pub enum StrategyId {
     /// The Milestone 4 baseline: a model-written rolling summary.
+    ///
+    /// This stays the decoding default for a configuration that omits the
+    /// strategy (and for `CompactionConfig::default()`), so older journals keep
+    /// their meaning. Clients choose their own creation default for **new**
+    /// sessions — `harness::wiring::creation_compaction_strategy()` records
+    /// `observation_masking` as of m6-07 — and must not change this value.
     #[default]
     RollingSummary,
     /// Deterministic, model-free masking of tool result bodies.
@@ -275,7 +281,8 @@ impl FromStr for StrategyId {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "ConfiguredCompaction")]
 pub struct CompactionConfig {
-    /// Selected strategy; defaults to `rolling_summary`.
+    /// Selected strategy; a configuration that omits it decodes as the legacy
+    /// `rolling_summary`, never as a client's new-session default.
     pub strategy: StrategyId,
     /// Required by the strategies that use a model, not by pure selection.
     pub summary_model: Option<ModelRef>,

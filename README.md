@@ -10,7 +10,7 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: Milestones 1–5 complete within their recorded scope.** `harness-core`
+**Status: Milestones 1–6 complete within their recorded scope.** `harness-core`
 implements validated session trees, checksummed JSONL transactions, immutable
 snapshots, private content-addressed artifacts, single-writer locking, and
 explicit torn-tail repair. J01–J03 tests cover replay, corruption rejection and
@@ -36,10 +36,17 @@ manual preview/commit and exact source manifests without rewriting history.
 `harness ask` streams one native turn with terminal tool approvals, and plain
 `harness` opens an interactive Ratatui client over the same engine: streaming,
 navigation, approvals, cancellation and a read-only context inspector, with a
-durable terminal lifecycle. Validation
-is offline after provisioning; live checks are separate. Anthropic live evidence
-still needs an API key, and the live TUI smoke met the Codex quota limit; both
-are recorded as partial in the acceptance documents.
+durable terminal lifecycle. Whole-turn pins and exclusions are append-only branch
+entries (record version 3); compaction skips controlled turns, keeps pinned turns
+verbatim and never sends excluded ones to a summary model. Three selectable
+strategies share one registry, including the deterministic, model-free
+`observation_masking`, which is the recorded default for new sessions; decoding
+an omitted strategy in older journals still means `rolling_summary`. A dev-only
+offline evaluation crate and two separate, opt-in DeepSeek Flash matrices measure
+the strategies. Validation is offline after provisioning; live checks are
+separate. Anthropic live evidence still needs an API key, and the live TUI smoke
+met the Codex quota limit; both are recorded as partial in the acceptance
+documents.
 
 ## Getting started
 
@@ -90,8 +97,11 @@ A new session records a built-in instruction plus the workspace's root
 `AGENTS.md`. The default provider is OpenAI through the read-only Codex login
 (`codex login` once); `--provider anthropic` uses `ANTHROPIC_API_KEY`, and
 `--provider deepseek` uses `DEEPSEEK_API_KEY` on DeepSeek's
-Anthropic-compatible endpoint. Press Ctrl-K in the TUI for the context
-inspector and Ctrl-D to quit.
+Anthropic-compatible endpoint. New sessions record `observation_masking` as
+their compaction strategy (`--compaction-strategy` overrides it; a continuation
+keeps its recorded strategy unless explicitly changed, and naming a different one
+is refused). Press Ctrl-K in the TUI for the context inspector, `p`/`x` in the
+branch tree (Ctrl-T) to pin or exclude a turn, and Ctrl-D to quit.
 
 ## Repository
 
@@ -129,6 +139,11 @@ both native adapters and compaction offline. [Milestone 5
 acceptance](docs/milestone-5-acceptance.md) maps the terminal client: its
 rendering, navigation, streaming, cancellation, approvals, inspector, terminal
 lifecycle, lag coherence and client/engine boundary; `scripts/live-check.sh tui`
-is the separate, opt-in live smoke. See the [roadmap](docs/roadmap.md).
+is the separate, opt-in live smoke. [Milestone 6
+acceptance](docs/milestone-6-acceptance.md) maps whole-turn pins/exclusions,
+record version 3, the three strategies, the DeepSeek profile, the offline
+evaluation harness and the chosen default; [context
+experiments](docs/context-experiments.md) records the two bounded live matrices
+and their limits. See the [roadmap](docs/roadmap.md).
 
 Created in [T3 Code](https://t3.codes).

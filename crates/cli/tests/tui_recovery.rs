@@ -5,7 +5,7 @@ use harness::{
     wiring::{self, SessionOptions},
 };
 use harness_core::{
-    context::{ModelLimits, StrategyId},
+    context::ModelLimits,
     model::{
         ProviderEvent,
         scripted::{Script, ScriptedProvider, Step},
@@ -45,7 +45,7 @@ fn options(base: &Path) -> SessionOptions {
         switch_policy: Portability::Reject,
         known_instances: vec![],
         summary_model: None,
-        compaction_strategy: StrategyId::default(),
+        compaction_strategy: harness::wiring::creation_compaction_strategy(),
         explicit_strategy: false,
         driver,
         sandbox: None,

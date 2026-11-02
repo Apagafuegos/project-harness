@@ -17,6 +17,21 @@ use harness_providers::{
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
+/// Compaction strategy recorded in the creation configuration of every newly
+/// created session, for both clients.
+///
+/// This is a **client creation default only**. `StrategyId::default()` and
+/// `CompactionConfig`'s decoding keep reading an omitted strategy as the legacy
+/// `rolling_summary`, so an old journal is never reinterpreted by a new session's
+/// default. A continuation without an explicit selection keeps the strategy that
+/// is already recorded. See the m6-07 amendment to ADR 0026.
+pub const fn creation_compaction_strategy() -> StrategyId {
+    StrategyId::ObservationMasking
+}
+
+/// Stable name of [`creation_compaction_strategy`] for the shared parser flag.
+pub const CREATION_COMPACTION_STRATEGY: &str = creation_compaction_strategy().as_str();
+
 /// Session assembly choices, independent of client input and rendering.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
@@ -40,7 +55,9 @@ pub struct SessionOptions {
     pub known_instances: Vec<String>,
     /// Independent summary model, enabling automatic compaction only when set.
     pub summary_model: Option<ModelRef>,
-    /// Compaction strategy for a new session: recorded in its configuration.
+    /// Compaction strategy recorded in a new session's configuration. Clients
+    /// default it to [`creation_compaction_strategy`]; a continuation keeps the
+    /// recorded strategy unless the user names a different one.
     pub compaction_strategy: StrategyId,
     /// Whether the user supplied a strategy override. A continuation refuses an
     /// explicit strategy that differs from the recorded one with
@@ -136,14 +153,7 @@ pub async fn open_session(
         // differs from the recorded one.
         let recorded = CompactionConfig::from_value(policy.get("compaction"))
             .map_err(|_| configuration("invalid_configuration"))?;
-        let mut requested = CompactionConfig::from_value(expected.get("compaction"))
-            .map_err(|_| configuration("invalid_configuration"))?;
-        if !o.explicit_strategy {
-            requested.strategy = recorded.strategy;
-        }
-        if recorded != requested {
-            return Err(configuration("session_policy_mismatch"));
-        }
+        continuation_compaction(&recorded, &expected, o.explicit_strategy)?;
         let head_model = snapshot
             .model_at(snapshot.head())
             .map_err(|_| configuration("unknown_head"))?
@@ -215,6 +225,31 @@ pub async fn open_session(
         warnings,
     })
 }
+/// The compaction policy a continuation is allowed to continue with.
+///
+/// Without an explicit strategy selection the **recorded** strategy wins, even
+/// though new sessions now default to `observation_masking`. That includes the
+/// legacy reading of a configuration that omits the field entirely
+/// (`CompactionConfig::from_value(None)` is `rolling_summary`), so reopening old
+/// work never adds a strategy or rewrites its configuration. Every other field,
+/// including the summary model and `automatic`, must still match exactly; an
+/// explicit differing selection is refused by the caller's mismatch policy.
+fn continuation_compaction(
+    recorded: &CompactionConfig,
+    expected: &Value,
+    explicit_strategy: bool,
+) -> Result<(), Failure> {
+    let mut requested = CompactionConfig::from_value(expected.get("compaction"))
+        .map_err(|_| configuration("invalid_configuration"))?;
+    if !explicit_strategy {
+        requested.strategy = recorded.strategy;
+    }
+    if recorded != &requested {
+        return Err(configuration("session_policy_mismatch"));
+    }
+    Ok(())
+}
+
 /// Refuse a model whose provider instance the injected provider cannot serve,
 /// before anything is opened or written. An empty registry is not validated.
 fn known(o: &SessionOptions, model: &ModelRef) -> Result<(), Failure> {

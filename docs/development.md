@@ -80,8 +80,9 @@ harness --session SESSION_ID
 ```
 
 The workspace is the canonical current directory and must be authorized and
-outside the private storage root. The six options `--data-root`, `--provider`,
-`--auth`, `--model`, `--summary-model`, and `--session` have ask's defaults.
+outside the private storage root. The seven options `--data-root`, `--provider`,
+`--auth`, `--model`, `--summary-model`, `--compaction-strategy`, and `--session`
+have ask's defaults.
 Without `--data-root`, storage is `$XDG_DATA_HOME/harness`, otherwise
 `$HOME/.local/share/harness`. New sessions record the built-in instructions and
 root `AGENTS.md`; edits affect new sessions only. Continuations keep their saved
@@ -89,6 +90,16 @@ instructions and model unless explicitly overridden, and enforce the shared
 policy/credential checks. An explicit switch uses the loss-rejecting policy;
 refusal is visible in the banner and retains the saved model. Repeat the saved
 `--summary-model` choice when continuing a session that enabled compaction.
+
+A **new** session records `observation_masking` as its compaction strategy by
+default, in both the TUI and `ask`; `--compaction-strategy` overrides it. Masking
+is deterministic and needs no summary model, so it records no `Compaction.model`
+and leaves automatic compaction off. A continuation keeps the strategy already
+recorded when the flag is omitted, and old configurations that never named a
+strategy keep their `rolling_summary` meaning; naming a different strategy on
+continuation is refused with `session_policy_mismatch`. Changing it is otherwise
+the recorded idle switch, not a flag: the clients do not send it in this
+milestone.
 
 - Enter sends; Shift+Enter or Alt+Enter inserts a newline. Bracketed paste is
   one prompt edit, never a series of commands.
@@ -172,9 +183,12 @@ and Enter previews that model's context; the panel explicitly says **nothing
 switched**. Select “Session model” to clear the override. This never sends a
 switch command or writes history. Esc dismisses the chooser.
 
-`c` asks the engine for a compaction preview using the independently configured
-`--summary-model`. Progress is visible and Esc cancels generation. An ineligible
-session displays the core's reason without calling a provider. The proposal
+`c` asks the engine for a compaction preview using the recorded strategy. A
+model-based strategy uses the independently configured `--summary-model` and
+fails with `summary_model_unconfigured` if none is recorded; the default
+`observation_masking` makes no provider call at all and shows its deterministic
+rendering. Progress is visible and Esc cancels generation. An ineligible session
+displays the core's reason without calling a provider. The proposal
 shows the summary, covered/superseded source manifest and provenance, and
 `CompactionDiff` (new coverage, supersession, per-category before/after estimates
 and whether it fits). Scroll to read the full proposal; it may increase tokens.
@@ -219,7 +233,7 @@ immutable siblings, busy commands, reject-first switching, explicit optional
 omission and required incompatibilities. The separate
 `tui_recovery` target kills a child after a durable write intent, then resolves
 it through the running app without replay. The separate `tui_pty` target tests
-non-TTY refusal, the six-flag/no-config-file CLI surface, and restored the
+non-TTY refusal, the seven-flag/no-config-file CLI surface, and restored the
 terminal after a returned loop error; enabling the default-off `test-provider`
 feature also runs the real binary under its own PTY for quit, panic, SIGTERM and
 that returned error, checking termios and restoration sequences. `check.sh` runs
@@ -246,7 +260,11 @@ It spends quota once, never prints credentials, and does not retry rate limits
 
 #### TUI known limits
 
-- Flags only: six options, no config file (decision 3).
+- Flags only: seven options, no config file (decision 3).
+- The new-session strategy default is `observation_masking`. It is lossy for tool
+  observations, does not guarantee a smaller projection, and provides no
+  workspace rollback. Old and continued sessions keep their recorded strategy;
+  the clients expose no mid-session strategy command in this milestone.
 - Only the workspace root `AGENTS.md` is read, at creation, capped at 64 KiB;
   nested files are ignored and edits affect new sessions only.
 - Minimal Markdown without syntax highlighting; raw HTML is inert text.
