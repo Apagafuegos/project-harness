@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "harness_commit": "02bd56187ec57404bed951db383144ec7c2ae459",
+  "task_fingerprint": "82d578a2ebba9044d0206fea04d7a53e9856463a917f91f0c3e87ba102093617",
+  "task": "refactor-constraint",
+  "shape": "refactor",
+  "strategy": "structured_state",
+  "strategy_version": "2",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "session_configuration": "0cd55d8154a0d9480be2661680bbe22d81b9e990dbb9631565274dd45a60bdb7",
+  "compaction_policy": "07a95ceaed371afba2011951e17768cd702e291070c0fd831641474a1d694832",
+  "estimator": {
+    "method": "heuristic",
+    "version": "bytes4-flat-media-v1"
+  },
+  "repetition": 0,
+  "seed": 0,
+  "tokens": {
+    "before": 537,
+    "after": 925
+  },
+  "metrics": {
+    "requirements_retained_projection": 3,
+    "requirements_retained_probe": 2,
+    "requirements_total": 3,
+    "files_recalled_projection": 1,
+    "files_recalled_probe": 1,
+    "files_total": 1,
+    "completion": true
+  },
+  "durations_ms": {
+    "total_ms": 23102,
+    "replay_ms": 161,
+    "compaction_ms": 5816,
+    "probe_ms": 3847,
+    "continuation_ms": 12754,
+    "check_ms": 146
+  },
+  "errors": {}
+}

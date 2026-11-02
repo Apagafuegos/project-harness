@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "harness_commit": "02bd56187ec57404bed951db383144ec7c2ae459",
+  "task_fingerprint": "5c9d7c792a317ab08433d49a9a1c4b8d5849e5781e37bcda871f59e899c47f21",
+  "task": "multi-file-change",
+  "shape": "multi_file",
+  "strategy": "structured_state",
+  "strategy_version": "2",
+  "session_model": "deepseek/deepseek-flash",
+  "summary_model": "deepseek/deepseek-flash",
+  "session_configuration": "7fe57bf26ff49c7b327acb00f806ba119b6a018dccf09343cc30fd171c39e2b2",
+  "compaction_policy": "07a95ceaed371afba2011951e17768cd702e291070c0fd831641474a1d694832",
+  "estimator": {
+    "method": "heuristic",
+    "version": "bytes4-flat-media-v1"
+  },
+  "repetition": 0,
+  "seed": 0,
+  "tokens": {
+    "before": 638,
+    "after": 948
+  },
+  "metrics": {
+    "requirements_retained_projection": 3,
+    "requirements_retained_probe": 0,
+    "requirements_total": 3,
+    "files_recalled_projection": 2,
+    "files_recalled_probe": 2,
+    "files_total": 2,
+    "completion": true
+  },
+  "durations_ms": {
+    "total_ms": 13280,
+    "replay_ms": 134,
+    "compaction_ms": 3726,
+    "probe_ms": 2837,
+    "continuation_ms": 6066,
+    "check_ms": 78
+  },
+  "errors": {}
+}

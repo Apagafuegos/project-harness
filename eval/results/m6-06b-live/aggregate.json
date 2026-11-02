@@ -1,0 +1,294 @@
+{
+  "schema": 2,
+  "harness_commit": "02bd56187ec57404bed951db383144ec7c2ae459",
+  "runs": 12,
+  "strategies": [
+    {
+      "strategy": "rolling_summary",
+      "strategy_version": "2",
+      "runs": 4,
+      "requirements_retained_projection": 8,
+      "requirements_total": 12,
+      "requirements_retained_probe": 5,
+      "files_recalled_projection": 6,
+      "files_total": 6,
+      "files_recalled_probe": 6,
+      "completions": 4,
+      "checkable": 4,
+      "tokens_before": 2317,
+      "tokens_after": 3003,
+      "failures": 0
+    },
+    {
+      "strategy": "observation_masking",
+      "strategy_version": "1",
+      "runs": 4,
+      "requirements_retained_projection": 12,
+      "requirements_total": 12,
+      "requirements_retained_probe": 6,
+      "files_recalled_projection": 6,
+      "files_total": 6,
+      "files_recalled_probe": 6,
+      "completions": 4,
+      "checkable": 4,
+      "tokens_before": 2321,
+      "tokens_after": 2459,
+      "failures": 0
+    },
+    {
+      "strategy": "structured_state",
+      "strategy_version": "2",
+      "runs": 4,
+      "requirements_retained_projection": 12,
+      "requirements_total": 12,
+      "requirements_retained_probe": 5,
+      "files_recalled_projection": 6,
+      "files_total": 6,
+      "files_recalled_probe": 6,
+      "completions": 4,
+      "checkable": 4,
+      "tokens_before": 2318,
+      "tokens_after": 3825,
+      "failures": 0
+    }
+  ],
+  "tasks": [
+    {
+      "task": "bugfix-with-test",
+      "task_fingerprint": "bba58395cf9b5554ed8bfb6640c80f9be8503302953de8cd1340258950ab04ad",
+      "shape": "bug_fix",
+      "strategies": [
+        {
+          "strategy": "rolling_summary",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 650,
+          "tokens_after": 722,
+          "failures": 0
+        },
+        {
+          "strategy": "observation_masking",
+          "strategy_version": "1",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 651,
+          "tokens_after": 637,
+          "failures": 0
+        },
+        {
+          "strategy": "structured_state",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 1,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 650,
+          "tokens_after": 1011,
+          "failures": 0
+        }
+      ]
+    },
+    {
+      "task": "feature-style-rule",
+      "task_fingerprint": "a24fe083c6e215c5b0e7fe0e7e8a46c6f13d5004767f2da2d681f485db7f0424",
+      "shape": "feature",
+      "strategies": [
+        {
+          "strategy": "rolling_summary",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 2,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 493,
+          "tokens_after": 681,
+          "failures": 0
+        },
+        {
+          "strategy": "observation_masking",
+          "strategy_version": "1",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 494,
+          "tokens_after": 555,
+          "failures": 0
+        },
+        {
+          "strategy": "structured_state",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 493,
+          "tokens_after": 941,
+          "failures": 0
+        }
+      ]
+    },
+    {
+      "task": "multi-file-change",
+      "task_fingerprint": "5c9d7c792a317ab08433d49a9a1c4b8d5849e5781e37bcda871f59e899c47f21",
+      "shape": "multi_file",
+      "strategies": [
+        {
+          "strategy": "rolling_summary",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 0,
+          "requirements_total": 3,
+          "requirements_retained_probe": 0,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 638,
+          "tokens_after": 753,
+          "failures": 0
+        },
+        {
+          "strategy": "observation_masking",
+          "strategy_version": "1",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 0,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 639,
+          "tokens_after": 664,
+          "failures": 0
+        },
+        {
+          "strategy": "structured_state",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 0,
+          "files_recalled_projection": 2,
+          "files_total": 2,
+          "files_recalled_probe": 2,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 638,
+          "tokens_after": 948,
+          "failures": 0
+        }
+      ]
+    },
+    {
+      "task": "refactor-constraint",
+      "task_fingerprint": "82d578a2ebba9044d0206fea04d7a53e9856463a917f91f0c3e87ba102093617",
+      "shape": "refactor",
+      "strategies": [
+        {
+          "strategy": "rolling_summary",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 1,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 536,
+          "tokens_after": 847,
+          "failures": 0
+        },
+        {
+          "strategy": "observation_masking",
+          "strategy_version": "1",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 537,
+          "tokens_after": 603,
+          "failures": 0
+        },
+        {
+          "strategy": "structured_state",
+          "strategy_version": "2",
+          "runs": 1,
+          "requirements_retained_projection": 3,
+          "requirements_total": 3,
+          "requirements_retained_probe": 2,
+          "files_recalled_projection": 1,
+          "files_total": 1,
+          "files_recalled_probe": 1,
+          "completions": 1,
+          "checkable": 1,
+          "tokens_before": 537,
+          "tokens_after": 925,
+          "failures": 0
+        }
+      ]
+    }
+  ],
+  "compaction_policies": {
+    "observation_masking": [
+      "9a22ff70dd57a55d61600793bd2848f0a8ac1fd825c44ee3b94c296cbbd1be86"
+    ],
+    "rolling_summary": [
+      "8ceb6c94f1e73dd497f4585bd3171affef11e0b59bf62b7e06a6cea259717bc3"
+    ],
+    "structured_state": [
+      "07a95ceaed371afba2011951e17768cd702e291070c0fd831641474a1d694832"
+    ]
+  },
+  "estimators": [
+    [
+      "heuristic",
+      "bytes4-flat-media-v1"
+    ]
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schema": 2,
+  "harness_commit": "02bd56187ec57404bed951db383144ec7c2ae459",
+  "task_fingerprint": "5c9d7c792a317ab08433d49a9a1c4b8d5849e5781e37bcda871f59e899c47f21",
+  "task": "multi-file-change",
+  "shape": "multi_file",
+  "strategy": "rolling_summary",
+  "strategy_version": "2",
+  "session_model": "mock/scripted",
+  "summary_model": "mock/summary",
+  "session_configuration": "62ab3761ca282784fb9d5ecad62617d4e2b7701933cef12a3c7584ef0907b311",
+  "compaction_policy": "4e85090101c466f9878608de9e58db16cfcbc56dbeaed581250b51766083a367",
+  "estimator": {
+    "method": "heuristic",
+    "version": "bytes4-flat-media-v1"
+  },
+  "repetition": 0,
+  "seed": 0,
+  "tokens": {
+    "before": 638,
+    "after": 347
+  },
+  "metrics": {
+    "requirements_retained_projection": 3,
+    "requirements_retained_probe": 3,
+    "requirements_total": 3,
+    "files_recalled_projection": 2,
+    "files_recalled_probe": 2,
+    "files_total": 2,
+    "completion": true
+  },
+  "durations_ms": {
+    "total_ms": 1191,
+    "replay_ms": 174,
+    "compaction_ms": 11,
+    "probe_ms": 7,
+    "continuation_ms": 225,
+    "check_ms": 361
+  },
+  "errors": {}
+}
