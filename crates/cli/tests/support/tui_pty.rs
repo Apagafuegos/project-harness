@@ -244,11 +244,9 @@ fn probe_inner(
         if screen.contains("rate_limit") {
             return Err("rate_limit (not retried; terminal restored; exit=0)".into());
         }
-        if !prompted
-            || !acted
-            || !screen.contains("completed")
-            || screen.matches("pong").count() < 2
-        {
+        // M7-05 removed the `turn: completed` row; `acted` is set only after an
+        // idle render follows the answer, which is the completion signal.
+        if !prompted || !acted || screen.matches("pong").count() < 2 {
             return Err("live answer missing (terminal restored)".into());
         }
     }

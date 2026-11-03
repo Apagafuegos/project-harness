@@ -162,7 +162,9 @@ on this host. Each paid smoke ran once, with no retries. These are sanitized
 outputs; the two verbose termios Debug lines per run are normalized to the
 verified equality below. No raw screen capture, session content or credentials
 are retained. The PTY verifier also requires `completed` and the answer in
-addition to the echoed prompt before quitting.
+addition to the echoed prompt before quitting. (Since M7-05 removed the
+`turn: completed` row, the verifier instead requires an idle render after the
+answer before quitting.)
 
 ### `scripts/live-check.sh tui --provider openai` — exit 0
 
