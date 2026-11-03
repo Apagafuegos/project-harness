@@ -866,9 +866,6 @@ impl Runtime {
         if !matches!(snapshot.0.pending(snapshot.head()), Ok(pending) if pending.is_empty()) {
             return Some(Err(Rejection::Invalid("head_inside_tool_exchange")));
         }
-        if policy == Portability::ConvertSupported {
-            return Some(Err(Rejection::Invalid("unsupported_policy")));
-        }
         let report = match self.inspect_context(None, Some(model.clone())) {
             Ok(report) => report,
             Err(_) => return Some(Err(Rejection::Invalid("context_preview_failed"))),
@@ -878,8 +875,14 @@ impl Runtime {
                 .preview
                 .expect("model override always produces a preview"),
         );
-        if !preview.required_incompatibilities.is_empty()
-            || (policy == Portability::Reject && !preview.would_stop_being_portable.is_empty())
+        if preview.required_incompatibilities.iter().any(|required| {
+            policy != Portability::ConvertSupported
+                || !preview.would_convert.iter().any(|conversion| {
+                    conversion.entry_id == required.entry_id
+                        && conversion.part == required.part
+                        && conversion.capability == required.capability
+                })
+        }) || (policy == Portability::Reject && !preview.would_stop_being_portable.is_empty())
         {
             return Some(Err(Rejection::PortabilityLoss(preview)));
         }

@@ -123,6 +123,16 @@ impl<'a> ContextBuilder<'a> {
         // control appended after a response still changes what that response's
         // prefix projects to, so the existing prefix comparison sees it.
         let controls = Controls::fold(&branch);
+        let convert = branch
+            .iter()
+            .rev()
+            .find_map(|stored| match &stored.entry.payload {
+                EntryPayload::ModelChanged(change) => {
+                    Some(change.portability == crate::session::Portability::ConvertSupported)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
         // Build required prefixes oldest first. Every continuation's parent
         // precedes it, so a fingerprint is computed once, without recursion or
         // an exponential re-walk of earlier continuation-only responses.
@@ -139,12 +149,20 @@ impl<'a> ContextBuilder<'a> {
                         Some(model),
                         &prefixes,
                         &controls,
+                        convert,
                     )?;
                     prefixes.insert(parent, prefix.projection.fingerprint);
                 }
             }
         }
-        self.build_inner(snapshot, head, model_override, &prefixes, &controls)
+        self.build_inner(
+            snapshot,
+            head,
+            model_override,
+            &prefixes,
+            &controls,
+            convert,
+        )
     }
 
     fn build_inner(
@@ -154,6 +172,7 @@ impl<'a> ContextBuilder<'a> {
         model_override: Option<&ModelRef>,
         prefixes: &BTreeMap<Option<EntryId>, crate::session::Digest>,
         controls: &Controls,
+        convert: bool,
     ) -> Result<BuiltContext, ContextError> {
         if !(1..=1000).contains(&self.config.compaction_trigger_permille) {
             return Err(ContextError::InvalidConfig("compaction_trigger_permille"));
@@ -185,6 +204,27 @@ impl<'a> ContextBuilder<'a> {
             become_portable: Vec::new(),
             opaque_at_head: 0,
             pinned: false,
+            convert,
+            capabilities: self.config.catalog.capabilities(model),
+            candidates: Vec::new(),
+            tool_names: branch
+                .iter()
+                .flat_map(|stored| {
+                    let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                        return Vec::new();
+                    };
+                    response
+                        .content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::ToolCall { call_id, name, .. } => {
+                                Some(((stored.entry.id.clone(), call_id.clone()), name.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
         };
         let instructions = match self.configuration.instructions() {
             None => InstructionsReport::Absent,
@@ -408,11 +448,16 @@ impl<'a> ContextBuilder<'a> {
         let (overflow, compaction_recommended) = thresholds(&budget);
         let budget_unknown = matches!(budget, Budget::Unknown { .. });
         let preview = walk.preview.then(|| PreviewReport {
-            required_incompatibilities: required_incompatibilities(
-                &walk.items,
-                &walk.included,
-                &self.config.catalog.capabilities(model),
-            ),
+            required_incompatibilities: walk
+                .candidates
+                .iter()
+                .map(|conversion| RequiredIncompatibility {
+                    entry_id: conversion.entry_id.clone(),
+                    part: conversion.part,
+                    capability: conversion.capability,
+                })
+                .collect(),
+            would_convert: walk.candidates.clone(),
             model_at_head: head_model.clone(),
             preview_model: model.clone(),
             would_stop_being_portable: std::mem::take(&mut walk.stop_portable),
@@ -431,7 +476,11 @@ impl<'a> ContextBuilder<'a> {
         let input = ModelInput {
             model: model.clone(),
             items: walk.items,
-            tools: self.tools.to_vec(),
+            tools: if convert && !walk.capabilities.tools {
+                Vec::new()
+            } else {
+                self.tools.to_vec()
+            },
             options: self
                 .configuration
                 .inference_options(self.config.output_reserve),
@@ -710,9 +759,43 @@ struct Walk<'a> {
     opaque_at_head: u64,
     /// Whether the entry being decided belongs to a pinned turn.
     pinned: bool,
+    convert: bool,
+    capabilities: super::config::ModelCapabilities,
+    candidates: Vec<Conversion>,
+    tool_names: BTreeMap<(EntryId, CallId), String>,
 }
 
 impl Walk<'_> {
+    fn conversions_since(&self, start: usize) -> Vec<Conversion> {
+        if self.convert {
+            self.candidates[start..].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn convert_block(
+        &mut self,
+        id: &EntryId,
+        part: Part,
+        block: &ContentBlock,
+    ) -> Result<ContentBlock, ContextError> {
+        let Some((capability, kind)) = super::convert::classify(block, &self.capabilities) else {
+            return Ok(block.clone());
+        };
+        self.candidates.push(Conversion {
+            entry_id: id.clone(),
+            part,
+            capability,
+            kind,
+        });
+        if self.convert {
+            super::convert::block(block).map(|text| ContentBlock::Text { text })
+        } else {
+            Ok(block.clone())
+        }
+    }
+
     fn tokens(&self, estimate: Estimate) -> Result<u64, ContextError> {
         if estimate.method == self.method {
             Ok(estimate.tokens)
@@ -822,6 +905,7 @@ impl Walk<'_> {
             IncludedItem {
                 entry_id: None,
                 kind: ItemKind::Instructions,
+                conversions: Vec::new(),
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
@@ -837,7 +921,9 @@ impl Walk<'_> {
 
     fn user(&mut self, id: &EntryId, message: &UserMessage) -> Result<(), ContextError> {
         let mut tokens = 0u64;
-        for block in &message.content {
+        let mut content = Vec::new();
+        let start = self.candidates.len();
+        for (index, block) in message.content.iter().enumerate() {
             if !matches!(
                 block,
                 ContentBlock::Text { .. }
@@ -847,16 +933,25 @@ impl Walk<'_> {
             ) {
                 return Err(ContextError::Invariant("invalid_user_block"));
             }
-            tokens = tokens.saturating_add(self.block(block, Category::User)?.0);
+            let block = self.convert_block(
+                id,
+                Part::Block {
+                    index: index as u32,
+                },
+                block,
+            )?;
+            tokens = tokens.saturating_add(self.block(&block, Category::User)?.0);
+            content.push(block);
         }
         self.push(
             ContextItem::User {
                 entry_id: id.clone(),
-                content: message.content.clone(),
+                content,
             },
             IncludedItem {
                 entry_id: Some(id.clone()),
                 kind: ItemKind::User,
+                conversions: self.conversions_since(start),
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
@@ -883,6 +978,7 @@ impl Walk<'_> {
         }
         let mut content = Vec::new();
         let mut blocks = Vec::new();
+        let start = self.candidates.len();
         let (mut tokens, mut opaque) = (0u64, 0u64);
         for (index, block) in response.content.iter().enumerate() {
             let index =
@@ -912,9 +1008,21 @@ impl Walk<'_> {
                     (estimated, 0, kind)
                 }
             };
+            let projected = if matches!(block, ContentBlock::ToolCall { .. }) {
+                self.convert_block(id, part, block)?
+            } else {
+                block.clone()
+            };
+            let (estimated, kind) = if projected != *block {
+                // The original call estimate was already counted above.
+                self.counts.tool_calls = self.counts.tool_calls.saturating_sub(estimated);
+                self.block(&projected, Category::AssistantText)?
+            } else {
+                (estimated, kind)
+            };
             tokens = tokens.saturating_add(estimated);
             opaque = opaque.saturating_add(bytes);
-            content.push(block.clone());
+            content.push(projected);
             blocks.push(IncludedBlock {
                 part,
                 kind,
@@ -942,6 +1050,7 @@ impl Walk<'_> {
             IncludedItem {
                 entry_id: Some(id.clone()),
                 kind: ItemKind::Assistant,
+                conversions: self.conversions_since(start),
                 estimated_tokens: tokens,
                 opaque_bytes: opaque,
                 blocks,
@@ -988,6 +1097,44 @@ impl Walk<'_> {
     }
 
     fn tool_result(&mut self, id: &EntryId, result: &ToolResultEntry) -> Result<(), ContextError> {
+        if !self.capabilities.tools {
+            let conversion = Conversion {
+                entry_id: id.clone(),
+                part: Part::Entry,
+                capability: RequiredCapability::Tools,
+                kind: ConversionKind::ToolResultText,
+            };
+            self.candidates.push(conversion.clone());
+            if self.convert {
+                let name = self
+                    .tool_names
+                    .get(&(
+                        result.result.call.response_entry_id.clone(),
+                        result.result.call.call_id.clone(),
+                    ))
+                    .ok_or(ContextError::Invariant("result_without_call"))?;
+                let text = super::convert::tool_result(name, &result.result);
+                let tokens = self.tokens(self.estimator.text(&text))?;
+                self.count(Category::ToolResults, tokens);
+                self.push(
+                    ContextItem::User {
+                        entry_id: id.clone(),
+                        content: vec![ContentBlock::Text { text }],
+                    },
+                    IncludedItem {
+                        entry_id: Some(id.clone()),
+                        kind: ItemKind::User,
+                        estimated_tokens: tokens,
+                        opaque_bytes: 0,
+                        blocks: Vec::new(),
+                        provenance: None,
+                        pinned: false,
+                        conversions: vec![conversion],
+                    },
+                );
+                return Ok(());
+            }
+        }
         let mut tokens = 0u64;
         for block in &result.result.content {
             tokens = tokens.saturating_add(self.block(block, Category::ToolResults)?.0);
@@ -1005,6 +1152,7 @@ impl Walk<'_> {
             IncludedItem {
                 entry_id: Some(id.clone()),
                 kind: ItemKind::ToolResult,
+                conversions: Vec::new(),
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
@@ -1026,6 +1174,7 @@ impl Walk<'_> {
             IncludedItem {
                 entry_id: Some((*id).clone()),
                 kind: ItemKind::Summary,
+                conversions: Vec::new(),
                 estimated_tokens: tokens,
                 opaque_bytes: 0,
                 blocks: Vec::new(),
@@ -1035,67 +1184,6 @@ impl Walk<'_> {
         );
         Ok(())
     }
-}
-
-/// The budget of an estimate under `model`'s configured limits.
-fn required_incompatibilities(
-    items: &[ContextItem],
-    included: &[IncludedItem],
-    capabilities: &super::config::ModelCapabilities,
-) -> Vec<RequiredIncompatibility> {
-    use super::config::InputMediaKind;
-    let mut required = Vec::new();
-    for (item, source) in items.iter().zip(included) {
-        match item {
-            ContextItem::User { entry_id, content } => {
-                for (index, block) in content.iter().enumerate() {
-                    let media = match block {
-                        ContentBlock::Image { .. } => {
-                            Some((InputMediaKind::Image, RequiredCapability::Image))
-                        }
-                        ContentBlock::Audio { .. } => {
-                            Some((InputMediaKind::Audio, RequiredCapability::Audio))
-                        }
-                        ContentBlock::File { .. } => {
-                            Some((InputMediaKind::File, RequiredCapability::File))
-                        }
-                        _ => None,
-                    };
-                    if let Some((kind, capability)) = media
-                        && !capabilities.input_media.contains(&kind)
-                    {
-                        required.push(RequiredIncompatibility {
-                            entry_id: entry_id.clone(),
-                            part: Part::Block {
-                                index: index as u32,
-                            },
-                            capability,
-                        });
-                    }
-                }
-            }
-            ContextItem::Assistant { entry_id, .. } if !capabilities.tools => {
-                for block in &source.blocks {
-                    if block.kind == BlockKind::ToolCall {
-                        required.push(RequiredIncompatibility {
-                            entry_id: entry_id.clone(),
-                            part: block.part,
-                            capability: RequiredCapability::Tools,
-                        });
-                    }
-                }
-            }
-            ContextItem::ToolResult { entry_id, .. } if !capabilities.tools => {
-                required.push(RequiredIncompatibility {
-                    entry_id: entry_id.clone(),
-                    part: Part::Entry,
-                    capability: RequiredCapability::Tools,
-                });
-            }
-            _ => {}
-        }
-    }
-    required
 }
 
 fn budget_for(config: &ContextConfig, model: &ModelRef, estimated: u64, opaque: u64) -> Budget {

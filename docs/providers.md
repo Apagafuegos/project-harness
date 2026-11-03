@@ -107,6 +107,17 @@ to its owner).
   (`crates/providers/tests/switch.rs`) run a real session with both adapters
   against loopback fixtures.
 
+Model switching remains reject-first. `harness ask --switch-policy
+convert-supported` explicitly permits the builder to replace incompatible user
+media with metadata references and tool calls/results with bounded text for a
+tool-less target. Ctrl-L offers `c convert` with the convertible-item count after
+its initial Reject preview; `o confirm omit optional` still cannot omit required
+dialogue. Every proposed conversion is in `PreviewReport.would_convert`, and
+every actual one is in `ContextReport.included[].conversions`. Native state is
+never translated, and switch-back restores the original displayable blocks.
+This is provider-neutral projection logic, not an adapter transformation; see
+[ADR 0015](decisions/0015-switching-model-metadata.md).
+
 Native call ids travel with the stored turn. Each adapter sends the id the
 provider issued when it is a plain ASCII identifier of at most 64 bytes, and
 otherwise a deterministic substitute derived from the harness `CallId`, used for

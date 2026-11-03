@@ -185,6 +185,17 @@ impl App {
                     })]);
                 }
             }
+            KeyCode::Char('c') if matches!(screen, Screen::SwitchReport) && !control => {
+                if let Some(report) = &self.navigation.report
+                    && !report.would_convert.is_empty()
+                {
+                    self.navigation.waiting = true;
+                    return Some(vec![Action::Command(Command::SwitchModel {
+                        model: report.preview_model.clone(),
+                        policy: Portability::ConvertSupported,
+                    })]);
+                }
+            }
             KeyCode::Char('o') if matches!(screen, Screen::SwitchReport) && !control => {
                 if let Some(report) = &self.navigation.report {
                     if report.required_incompatibilities.is_empty() {
@@ -463,8 +474,16 @@ impl App {
                         capability(required.capability)
                     )
                 }));
+                if !report.would_convert.is_empty() {
+                    rows.push(format!(
+                        "convert: {} items (projection only)",
+                        report.would_convert.len()
+                    ));
+                }
                 (
-                    if report.required_incompatibilities.is_empty() {
+                    if !report.would_convert.is_empty() {
+                        "portability report · c convert · o confirm omit optional · Esc cancel"
+                    } else if report.required_incompatibilities.is_empty() {
                         "portability report · o confirm omit optional · Esc cancel"
                     } else {
                         "portability report · REQUIRED cannot omit · Esc cancel"

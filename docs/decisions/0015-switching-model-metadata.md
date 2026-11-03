@@ -39,6 +39,80 @@ switching back can restore owner-scoped state; only the latest eligible response
 can supply a continuation, so a later B response prevents reuse of A's handle.
 Unknown budgets remain inspectable and still prevent inference, not switching.
 
+## Amendment (M7 step 02): explicit ConvertSupported
+
+`ConvertSupported` is implemented, using the existing stored
+`ModelChanged.portability = convert_supported`. Storage already accepts the enum
+in all journal schemas; neither the record version nor a schema changes.
+The last model-change marker on the selected ancestry governs the entire
+projection, including continuation-prefix rebuilds. No marker means no conversion.
+A capable model override or switch-back always projects the original blocks.
+
+Only displayable, required content converts, and only when the target lacks its
+capability:
+
+- A user image/audio/file becomes `[image omitted for this model: image/png,
+  5 bytes, sha256 721c9525ade2]` (using its actual kind, stored MIME type, byte
+  count and 12-hex SHA-256 prefix). Files additionally include the stored name,
+  JSON-quoted. No artifact is read or described.
+- An answered tool call becomes `[tool call NAME COMPACT_JSON]`; arguments are
+  limited to 2,000 UTF-8 bytes, including `[truncated]` when needed. Original
+  part indices and call order are retained.
+- Its result becomes a user-role text item `[tool result NAME STATUS CODE?:
+  TEXT]`, with original result order. Text is limited to 4,000 UTF-8 bytes,
+  including the same truncation marker; any result media is represented by
+  stored metadata, never interpreted. Status and an existing code are retained.
+  No tool-shaped item/block or tool definition reaches a tool-less target.
+- Native provider state and continuations retain exactly the owner/prefix/latest
+  checks of OmitOptional. They have no conversion kind and are never translated.
+
+`PreviewReport.would_convert` lists each original `entry_id`, `part`, missing
+`capability` and conversion `kind` (`media_reference`, `tool_call_text`,
+`tool_result_text`). `required_incompatibilities` continues to classify the
+original required dialogue, even when conversion is authorized; Reject and
+OmitOptional still refuse it. ConvertSupported refuses only a required part
+without a corresponding supported conversion (there is no such part in v0.1).
+Optional portability losses continue to be reported, and ConvertSupported
+permits their omission.
+
+`ContextReport.included[].conversions` is the included-item conversion marker,
+using the same metadata. Both new lists default empty on decoding and are omitted
+when empty; existing report readers in eval decode them through the shared core
+types. The CLI's JSON context report exposes them and the TUI inspector renders
+them explicitly. Estimates count the actual reference/rendered text. Projection
+version 5 hashes that text; builder version 6 versions the new report fields.
+The six context report goldens deliberately change versions and fingerprints.
+History, artifacts, journal schemas and adapters remain unchanged.
+
+`ask --switch-policy convert-supported` selects this policy explicitly. Ctrl-L
+still tries Reject first; a refused preview with convertible items shows their
+count and offers `c convert`, alongside `o confirm omit optional` (which still
+cannot omit required dialogue). Nothing converts merely because it is shown.
+
+Evidence: the real-storage driver media policy matrix, multiple-call builder
+pairing test, opaque-state driver test, switch-back and capable-override checks,
+canonical fingerprint/estimate checks, CLI flag test, TUI loop choice test and
+randomized durable `ConvertSupported` coverage. All are offline.
+
+Validation against `b2e627b`: core unit tests increase from 458 to 465 passing
+(three ignored unchanged); ask CLI tests increase from five to six; the existing
+14-test TUI navigation suite now exercises explicit conversion. The complete
+`CARGO_NET_OFFLINE=true ./scripts/check.sh` passed, including sandbox/eval gates,
+conformance, docs and deterministic examples, with a two-hour command timeout.
+
+All four deliberate mutations failed their named behavioral check and were
+reverted before the clean gate:
+
+| Mutation | Failing test | Observed failure |
+| --- | --- | --- |
+| Convert under OmitOptional | `convert_supported_policy_matrix_is_projection_only` | OmitOptional projected text instead of the original image |
+| Textualize signed native state as schema/digest text | `convert_supported_opaque_state_is_omitted_never_textualized` | Native thinking schema appeared in the recorded request |
+| Hash original media instead of converted text | `switch_required_media_rejected_under_both_policies` | Raw and converted fingerprints were equal |
+| Rewrite stored user media during storage replay | `convert_supported_switch_back_restores_original_media` | Switch-back request no longer contained the original image |
+
+Each mutation test exited 101 with an assertion failure, not a compilation error.
+The storage-replay mutation was reverted without any final change to storage.
+
 ## Shared adapter contract
 
 The public `model::conformance` module is behind the off-by-default

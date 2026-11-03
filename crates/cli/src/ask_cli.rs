@@ -24,7 +24,7 @@ pub fn command() -> Command {
         .arg(Arg::new("model").long("model").value_name("MODEL").help("Default: gpt-6.1-sol (codex), gpt-5.5 (api-key), claude-sonnet-5-5 (anthropic), deepseek-flash (deepseek); saved model on continuation"))
         .arg(Arg::new("summary-model").long("summary-model").value_name("MODEL").help("Independent summary model on the same provider instance; enables automatic compaction"))
         .arg(Arg::new("compaction-strategy").long("compaction-strategy").value_parser(["rolling_summary", "observation_masking", "structured_state"]).default_value(harness::wiring::CREATION_COMPACTION_STRATEGY).help("Compaction strategy for a new session; a different value on continuation is refused"))
-        .arg(Arg::new("switch-policy").long("switch-policy").value_parser(["reject", "omit-optional"]).default_value("reject").help("On continuation, whether a model switch may omit optional native state"))
+        .arg(Arg::new("switch-policy").long("switch-policy").value_parser(["reject", "omit-optional", "convert-supported"]).default_value("reject").help("On continuation, whether a model switch may omit optional native state"))
         .arg(Arg::new("session").long("session").value_name("ID").value_parser(|s: &str| s.parse::<SessionId>()).help("Continue an existing durable session"))
         .arg(Arg::new("approve-read-only").long("approve-read-only").action(ArgAction::SetTrue).help("With a terminal, auto-approve only registry-declared read-only file tools"))
         .arg(Arg::new("prompt").value_name("PROMPT").required(true).help("Prompt text, or - to read stdin"))
@@ -136,6 +136,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         .unwrap_or("reject")
     {
         "omit-optional" => Portability::OmitOptional,
+        "convert-supported" => Portability::ConvertSupported,
         _ => Portability::Reject,
     };
     let (compaction_strategy, explicit_strategy) = strategy_selection(args);

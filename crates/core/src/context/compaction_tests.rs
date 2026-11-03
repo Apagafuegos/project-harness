@@ -1882,8 +1882,10 @@ async fn model_based_requests_end_with_one_fixed_request_only_prompt() {
 /// neither version constant moves, so old journals and fingerprints replay.
 #[test]
 fn request_only_item_leaves_projection_bytes_and_versions_alone() {
-    assert_eq!(PROJECTION_VERSION, 4);
-    assert_eq!(BUILDER_VERSION, 5);
+    // M7 conversion deliberately advances both versions; request-only items
+    // still do not appear in ordinary projections.
+    assert_eq!(PROJECTION_VERSION, 5);
+    assert_eq!(BUILDER_VERSION, 6);
     let request = summary_request_item();
     assert_eq!(request.entry_id(), None);
     assert_eq!(

@@ -485,6 +485,12 @@ impl App {
                 " {:?} {id} ~{} tokens{pin}: {text}",
                 item.kind, item.estimated_tokens
             )));
+            for conversion in &item.conversions {
+                rows.push(Line::raw(format!(
+                    "   converted {:?}: {:?} ({:?})",
+                    conversion.part, conversion.kind, conversion.capability
+                )));
+            }
             for block in &item.blocks {
                 if block.kind == BlockKind::ToolCall {
                     rows.push(Line::raw(format!(
@@ -492,6 +498,16 @@ impl App {
                         block.part, block.estimated_tokens
                     )));
                 }
+            }
+        }
+        if let Some(preview) = &report.preview {
+            for conversion in &preview.would_convert {
+                rows.push(Line::raw(format!(
+                    " would convert {} {:?}: {:?}",
+                    short(&conversion.entry_id),
+                    conversion.part,
+                    conversion.kind
+                )));
             }
         }
         rows.push(Line::raw("Excluded entries / parts:"));

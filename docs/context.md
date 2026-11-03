@@ -140,6 +140,36 @@ Notes:
   RFC-001's `other_branch` reason is not used; inspect another branch by
   passing its head.
 
+## Explicit model-switch conversion (M7)
+
+The latest `ModelChanged` on the selected branch governs portability. Only its
+explicit `ConvertSupported` policy converts incompatible **user** media and
+answered tool calls/results in the projection; an absent marker, Reject and
+OmitOptional never authorize conversion. Capable targets (including a model
+override) retain the originals. The journal and artifact bytes never change.
+
+Media becomes a reference containing the kind, stored MIME type, byte length,
+12-hex digest prefix and a JSON-quoted name only for files with a stored name.
+Nothing is read or described. For a target without tools, calls become bounded
+text with compact JSON arguments (2,000 UTF-8 bytes); results become user-role
+text with the tool name, status, existing code and body (4,000 UTF-8 bytes).
+Bounds include `[truncated]` when needed and never split UTF-8. Tool order and
+pairing remain intact, and tool definitions are absent for that target. Opaque
+state is never textualized: owner-scoped omission and continuation checks stay
+unchanged. See [ADR 0015](decisions/0015-switching-model-metadata.md).
+
+`PreviewReport.would_convert` records the entry, original part, missing capability
+and conversion kind for every proposed conversion, without authorizing one.
+`included[].conversions` records the same metadata for every actual conversion.
+Kinds are `media_reference`, `tool_call_text` and `tool_result_text`. Lists are
+omitted when empty and default empty on decoding. `required_incompatibilities`
+still classifies the original required parts; ConvertSupported can accept only
+those with a supported conversion. `harness context` prints the report fields;
+the TUI inspector labels converted parts and proposed conversions. Estimates
+and fingerprints cover the actual converted text, not the original media/tool
+shape. Projection version **5** and builder version **6** supersede the version
+history below; existing report goldens are updated deliberately.
+
 ## Instructions
 
 The session's configuration artifact may hold an `instructions` field: an
@@ -270,7 +300,7 @@ label every number: `estimated_*` (from the named estimator), `*_bytes`
 | `budget` | `known` (limits, each deduction, usable, estimated, headroom, overflow, trigger, threshold) or `unknown` (reason) |
 | `reported_usage` | Latest completed response's provider usage, or `null` |
 | `portability` | Provider state and continuations excluded as another model's, with owner, schema and size; never the payload |
-| `preview` | With a model override: `model_at_head`, `preview_model`, `would_stop_being_portable`, `would_become_portable` and `budget_at_head`; otherwise `null` |
+| `preview` | With a model override: `model_at_head`, `preview_model`, `required_incompatibilities`, `would_convert`, `would_stop_being_portable`, `would_become_portable` and `budget_at_head`; otherwise `null` |
 | `flags` | `budget_unknown`, `overflow`, `compaction_recommended`, `preview` |
 
 **Checks.** After every build, in every build profile, the builder verifies:

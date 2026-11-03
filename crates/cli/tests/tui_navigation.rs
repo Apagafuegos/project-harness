@@ -474,7 +474,7 @@ async fn switch_reject_first_report_then_explicit_omit_has_no_foreign_state() {
 
 #[tokio::test]
 async fn required_incompatibility_is_not_omittable() {
-    let mut f = Fixture::new(vec![reply("image answer")]);
+    let mut f = Fixture::new(vec![reply("image answer"), reply("converted answer")]);
     let mut source = ModelInfo::from(ModelLimits {
         context_tokens: Some(128_000),
         max_output_tokens: None,
@@ -529,6 +529,8 @@ async fn required_incompatibility_is_not_omittable() {
     let screen = render(&mut app, 80, 24);
     assert!(screen.contains("REQUIRED"));
     assert!(screen.contains("cannot omit"));
+    assert!(screen.contains("c convert"));
+    assert!(screen.contains("convert: 1 items"));
     assert_eq!(
         host.handle()
             .await
@@ -539,6 +541,24 @@ async fn required_incompatibility_is_not_omittable() {
             .sequence(),
         before
     );
+    let host_ref = &host;
+    let events = async_stream::stream! {
+        yield Ok(Event::Key(key(KeyCode::Char('c'))));
+        wait(host_ref, |v| v.snapshot.model_at(v.snapshot.head()).unwrap() == &model("b")).await;
+        settle().await;
+        yield Ok(Event::Paste("next".into()));
+        yield Ok(Event::Key(key(KeyCode::Enter)));
+        wait(host_ref, |v| v.snapshot.turns().len() == 2 && v.active_turn.is_none()).await;
+        yield Ok(Event::Key(ctrl('d')));
+    };
+    drive(&host, app, events).await;
+    let streams = f.provider.streams();
+    let request = &streams.last().unwrap().request;
+    assert_eq!(request.input.model, model("b"));
+    assert!(request.artifacts.references().is_empty());
+    let text = serde_json::to_string(&request.input.items).unwrap();
+    assert!(text.contains("image omitted for this model: image/png, 13 bytes, sha256"));
+    assert!(!text.contains("\"kind\":\"image\""));
     host.shutdown().await;
 }
 

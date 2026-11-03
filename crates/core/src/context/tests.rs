@@ -442,7 +442,7 @@ fn canonical_projection_bytes_are_compact_with_sorted_argument_keys() {
             r#""call_id":"019a0000-0000-7000-8000-000000000066","name":"read","#,
             r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}]}],"#,
             r#""model":{"provider_instance":"mock","model":"scripted"},"tools":[],"#,
-            r#""options":{"max_output_tokens":4096,"reasoning_effort":null,"provider_options":{}},"projection_version":4}"#
+            r#""options":{"max_output_tokens":4096,"reasoning_effort":null,"provider_options":{}},"projection_version":5}"#
         )
     );
     assert_eq!(fingerprint(&input), Digest::of(&bytes));
@@ -1059,6 +1059,167 @@ fn switch_preview_classifies_every_projected_tool_part_and_unknown_model_default
                 capability: RequiredCapability::Tools
             },
         ]
+    );
+}
+
+#[test]
+fn convert_supported_policy_matrix_is_projection_only() {
+    for policy in [
+        Portability::Reject,
+        Portability::OmitOptional,
+        Portability::ConvertSupported,
+    ] {
+        let mut journal = Journal::new();
+        let image = ContentBlock::Image {
+            artifact: journal.root.put_artifact(b"media").unwrap(),
+            mime_type: "image/png".into(),
+        };
+        let user = journal.user(vec![image.clone()]);
+        journal.respond(Response::completed(vec![text("seen")]));
+        journal.append(
+            vec![(
+                None,
+                EntryPayload::ModelChanged(ModelChanged {
+                    model: other(),
+                    portability: policy,
+                }),
+            )],
+            vec![],
+        );
+        let mut config = ContextConfig::default();
+        config.catalog.insert(
+            mock(),
+            ModelInfo {
+                capabilities: ModelCapabilities {
+                    input_media: [InputMediaKind::Image].into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let built = journal
+            .build_with(&config, journal.snapshot().head(), None)
+            .unwrap();
+        let ContextItem::User { content, .. } = &built.projection.input.items[0] else {
+            panic!("user")
+        };
+        if policy == Portability::ConvertSupported {
+            assert_eq!(
+                content,
+                &vec![text(
+                    "[image omitted for this model: image/png, 5 bytes, sha256 721c9525ade2]"
+                )]
+            );
+            assert_eq!(built.report.included[0].conversions.len(), 1);
+            assert_eq!(built.report.totals.estimated_media, 0);
+            assert_eq!(
+                built.report.totals.estimated_user,
+                config
+                    .estimator
+                    .text("[image omitted for this model: image/png, 5 bytes, sha256 721c9525ade2]")
+                    .tokens
+            );
+        } else {
+            assert_eq!(
+                content,
+                &vec![image.clone()],
+                "{policy:?} must never convert"
+            );
+            assert!(built.report.included[0].conversions.is_empty());
+        }
+        assert!(
+            matches!(&journal.snapshot().entry(&user).unwrap().entry.payload, EntryPayload::UserMessage(message) if message.content == vec![image.clone()])
+        );
+        let capable = journal
+            .build_with(&config, journal.snapshot().head(), Some(&mock()))
+            .unwrap();
+        assert!(
+            matches!(&capable.projection.input.items[0], ContextItem::User { content, .. } if content == &vec![image.clone()])
+        );
+    }
+}
+
+#[test]
+fn convert_supported_preserves_multiple_tool_pairs_and_original_parts() {
+    let mut journal = Journal::new();
+    journal.user(vec![text("tools")]);
+    let proposal = journal.respond(
+        Response::completed(vec![
+            text("look"),
+            call(&CallId::new(), "read"),
+            call(&CallId::new(), "list"),
+        ])
+        .finish(FinishReason::ToolCalls),
+    );
+    let results = journal.answer();
+    journal.respond(Response::completed(vec![text("done")]));
+    let mut config = ContextConfig::default();
+    config.catalog.insert(
+        other(),
+        ModelInfo {
+            capabilities: ModelCapabilities {
+                tools: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    journal.append(
+        vec![(
+            None,
+            EntryPayload::ModelChanged(ModelChanged {
+                model: other(),
+                portability: Portability::ConvertSupported,
+            }),
+        )],
+        vec![],
+    );
+    let built = journal
+        .build_with(&config, journal.snapshot().head(), None)
+        .unwrap();
+    let conversions = built
+        .report
+        .included
+        .iter()
+        .flat_map(|item| &item.conversions)
+        .collect::<Vec<_>>();
+    assert_eq!(conversions.len(), 4);
+    assert_eq!(conversions[0].entry_id, proposal);
+    assert_eq!(conversions[0].part, Part::Block { index: 1 });
+    assert_eq!(conversions[1].part, Part::Block { index: 2 });
+    assert_eq!(conversions[2].entry_id, results[0]);
+    assert_eq!(conversions[3].entry_id, results[1]);
+    let serialized = serde_json::to_value(&built.projection.input.items).unwrap();
+    assert_eq!(
+        serialized[1]["content"][1]["text"],
+        "[tool call read {\"path\":\"README.md\"}]"
+    );
+    assert_eq!(
+        serialized[1]["content"][2]["text"],
+        "[tool call list {\"path\":\"README.md\"}]"
+    );
+    assert_eq!(
+        serialized[2]["content"][0]["text"],
+        "[tool result read denied tools_unavailable: tools_unavailable: none]"
+    );
+    assert_eq!(
+        serialized[3]["content"][0]["text"],
+        "[tool result list denied tools_unavailable: tools_unavailable: none]"
+    );
+    assert_eq!(
+        serde_json::from_value::<ContextReport>(serde_json::to_value(&built.report).unwrap())
+            .unwrap(),
+        built.report
+    );
+    let preview = journal
+        .build_with(&config, journal.snapshot().head(), Some(&other()))
+        .unwrap()
+        .report
+        .preview
+        .unwrap();
+    assert_eq!(
+        preview.would_convert.iter().collect::<Vec<_>>(),
+        conversions
     );
 }
 

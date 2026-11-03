@@ -670,6 +670,9 @@ fn tally(finished: &Finished, coverage: &mut Coverage) {
         }
     }
     for (_, stored) in finished.reopened.entries() {
+        if let EntryPayload::ModelChanged(change) = &stored.entry.payload {
+            count(format!("stored switch {:?}", change.portability));
+        }
         if let EntryPayload::ToolResult(r) = &stored.entry.payload {
             count(format!("tool result {:?}", r.result.status));
             if r.result.invocation_id.is_some()
@@ -1091,6 +1094,7 @@ fn randomized_interleavings_keep_storage_and_events_consistent() {
     assert_eq!(coverage["runs"], seeds);
     if seeds >= SEEDS {
         for gate in [
+            "stored switch ConvertSupported",
             "approval requests",
             "approvals abandoned by restart",
             "authorization Allow allowed",

@@ -29,8 +29,20 @@ async fn switch_required_media_rejected_under_both_policies() {
                 },
             },
         );
-        let (fixture, _) =
-            Fixture::scripted(settings, WorkerOptions::default(), [reply("seen")]).await;
+        settings.runtime.context.catalog.insert(
+            other.clone(),
+            ModelLimits {
+                context_tokens: Some(1_000_000),
+                max_output_tokens: None,
+            },
+        );
+        let context = settings.runtime.context.clone();
+        let (fixture, provider) = Fixture::scripted(
+            settings,
+            WorkerOptions::default(),
+            [reply("seen"), reply("converted"), reply("restored")],
+        )
+        .await;
         let artifact = fixture
             .handle
             .put_artifact(b"media".to_vec())
@@ -58,7 +70,7 @@ async fn switch_required_media_rejected_under_both_policies() {
             .handle
             .command(Command::StartTurn {
                 command_id,
-                content: vec![block],
+                content: vec![block.clone()],
             })
             .await
             .unwrap();
@@ -87,18 +99,194 @@ async fn switch_required_media_rejected_under_both_policies() {
                 before.snapshot.sequence()
             );
         }
+        let accepted = fixture
+            .handle
+            .command(Command::SwitchModel {
+                model: other.clone(),
+                policy: Portability::ConvertSupported,
+            })
+            .await
+            .unwrap();
+        let Accepted::ModelSwitched { preview, .. } = accepted else {
+            panic!("switch")
+        };
+        assert_eq!(preview.would_convert.len(), 1);
+        assert_eq!(preview.would_convert[0].capability, capability);
+        let switched = fixture.handle.view().await.unwrap();
+        let configuration = crate::context::SessionConfiguration::load(
+            &fixture.root,
+            switched.snapshot.configuration(),
+        )
+        .unwrap();
+        let builder = crate::context::ContextBuilder::new(&context, &configuration);
+        let raw = builder
+            .build(&before.snapshot, before.snapshot.head(), Some(&other))
+            .unwrap();
+        let projected = builder
+            .build(&switched.snapshot, switched.snapshot.head(), None)
+            .unwrap();
+        assert_ne!(raw.projection.fingerprint, projected.projection.fingerprint);
         assert_eq!(
-            fixture
-                .handle
-                .command(Command::SwitchModel {
-                    model: other,
-                    policy: Portability::ConvertSupported
-                })
-                .await,
-            Err(Rejection::Invalid("unsupported_policy"))
+            projected.projection.fingerprint,
+            crate::context::fingerprint(&projected.projection.input)
         );
+        assert_eq!(
+            serde_json::to_vec(&projected.projection.input.items).unwrap(),
+            serde_json::to_vec(
+                &builder
+                    .build(&switched.snapshot, switched.snapshot.head(), None)
+                    .unwrap()
+                    .projection
+                    .input
+                    .items
+            )
+            .unwrap()
+        );
+        let capable = builder
+            .build(
+                &switched.snapshot,
+                switched.snapshot.head(),
+                Some(&test_model()),
+            )
+            .unwrap();
+        assert!(
+            matches!(&capable.projection.input.items[0], ContextItem::User { content, .. } if content == &vec![block.clone()])
+        );
+        assert!(
+            capable
+                .report
+                .included
+                .iter()
+                .all(|item| item.conversions.is_empty())
+        );
+        // inspect_context is stable and contains the original source part.
+        let report = fixture.handle.inspect_context(None, None).await.unwrap();
+        assert_eq!(
+            report
+                .included
+                .iter()
+                .flat_map(|item| &item.conversions)
+                .collect::<Vec<_>>(),
+            preview.would_convert.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            report,
+            fixture.handle.inspect_context(None, None).await.unwrap()
+        );
+        fixture.handle.command(Fixture::command(2)).await.unwrap();
+        fixture.wait(idle).await;
+        let converted = provider.streams()[1].request.clone();
+        let ContextItem::User { content, .. } = &converted.input.items[0] else {
+            panic!("user")
+        };
+        let ContentBlock::Text { text } = &content[0] else {
+            panic!("reference")
+        };
+        assert!(text.contains("omitted for this model:"));
+        assert!(text.contains("5 bytes, sha256 721c9525ade2"));
+        assert!(converted.artifacts.references().is_empty());
+        assert!(converted.input.items.iter().all(|item| !matches!(item, ContextItem::User { content, .. } if content.iter().any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::File { .. })))));
+        fixture
+            .handle
+            .command(Command::SwitchModel {
+                model: test_model(),
+                policy: Portability::ConvertSupported,
+            })
+            .await
+            .unwrap();
+        fixture.handle.command(Fixture::command(3)).await.unwrap();
+        fixture.wait(idle).await;
+        let back = provider.streams()[2].request.clone();
+        assert!(
+            matches!(&back.input.items[0], ContextItem::User { content, .. } if content == &vec![block.clone()])
+        );
+        let stored = fixture.handle.view().await.unwrap();
+        assert_eq!(
+            stored
+                .snapshot
+                .entry(before.snapshot.head().unwrap())
+                .unwrap()
+                .entry,
+            before
+                .snapshot
+                .entry(before.snapshot.head().unwrap())
+                .unwrap()
+                .entry
+        );
+
         fixture.handle.shutdown().await;
     }
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn convert_supported_switch_back_restores_original_media() {
+    use crate::context::{InputMediaKind, ModelCapabilities, ModelInfo};
+    let mut settings = config();
+    settings.runtime.context.catalog.insert(
+        test_model(),
+        ModelInfo {
+            limits: ModelLimits {
+                context_tokens: Some(1_000_000),
+                max_output_tokens: None,
+            },
+            capabilities: ModelCapabilities {
+                input_media: [InputMediaKind::Image].into(),
+                ..Default::default()
+            },
+        },
+    );
+    let (fixture, provider) = Fixture::scripted(
+        settings,
+        WorkerOptions::default(),
+        [reply("seen"), reply("back")],
+    )
+    .await;
+    let image = ContentBlock::Image {
+        artifact: fixture
+            .handle
+            .put_artifact(b"media".to_vec())
+            .await
+            .unwrap(),
+        mime_type: "image/png".into(),
+    };
+    fixture
+        .handle
+        .command(Command::StartTurn {
+            command_id: CommandId::new(),
+            content: vec![image.clone()],
+        })
+        .await
+        .unwrap();
+    let original = fixture.wait(idle).await;
+    let target = ModelRef {
+        provider_instance: "mock".into(),
+        model: "text-only".into(),
+    };
+    fixture
+        .handle
+        .command(Command::SwitchModel {
+            model: target,
+            policy: Portability::ConvertSupported,
+        })
+        .await
+        .unwrap();
+    fixture
+        .handle
+        .command(Command::SwitchModel {
+            model: test_model(),
+            policy: Portability::ConvertSupported,
+        })
+        .await
+        .unwrap();
+    fixture.handle.command(Fixture::command(2)).await.unwrap();
+    let back = fixture.wait(idle).await;
+    assert!(
+        matches!(&provider.streams()[1].request.input.items[0], ContextItem::User { content, .. } if content == &vec![image])
+    );
+    for (id, stored) in original.snapshot.entries() {
+        assert_eq!(back.snapshot.entry(id).unwrap().entry, stored.entry);
+    }
+    fixture.handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -116,15 +304,19 @@ async fn switch_required_tools_rejected_and_clean_switch_policies() {
                 tools: false,
                 ..Default::default()
             },
-            ..Default::default()
+            limits: ModelLimits {
+                context_tokens: Some(1_000_000),
+                max_output_tokens: None,
+            },
         },
     );
-    let (fixture, _) = Fixture::scripted(
+    let (fixture, provider) = Fixture::scripted(
         settings,
         WorkerOptions::default(),
         [
             Script::new(tool_script().into_iter().map(Step::Event)),
             reply("done"),
+            reply("converted"),
         ],
     )
     .await;
@@ -177,16 +369,64 @@ async fn switch_required_tools_rejected_and_clean_switch_policies() {
             before.snapshot.sequence()
         );
     }
+    let Accepted::ModelSwitched { preview, .. } = fixture
+        .handle
+        .command(Command::SwitchModel {
+            model: other,
+            policy: Portability::ConvertSupported,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("switch")
+    };
+    assert_eq!(preview.would_convert.len(), 2);
+    let report = fixture.handle.inspect_context(None, None).await.unwrap();
     assert_eq!(
-        fixture
-            .handle
-            .command(Command::SwitchModel {
-                model: other,
-                policy: Portability::ConvertSupported
-            })
-            .await,
-        Err(Rejection::Invalid("unsupported_policy"))
+        report
+            .included
+            .iter()
+            .flat_map(|item| &item.conversions)
+            .count(),
+        2
     );
+    fixture.handle.command(Fixture::command(2)).await.unwrap();
+    fixture.wait(idle).await;
+    let input = provider.streams()[2].request.input.clone();
+    assert!(input.tools.is_empty());
+    assert!(input.items.iter().all(|item| {
+        match item {
+            ContextItem::ToolResult { .. } => false,
+            ContextItem::Assistant { content, .. } => !content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall { .. })),
+            _ => true,
+        }
+    }));
+    let text = input
+        .items
+        .iter()
+        .flat_map(|item| match item {
+            ContextItem::Assistant { content, .. } | ContextItem::User { content, .. } => content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    let call = text
+        .iter()
+        .position(|text| text.starts_with("[tool call "))
+        .unwrap();
+    let result = text
+        .iter()
+        .position(|text| text.starts_with("[tool result "))
+        .unwrap();
+    assert_eq!(result, call + 1);
+    assert!(text[result].contains("denied"));
     fixture.handle.shutdown().await;
 }
 
@@ -194,7 +434,7 @@ fn native_reply(payload: &'static [u8]) -> Script {
     Script::new([
         Step::Event(ProviderEvent::Started),
         Step::text(0, "answer"),
-        Step::provider_state(1, "mock.state.v1", payload.to_vec()),
+        Step::provider_state(1, "anthropic.messages.thinking.v1", serde_json::to_vec(&serde_json::json!({"thinking": String::from_utf8_lossy(payload), "signature": "SIGNED_THINKING_SENTINEL"})).unwrap()),
         Step::completed_with_continuation(
             FinishReason::Stop,
             NativeContinuation {
@@ -207,6 +447,15 @@ fn native_reply(payload: &'static [u8]) -> Script {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch() {
+    native_switch_omission(Portability::OmitOptional).await;
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn convert_supported_opaque_state_is_omitted_never_textualized() {
+    native_switch_omission(Portability::ConvertSupported).await;
+}
+
+async fn native_switch_omission(policy: Portability) {
     let mut settings = config();
     let other = ModelRef {
         provider_instance: "mock".into(),
@@ -274,7 +523,10 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
             _ => None,
         })
         .unwrap();
-    assert_eq!(second.artifacts.read(&state).await.unwrap(), b"first state");
+    assert_eq!(
+        second.artifacts.read(&state).await.unwrap(),
+        br#"{"signature":"SIGNED_THINKING_SENTINEL","thinking":"first state"}"#
+    );
     assert_eq!(
         second
             .artifacts
@@ -318,7 +570,7 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
         .handle
         .command(Command::SwitchModel {
             model: other.clone(),
-            policy: Portability::OmitOptional,
+            policy,
         })
         .await
         .unwrap();
@@ -344,6 +596,12 @@ async fn native_replay_survives_crash_reopen_and_is_omitted_after_model_switch()
         }
     }));
     assert!(third.artifacts.references().is_empty());
+    let serialized = serde_json::to_string(&third.input.items).unwrap();
+    assert!(!serialized.contains("anthropic.messages.thinking.v1"));
+    assert!(!serialized.contains("SIGNED_THINKING_SENTINEL"));
+    assert!(!serialized.contains("mock.continuation.v1"));
+    assert!(!serialized.contains(state.sha256.as_str()));
+    assert!(!serialized.contains("first state"));
     assert_eq!(
         third.artifacts.read(&state).await,
         Err(ArtifactReadError::NotReferenced)

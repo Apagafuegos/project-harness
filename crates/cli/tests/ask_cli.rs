@@ -67,6 +67,7 @@ fn ask_help_and_usage_errors() {
         "the new-session default is not shown in --help: {help}"
     );
     assert!(help.contains("--switch-policy"));
+    assert!(help.contains("convert-supported"));
     assert!(help.contains("anthropic"));
     assert!(help.contains("deepseek"));
     for args in [
@@ -78,7 +79,7 @@ fn ask_help_and_usage_errors() {
             "--workspace",
             ".",
             "--switch-policy",
-            "convert-supported",
+            "unsupported-policy",
             "hello",
         ],
         vec![
@@ -97,6 +98,27 @@ fn ask_help_and_usage_errors() {
         assert_eq!(out.status.code(), Some(2));
         assert!(out.stdout.is_empty());
     }
+}
+
+#[test]
+fn convert_supported_flag_is_accepted_before_authentication() {
+    let temp = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_harness"))
+        .args([
+            "ask",
+            "--workspace",
+            ".",
+            "--switch-policy",
+            "convert-supported",
+            "hello",
+        ])
+        .env("HOME", temp.path())
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("authentication"));
 }
 
 /// `--provider anthropic` without a key is an authentication failure with no

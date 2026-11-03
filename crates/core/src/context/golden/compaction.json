@@ -8,10 +8,10 @@
       "model": "scripted-text"
     },
     "configuration": "7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea",
-    "builder_version": 5,
-    "projection_version": 4
+    "builder_version": 6,
+    "projection_version": 5
   },
-  "fingerprint": "96cb0cc0e9d5413e17412d5f501b065177baf055748af88c44332c61095cd992",
+  "fingerprint": "d4a8957766d851e0677732ab5de17ff234a875839fc53a9e79682c0123772ffe",
   "instructions": {
     "status": "empty"
   },

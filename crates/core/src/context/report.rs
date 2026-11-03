@@ -125,6 +125,9 @@ pub struct IncludedItem {
     /// no fingerprint.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Parts included as deterministic text under explicit ConvertSupported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversions: Vec<Conversion>,
 }
 
 /// Which part of an entry a decision is about.
@@ -419,12 +422,41 @@ pub enum RequiredCapability {
     Tools,
 }
 
+/// A displayable part included as text, or proposed for conversion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Conversion {
+    /// Original journal entry.
+    pub entry_id: EntryId,
+    /// Original journal part.
+    pub part: Part,
+    /// Target capability that is missing.
+    pub capability: RequiredCapability,
+    /// Deterministic rendering used instead.
+    pub kind: ConversionKind,
+}
+
+/// Closed conversion rules; opaque native state has no conversion kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversionKind {
+    /// Stored media metadata only.
+    MediaReference,
+    /// Bounded compact JSON call.
+    ToolCallText,
+    /// Bounded result text with name and status.
+    ToolResultText,
+}
+
 /// What switching from the head's model to the preview model would change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewReport {
     /// Required dialogue the target cannot accept. Neither policy may omit it.
     pub required_incompatibilities: Vec<RequiredIncompatibility>,
+    /// Displayable parts convertible under explicit ConvertSupported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub would_convert: Vec<Conversion>,
     /// The model in effect at the head.
     pub model_at_head: ModelRef,
     /// The model the projection was built for.
