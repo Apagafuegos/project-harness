@@ -116,8 +116,9 @@ milestone.
   n/Esc returns to editing.
 - Approval captures the keyboard: `a` allows once, `d` denies, `r` allows and
   remembers, and Esc dismisses **by denying**. There is no automatic approval.
-  F1 opens help and Up/Down or PgUp/PgDn scrolls the frame; no other key
-  answers a ticket, and a paste never answers one.
+  `v` switches the preview between the readable summary and the raw JSON
+  arguments; it never answers. F1 opens help and Up/Down or PgUp/PgDn scrolls
+  the frame; no other key answers a ticket, and a paste never answers one.
   Remembered mutation grants follow the existing continuation policy checks;
   a session with changed allowances may be refused on reopen.
 - On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
@@ -157,7 +158,8 @@ milestone.
   Navigation captures paste without sending it; approval and uncertainty dialogs
   retain input precedence. Ctrl-C/Ctrl-D retain their cancellation/quit rules.
 - PageUp/PageDown scroll; Ctrl-Up/Down scroll one line; Ctrl-R toggles expanded
-  reasoning summaries. End with an empty prompt or Ctrl-End follows output.
+  reasoning summaries and Ctrl-E expands every tool result. End with an empty
+  prompt or Ctrl-End follows output.
   Scrolling up keeps the viewport fixed as output arrives and shows a new-lines
   counter and position percentage. Resize relays out immediately.
 - The prompt is a multi-line editor with a real terminal cursor. Up/Down keep
@@ -184,8 +186,8 @@ underlying screen. `?` with text in the editor remains ordinary text.
 | Editing | Enter send; Shift+Enter / Alt+Enter newline; arrows, Home/End; Backspace/Delete; Ctrl-Left/Right words; Ctrl-W previous word; Ctrl-U line start; Up/Down history at first/last line |
 | Turn | Esc cancel; Ctrl-C cancel then durable quit (idle confirmation); empty Ctrl-D quit |
 | Navigation | PgUp/PgDn page; Ctrl-Up/Down line; empty End / Ctrl-End follow; Ctrl-O sessions; Ctrl-T branches; Ctrl-L models |
-| Context | Ctrl-K inspector; Ctrl-R reasoning; tree `p` pin / `x` exclude |
-| Dialogs | F1 help; Up/Down selection/scroll; PgUp/PgDn scroll; Enter confirm; Esc close (approval **denies**, recovery stays open); recovery Left/Right or Tab/Shift-Tab choices |
+| Context | Ctrl-K inspector; Ctrl-R reasoning; Ctrl-E full tool output; tree `p` pin / `x` exclude |
+| Dialogs | F1 help; Up/Down selection/scroll; PgUp/PgDn scroll; Enter confirm; Esc close (approval **denies**, recovery stays open); approval `v` raw arguments; recovery Left/Right or Tab/Shift-Tab choices |
 
 The chrome is intentionally minimal: a dim header, role-coloured gutters and
 bold labels, identical user/assistant indentation, a mode-titled prompt rule
@@ -208,7 +210,43 @@ drawing. Dialogs size to their content within the viewport and show `more ↓`
 when scrollable. Errors wrap to three lines plus an ellipsis: Esc dismisses
 when idle and not in a dialog; active-turn Esc still cancels. Sending also
 clears the old banner. There is no mouse capture; terminal selection still works.
-Markdown/highlighting and tool/approval content refinements are a separate step.
+Assistant text is GitHub-flavoured Markdown and user text is plain.
+Typography does the work: H1 is bold accent and underlined, H2 bold, deeper
+headings bold and dim, emphasis italic, strong bold, strikethrough crossed out,
+inline code a distinct dim yellow with no backticks, link text underlined with a
+dim ` (url)` suffix unless the text is the URL. Lists hang their continuation
+lines under the item text and use `•`/`◦`/`▪` (ASCII `-`/`*`/`+`) by depth,
+keeping ordered start numbers and `[x]`/`[ ]` task marks. Block quotes nest a
+dim `│ ` gutter, rules span the pane, images show `[image: alt]`, raw HTML stays
+literal, and footnote references `[^n]` list their definitions at the end. GFM
+tables use the delimiter row's alignment, a bold header and single-rule
+separators; a table wider than the pane hard-wraps rather than reflowing into a
+different shape. User messages keep their newlines and leading spaces, wrap
+instead of truncating, and treat fenced blocks as code.
+
+Fenced code is a dim language label (`code` when untagged) over a dim `│ `
+gutter, never reflowed: an overlong row hard-wraps with `↪`. Highlighting is
+`syntect` with bundled grammars and the pure-Rust `fancy-regex` backend, mapped
+to the theme's ANSI roles (keyword magenta, string green, number/constant cyan,
+function blue, type/tag yellow, comment dim). It stops past 2,000 lines or
+256 KiB per block, renders unknown languages plain, and is off under
+`NO_COLOR`. Nothing downloads grammars.
+
+Tool calls are one compact header line: a status mark (`✓` ok, `✗` failed,
+`…` running, `?` uncertain, `⊘` denied or cancelled; ASCII `ok`, `x`, `..`,
+`?`, `-`), the tool name and a per-tool summary — the command for `bash`, the
+path and byte range for `read`, the path and byte count for `write`, the path
+plus a small red/green diff for `edit` — with the exit code or failure code
+always visible. Result bodies collapse to three lines plus `… +N lines`; Ctrl-E
+shows everything. Recorded approvals stay as one dim line under the call.
+Reasoning is dim italic behind `│ `, collapsed to a line until Ctrl-R. Model
+errors show their stable code and message, and provider state is one dim line.
+
+The approval dialog asks in human terms: `bash` shows the command, its
+resolved working directory, timeout and `network: denied`; `edit` shows the
+path and the scrollable diff; `write` shows the path, size and first ten lines;
+`read` shows the path and byte range; other tools pretty-print their arguments.
+The plan digest stays visible.
 
 ### Context inspector and compaction
 
@@ -322,7 +360,9 @@ Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
   the clients expose no mid-session strategy command in this milestone.
 - User and root/nested project `AGENTS.md` are read only at creation, under
   the per-file, aggregate and discovery bounds described below.
-- Minimal Markdown without syntax highlighting; raw HTML is inert text.
+- Highlighting is capped per block (2,000 lines or 256 KiB) and unknown
+  languages stay plain; a table wider than the pane hard-wraps. Raw HTML is
+  inert text and user messages are never interpreted as Markdown.
 - One workspace per process: the picker lists other workspaces and refuses to
   open them. There is no session delete/retention/export UI and no credential UI.
 - A model outside the merged catalog that differs from the opened model shows an

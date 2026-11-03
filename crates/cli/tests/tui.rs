@@ -375,14 +375,18 @@ async fn streamed_answer_renders_markdown_and_status() {
     recorded.wait_finished(&turn).await;
     let buffer = render(&mut recorded.app(), 80, 24);
     let screen = text(&buffer);
-    assert!(screen.contains("# Result"), "{screen}");
+    // M7-06: the heading is styled rather than hashed, and a code block is a
+    // dim language label over a `│` gutter instead of a box frame.
+    assert!(screen.contains("▌ Result"), "{screen}");
+    assert!(!screen.contains("# Result"), "{screen}");
     assert!(screen.contains("bold"), "{screen}");
     assert!(screen.contains("inline"), "{screen}");
+    assert!(!screen.contains('`'), "{screen}");
     assert!(screen.contains("• one"), "{screen}");
     assert!(screen.contains("• two"), "{screen}");
     assert!(screen.contains("│ quoted"), "{screen}");
-    assert!(screen.contains("┌─ code rust"), "{screen}");
-    assert!(screen.contains("fn main() {}"), "{screen}");
+    assert!(screen.contains("▌ rust"), "{screen}");
+    assert!(screen.contains("│ fn main() {}"), "{screen}");
     assert!(!screen.contains("turn: completed"), "{screen}");
     assert!(!screen.contains("streaming"), "{screen}");
     assert!(screen.contains("10 in / 20 out"), "{screen}");
@@ -472,7 +476,9 @@ async fn approval_modal_captures_a_d_r_and_esc() {
     recorded.submit(&ticket, Decision::Allow, false).await;
     recorded.wait_finished(&turn).await;
     let screen = text(&render(&mut recorded.app(), 80, 24));
-    assert!(screen.contains("tool result: succeeded"), "{screen}");
+    // M7-06: one compact header carries the status mark and the summary.
+    assert!(screen.contains("✓ write note.txt"), "{screen}");
+    assert!(!screen.contains("tool result:"), "{screen}");
     assert!(screen.contains("approval: allowed"), "{screen}");
     recorded.shutdown().await;
 }
@@ -491,7 +497,7 @@ async fn denied_tool_is_rendered_with_its_outcome() {
     recorded.submit(&ticket, Decision::Deny, false).await;
     recorded.wait_finished(&turn).await;
     let screen = text(&render(&mut recorded.app(), 80, 24));
-    assert!(screen.contains("tool result: denied"), "{screen}");
+    assert!(screen.contains("⊘ write note.txt"), "{screen}");
     assert!(screen.contains("approval: denied"), "{screen}");
     assert!(
         screen.contains("the write was denied"),
@@ -561,7 +567,11 @@ async fn failed_turn_shows_its_code() {
     recorded.wait_finished(&turn).await;
     let screen = text(&render(&mut recorded.app(), 80, 24));
     assert!(screen.contains("turn: failed (rate_limit)"), "{screen}");
-    assert!(!screen.contains("too many requests"), "{screen}");
+    // M7-06 item 5: the stable code and the provider's message are both shown.
+    assert!(
+        screen.contains("error rate_limit: too many requests"),
+        "{screen}"
+    );
     recorded.shutdown().await;
 }
 
@@ -1512,4 +1522,672 @@ async fn follow_mode_preserves_absolute_rows_and_counts_new_output_until_end() {
         .unwrap();
     recorded.wait_finished(&turn).await;
     recorded.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// M7-06: content rendering. Markdown, code, tool blocks and approval content.
+// ---------------------------------------------------------------------------
+
+/// The transcript only: no header, no prompt rule, no status bar.
+fn body(screen: &str) -> String {
+    let mut out = Vec::new();
+    for line in screen.lines() {
+        if line.starts_with(" message ") || line.starts_with(" approval ") {
+            break;
+        }
+        if line.starts_with(" harness · ") {
+            continue;
+        }
+        out.push(line.trim_end().to_owned());
+    }
+    while out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
+const KITCHEN_SINK: &str = "\
+# Title
+
+Intro with **strong**, *emphasis*, ~~struck~~ and `inline code`.
+A [link](https://example.com/docs) and an autolink <https://example.com>.
+
+## Second
+
+1. first
+2. second
+   - nested bullet
+     - deeper bullet
+- [x] done task
+- [ ] open task
+
+> quoted line
+> > nested quote
+
+---
+
+| left | center | right |
+| :--- | :----: | ----: |
+| a | b | 1 |
+| longer | cell | 22 |
+
+![alt text](https://example.com/image.png)
+
+<div>raw html</div>
+
+A footnote reference.[^note]
+
+```rust
+fn main() {
+    let x = 1;
+}
+```
+
+```python
+def greet(name):
+    return f\"hi {name}\"
+```
+
+```
+untagged
+```
+
+[^note]: The footnote body.
+";
+
+#[tokio::test]
+async fn kitchen_sink_markdown_renders_the_same_projection_at_80_and_120_columns() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply(KITCHEN_SINK)]).await;
+    let turn = recorded.start("render").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let narrow = body(&text(&render(&mut app, 80, 200)));
+    let wide = body(&text(&render(&mut app, 120, 200)));
+    // Every element of item 1, in order, at 80 columns.
+    assert_eq!(narrow, KITCHEN_SINK_GOLDEN_80);
+    // The same projection only wraps differently at 120 columns.
+    assert_eq!(wide, KITCHEN_SINK_GOLDEN_120);
+    // Typography carries the structure a text golden cannot show.
+    let buffer = render(&mut app, 120, 200);
+    use ratatui::style::{Color, Modifier};
+    let heading = cells_at(&buffer, "Title");
+    assert!(
+        heading.iter().all(|(_, modifier, color)| {
+            modifier.contains(Modifier::BOLD)
+                && modifier.contains(Modifier::UNDERLINED)
+                && *color == Color::Magenta
+        }),
+        "H1 is bold, accent and underlined: {heading:?}"
+    );
+    let strong = cells_at(&buffer, "strong");
+    assert!(
+        strong
+            .iter()
+            .all(|(_, modifier, _)| modifier.contains(Modifier::BOLD)
+                && !modifier.contains(Modifier::ITALIC)),
+        "{strong:?}"
+    );
+    let emphasis = cells_at(&buffer, "emphasis");
+    assert!(
+        emphasis
+            .iter()
+            .all(|(_, modifier, _)| modifier.contains(Modifier::ITALIC)),
+        "{emphasis:?}"
+    );
+    let struck = cells_at(&buffer, "struck");
+    assert!(
+        struck
+            .iter()
+            .all(|(_, modifier, _)| modifier.contains(Modifier::CROSSED_OUT)),
+        "{struck:?}"
+    );
+    let link = cells_at(&buffer, "link");
+    assert!(
+        link.iter()
+            .all(|(_, modifier, _)| modifier.contains(Modifier::UNDERLINED)),
+        "{link:?}"
+    );
+    let inline = cells_at(&buffer, "inline code");
+    assert!(
+        inline
+            .iter()
+            .all(|(_, modifier, color)| *color == Color::Yellow
+                && modifier.contains(Modifier::DIM)),
+        "{inline:?}"
+    );
+    // The Rust block is highlighted with ANSI roles only.
+    let keyword = cells_at(&buffer, "let x");
+    assert_eq!(keyword[0].2, Color::Magenta, "`let` is a keyword");
+    let number = cells_at(&buffer, "1;");
+    assert!(
+        number.iter().any(|(_, _, color)| *color == Color::Cyan),
+        "the number is highlighted: {number:?}"
+    );
+    recorded.shutdown().await;
+}
+
+/// The cells of the first row containing `needle`, from its first glyph.
+fn cells_at(
+    buffer: &Buffer,
+    needle: &str,
+) -> Vec<(String, ratatui::style::Modifier, ratatui::style::Color)> {
+    for y in 0..buffer.area.height {
+        let line: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        if let Some(byte) = line.find(needle) {
+            let column = line[..byte].chars().count();
+            return (column..column + needle.chars().count())
+                .map(|x| {
+                    let cell = &buffer[(x as u16, y)];
+                    (cell.symbol().to_owned(), cell.modifier, cell.fg)
+                })
+                .collect();
+        }
+    }
+    panic!("no row contains {needle:?}");
+}
+
+const KITCHEN_SINK_GOLDEN_80: &str = r#"▌ you
+▌ render
+
+▌ assistant                                                             scripted
+▌ Title
+
+▌ Intro with strong, emphasis, struck and inline code. A link
+▌ (https://example.com/docs) and an autolink https://example.com.
+
+▌ Second
+
+▌ 1. first
+▌ 2. second
+▌   ◦ nested bullet
+▌     ▪ deeper bullet
+
+▌ • [x] done task
+▌ • [ ] open task
+
+▌ │ quoted line
+
+▌ │ │ nested quote
+
+────────────────────────────────────────────────────────────────────────────────
+
+▌ left   │ center │ right
+▌ ───────┼────────┼──────
+▌ a      │   b    │     1
+▌ longer │  cell  │    22
+
+▌ [image: alt text]
+
+▌ <div>raw html</div> A footnote reference.[^1]
+
+▌ rust
+▌ │ fn main() {
+▌ │     let x = 1;
+▌ │ }
+
+▌ python
+▌ │ def greet(name):
+▌ │     return f"hi {name}"
+
+▌ code
+▌ │ untagged
+
+▌ [^1] The footnote body."#;
+const KITCHEN_SINK_GOLDEN_120: &str = r#"▌ you
+▌ render
+
+▌ assistant                                                                                                     scripted
+▌ Title
+
+▌ Intro with strong, emphasis, struck and inline code. A link (https://example.com/docs) and an autolink
+▌ https://example.com.
+
+▌ Second
+
+▌ 1. first
+▌ 2. second
+▌   ◦ nested bullet
+▌     ▪ deeper bullet
+
+▌ • [x] done task
+▌ • [ ] open task
+
+▌ │ quoted line
+
+▌ │ │ nested quote
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+▌ left   │ center │ right
+▌ ───────┼────────┼──────
+▌ a      │   b    │     1
+▌ longer │  cell  │    22
+
+▌ [image: alt text]
+
+▌ <div>raw html</div> A footnote reference.[^1]
+
+▌ rust
+▌ │ fn main() {
+▌ │     let x = 1;
+▌ │ }
+
+▌ python
+▌ │ def greet(name):
+▌ │     return f"hi {name}"
+
+▌ code
+▌ │ untagged
+
+▌ [^1] The footnote body."#;
+
+#[tokio::test]
+async fn no_color_has_no_colour_and_ascii_mode_has_no_wide_glyphs() {
+    use harness::tui::theme::Theme;
+    use ratatui::style::Color;
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply(KITCHEN_SINK)]).await;
+    let turn = recorded.start("render").await;
+    recorded.wait_finished(&turn).await;
+    let mut plain = App::with_theme(recorded.info.clone(), Theme::new(true, false));
+    for item in &recorded.items {
+        plain.on_subscription(item.clone());
+    }
+    let buffer = render(&mut plain, 120, 200);
+    for cell in &buffer.content {
+        assert_eq!(cell.fg, Color::Reset, "{cell:?}");
+        assert_eq!(cell.bg, Color::Reset, "{cell:?}");
+    }
+    // Colour on, ASCII mode: every glyph is ASCII and every colour is one of
+    // the 16 ANSI variants the theme declares.
+    let mut ascii = App::with_theme(recorded.info.clone(), Theme::new(false, true));
+    for item in &recorded.items {
+        ascii.on_subscription(item.clone());
+    }
+    let buffer = render(&mut ascii, 120, 200);
+    for cell in &buffer.content {
+        assert!(cell.symbol().is_ascii(), "non-ASCII glyph: {cell:?}");
+        assert!(
+            matches!(
+                cell.fg,
+                Color::Reset
+                    | Color::Black
+                    | Color::Red
+                    | Color::Green
+                    | Color::Yellow
+                    | Color::Blue
+                    | Color::Magenta
+                    | Color::Cyan
+                    | Color::Gray
+                    | Color::DarkGray
+                    | Color::LightRed
+                    | Color::LightGreen
+                    | Color::LightYellow
+                    | Color::LightBlue
+                    | Color::LightMagenta
+                    | Color::LightCyan
+                    | Color::White
+            ),
+            "non-ANSI colour: {cell:?}"
+        );
+    }
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn user_text_keeps_indentation_and_wraps_long_lines_without_truncating() {
+    let fixture = Fixture::new(false);
+    let long = "x".repeat(1_000);
+    let mut recorded = fixture.create([reply("ok")]).await;
+    let text_in = format!("    indented first\n        deeply indented\n{long}");
+    let turn = recorded.start(&text_in).await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let screen = body(&text(&render(&mut app, 80, 200)));
+    assert!(screen.contains("    indented first"), "{screen}");
+    assert!(screen.contains("        deeply indented"), "{screen}");
+    let xes = screen.chars().filter(|c| *c == 'x').count();
+    assert_eq!(xes, 1_000, "the long line must not be truncated: {screen}");
+    assert!(
+        screen.lines().all(|line| line.chars().count() <= 80),
+        "every physical row fits the pane: {screen}"
+    );
+    // A fenced block inside a user message is a code block, not Markdown.
+    let fenced = "before\n```sh\ncargo test\n```\nafter";
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("ok")]).await;
+    let turn = recorded.start(fenced).await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let screen = body(&text(&render(&mut app, 80, 200)));
+    assert!(screen.contains("before"), "{screen}");
+    assert!(screen.contains("▌ │ cargo test"), "{screen}");
+    assert!(screen.contains("after"), "{screen}");
+    assert!(!screen.contains("```"), "{screen}");
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn tool_headers_diffs_and_output_collapse_follow_the_toggles() {
+    let fixture = Fixture::new(false);
+    fs::write(
+        fixture.workspace.join("notes.txt"),
+        "line one\nline two\nline three\nline four\nline five\nline six\n",
+    )
+    .unwrap();
+    let mut recorded = fixture
+        .create([
+            proposal("read", json!({"path": "notes.txt"})),
+            reply("read it"),
+            proposal(
+                "edit",
+                json!({"path": "notes.txt", "old_text": "line two", "new_text": "line 2"}),
+            ),
+        ])
+        .await;
+    let turn = recorded.start("read the notes").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let screen = body(&text(&render(&mut app, 80, 200)));
+    assert!(
+        screen.contains("✓ read notes.txt (bytes 0-1048576)"),
+        "{screen}"
+    );
+    // Collapsed: the tool's own preamble plus the first two file lines.
+    assert!(screen.contains("│ line one"), "{screen}");
+    assert!(screen.contains("│ line two"), "{screen}");
+    assert!(!screen.contains("│ line three"), "{screen}");
+    assert!(
+        screen.contains("… +4 lines (Ctrl-E for full output)"),
+        "{screen}"
+    );
+    // One global switch expands every tool output.
+    app.on_key(modified(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert!(app.full_output());
+    let expanded = body(&text(&render(&mut app, 80, 200)));
+    assert!(expanded.contains("│ line six"), "{expanded}");
+    assert!(!expanded.contains("+4 lines"), "{expanded}");
+    app.on_key(modified(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    assert!(!app.full_output());
+    // The edit call needs an approval; its diff is in the modal already.
+    let at = recorded.items.len();
+    let turn = recorded.start("rename that line").await;
+    let ticket = recorded.wait_approval().await;
+    for item in &recorded.items[at..] {
+        app.on_subscription(item.clone());
+    }
+    let seen = recorded.items.len();
+    let modal = text(&render(&mut app, 80, 40));
+    assert!(modal.contains("approve tool call"), "{modal}");
+    assert!(modal.contains("path notes.txt"), "{modal}");
+    assert!(modal.contains("- line two"), "{modal}");
+    assert!(modal.contains("+ line 2"), "{modal}");
+    recorded.submit(&ticket, Decision::Deny, false).await;
+    recorded.wait_finished(&turn).await;
+    for item in &recorded.items[seen..] {
+        app.on_subscription(item.clone());
+    }
+    let screen = body(&text(&render(&mut app, 80, 200)));
+    assert!(screen.contains("⊘ edit notes.txt"), "{screen}");
+    assert!(screen.contains("approval: denied"), "{screen}");
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn approval_modal_previews_write_and_toggles_raw_arguments() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([proposal(
+            "write",
+            json!({"path": "out.txt", "text": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven"}),
+        )])
+        .await;
+    let turn = recorded.start("write it").await;
+    let ticket = recorded.wait_approval().await;
+    let mut app = recorded.app();
+    let preview = text(&render(&mut app, 100, 60));
+    assert!(preview.contains("approve tool call"), "{preview}");
+    assert!(preview.contains("path out.txt"), "{preview}");
+    assert!(preview.contains("size "), "{preview}");
+    assert!(preview.contains("│ one"), "{preview}");
+    assert!(preview.contains("│ ten"), "{preview}");
+    assert!(!preview.contains("│ eleven"), "{preview}");
+    assert!(preview.contains("+1 lines"), "{preview}");
+    assert!(preview.contains("v raw"), "{preview}");
+    assert!(preview.contains("plan "), "{preview}");
+    // `v` switches to raw JSON and back without answering the ticket.
+    assert!(app.on_key(key(KeyCode::Char('v'))).is_empty());
+    let raw = text(&render(&mut app, 100, 60));
+    assert!(raw.contains("\"text\": \"one\\ntwo"), "{raw}");
+    assert!(!raw.contains("size "), "{raw}");
+    assert!(app.on_key(key(KeyCode::Char('v'))).is_empty());
+    assert!(
+        text(&render(&mut app, 100, 60)).contains("size "),
+        "readable again"
+    );
+    // The human-readable body never repeats the key hints.
+    let hints = text(&render(&mut app, 100, 60))
+        .lines()
+        .filter(|line| line.contains("a allow"))
+        .count();
+    assert_eq!(hints, 2, "frame and footer only: {hints}");
+    recorded.submit(&ticket, Decision::Deny, false).await;
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn streaming_unclosed_fence_renders_as_code_without_flicker() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(
+                0,
+                "Here is the code:\n\n```rust\nfn main() {\n    println!(\"hi\");\n",
+            ),
+            Step::AwaitCancel,
+            Step::cancelled(),
+        ])])
+        .await;
+    let turn = recorded.start("show code").await;
+    recorded
+        .pump(|view| {
+            view.partial.as_ref().is_some_and(|partial| {
+                partial.blocks.values().any(
+                    |block| matches!(block, PartialBlock::Text(text) if text.contains("fn main")),
+                )
+            })
+        })
+        .await;
+    let mut app = recorded.app();
+    let first = body(&text(&render(&mut app, 80, 200)));
+    assert!(first.contains("▌ rust"), "{first}");
+    assert!(first.contains("│ fn main() {"), "{first}");
+    assert!(!first.contains("```"), "{first}");
+    // Re-rendering the same partial is stable: no flicker between frames.
+    let second = body(&text(&render(&mut app, 80, 200)));
+    assert_eq!(first, second);
+    recorded
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn.clone(),
+        })
+        .await
+        .unwrap();
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn completed_entries_render_once_and_only_the_partial_is_reparsed() {
+    let fixture = Fixture::new(false);
+    let (release, wait) = tokio::sync::oneshot::channel();
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "first "),
+            Step::Wait(wait),
+            Step::text(0, "second"),
+            Step::completed(FinishReason::Stop),
+        ])])
+        .await;
+    let turn = recorded.start("stream").await;
+    recorded
+        .pump(|view| {
+            view.partial.as_ref().is_some_and(|partial| {
+                partial.blocks.values().any(
+                    |block| matches!(block, PartialBlock::Text(text) if text.contains("first")),
+                )
+            })
+        })
+        .await;
+    let seen = recorded.items.len();
+    let mut app = recorded.app();
+    render(&mut app, 80, 40);
+    let after_one = app.transcript_parses();
+    assert_eq!(after_one, 1, "one completed user entry is rendered once");
+    for _ in 0..5 {
+        // Identical frames must not re-render the completed entry.
+        render(&mut app, 80, 40);
+        assert_eq!(app.transcript_parses(), after_one);
+    }
+    release.send(()).unwrap();
+    recorded.wait_finished(&turn).await;
+    for item in &recorded.items[seen..] {
+        app.on_subscription(item.clone());
+    }
+    let screen = body(&text(&render(&mut app, 80, 60)));
+    assert!(screen.contains("first second"), "{screen}");
+    // The user entry is cached and only the newly committed assistant entry is
+    // rendered, so the count is exactly three (user, assistant, outcome-free).
+    assert_eq!(app.transcript_parses(), 2, "{screen}");
+    // A toggle invalidates the cache once, then caches again.
+    app.on_key(modified(KeyCode::Char('e'), KeyModifiers::CONTROL));
+    render(&mut app, 80, 60);
+    let after_toggle = app.transcript_parses();
+    assert_eq!(after_toggle, 4);
+    render(&mut app, 80, 60);
+    assert_eq!(app.transcript_parses(), after_toggle);
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_huge_code_block_renders_plain_with_one_cap_note() {
+    let fixture = Fixture::new(false);
+    let mut script = String::from("```rust\n");
+    for n in 0..2_100 {
+        script.push_str(&format!("let value_{n} = {n};\n"));
+    }
+    script.push_str("```\n");
+    let mut recorded = fixture.create([reply(&script)]).await;
+    let turn = recorded.start("big block").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    // The cap note is the last transcript row, so a tall pane shows it.
+    let screen = text(&render(&mut app, 120, 2_200));
+    assert!(
+        screen.contains("highlighting skipped: 2100 lines"),
+        "cap note missing"
+    );
+    assert_eq!(screen.matches("highlighting skipped").count(), 1);
+    recorded.shutdown().await;
+}
+
+/// Handoff evidence only: writes `TestBackend` dumps to an explicit path.
+#[tokio::test]
+#[ignore = "writes M7-06 render evidence only when explicitly requested"]
+async fn m7_06_render_evidence() {
+    fn capture(output: &mut String, label: &str, app: &mut App) {
+        for (width, height) in [(80, 24), (120, 36)] {
+            output.push_str(&format!("\n### {label} {width}×{height}\n```text\n"));
+            output.push_str(&text(&render(app, width, height)));
+            output.push_str("```\n");
+        }
+    }
+
+    let fixture = Fixture::new(false);
+    let mut output = String::new();
+    let mut recorded = fixture.create([reply(KITCHEN_SINK)]).await;
+    let turn = recorded.start("render the kitchen sink").await;
+    recorded.wait_finished(&turn).await;
+    capture(&mut output, "kitchen sink GFM", &mut recorded.app());
+    recorded.shutdown().await;
+
+    let fixture = Fixture::new(false);
+    fs::write(
+        fixture.workspace.join("notes.txt"),
+        "alpha\nbeta\ngamma\ndelta\nepsilon\n",
+    )
+    .unwrap();
+    let mut recorded = fixture
+        .create([
+            proposal("read", json!({"path": "notes.txt"})),
+            proposal("bash", json!({"command": "cargo test", "cwd": "."})),
+            proposal("read", json!({"path": "missing.txt"})),
+            proposal(
+                "edit",
+                json!({"path": "notes.txt", "old_text": "beta", "new_text": "BETA"}),
+            ),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("show the tool blocks").await;
+    let ticket = recorded.wait_approval().await;
+    capture(
+        &mut output,
+        "approval modal for an edit",
+        &mut recorded.app(),
+    );
+    recorded.submit(&ticket, Decision::Deny, false).await;
+    recorded.wait_finished(&turn).await;
+    capture(
+        &mut output,
+        "tool conversation (ok, denied, failed, diff, collapsed output)",
+        &mut recorded.app(),
+    );
+    recorded.shutdown().await;
+
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(
+                0,
+                "Here is the patch:\n\n```rust\nfn main() {\n    println!(\"streaming\");\n",
+            ),
+            Step::AwaitCancel,
+            Step::cancelled(),
+        ])])
+        .await;
+    let turn = recorded.start("stream it").await;
+    recorded
+        .pump(|view| {
+            view.partial.as_ref().is_some_and(|partial| {
+                partial.blocks.values().any(
+                    |block| matches!(block, PartialBlock::Text(text) if text.contains("println")),
+                )
+            })
+        })
+        .await;
+    capture(
+        &mut output,
+        "streaming with an unclosed fence",
+        &mut recorded.app(),
+    );
+    recorded
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn.clone(),
+        })
+        .await
+        .unwrap();
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+
+    let path = std::env::var("HARNESS_M7_06_EVIDENCE").expect("explicit evidence output path");
+    fs::write(path, output).unwrap();
 }

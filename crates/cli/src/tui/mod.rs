@@ -10,14 +10,17 @@
 //!
 //! See `docs/decisions/0023-tui-architecture.md`.
 
+mod highlight;
 mod inspector;
 mod inspector_shell;
 mod keys;
+mod markdown;
 mod navigation;
 mod render;
 pub mod runtime;
 pub mod runtime_nav;
 pub mod theme;
+mod tools;
 mod transcript;
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -100,6 +103,8 @@ enum Modal {
     Approval {
         /// Ticket the answer is bound to.
         approval_id: ApprovalId,
+        /// Show the raw JSON arguments instead of the readable preview.
+        raw: bool,
     },
     /// The runtime awaits a statement about an uncertain invocation.
     Uncertain {
@@ -188,6 +193,10 @@ pub struct App {
     interrupt_armed: bool,
     /// Show full reasoning summaries instead of one line.
     reasoning: bool,
+    /// Show full tool output instead of the first three lines.
+    output: bool,
+    /// Render completed entries once and reuse the rows.
+    renderer: transcript::Renderer,
     /// Latest built-context estimate, absent after a reset.
     context: Option<(Totals, Flags)>,
 }
@@ -232,6 +241,8 @@ impl App {
             last_error: None,
             interrupt_armed: false,
             reasoning: false,
+            output: false,
+            renderer: transcript::Renderer::default(),
             context: None,
         }
     }
@@ -413,7 +424,8 @@ impl App {
         self.render_navigation(frame);
         self.render_inspector(frame);
         if self.help {
-            let rows = keys::help(self.theme);
+            let mut rows = keys::help(self.theme);
+            self.theme.apply(&mut rows);
             let viewport = render::draw_modal(
                 frame,
                 self.theme,
@@ -429,15 +441,29 @@ impl App {
 
     fn rebuild(&mut self) {
         self.transcript = match &self.view {
-            Some(client) => transcript::project(
+            Some(client) => self.renderer.project(
                 client.view(),
-                self.reasoning,
+                transcript::Toggles {
+                    reasoning: self.reasoning,
+                    output: self.output,
+                },
                 &self.notices,
                 &self.durations,
             ),
             None => Vec::new(),
         };
         self.theme.apply(&mut self.transcript);
+    }
+
+    /// How many transcript entries were rendered from scratch. A view of the
+    /// render cache for tests; it is not part of any client protocol.
+    pub fn transcript_parses(&self) -> u64 {
+        self.renderer.parses()
+    }
+
+    /// True when full tool output is expanded (Ctrl-E).
+    pub fn full_output(&self) -> bool {
+        self.output
     }
 
     /// Keep the modal in step with the view. Approval takes precedence over
@@ -449,10 +475,11 @@ impl App {
         };
         if let Some(ticket) = &view.pending_approval {
             match &self.modal {
-                Modal::Approval { approval_id } if *approval_id == ticket.approval_id => {}
+                Modal::Approval { approval_id, .. } if *approval_id == ticket.approval_id => {}
                 _ => {
                     self.modal = Modal::Approval {
                         approval_id: ticket.approval_id.clone(),
+                        raw: false,
                     }
                 }
             }
@@ -541,6 +568,11 @@ impl App {
             }
             KeyCode::Char('r') if control => {
                 self.reasoning = !self.reasoning;
+                self.rebuild();
+                Vec::new()
+            }
+            KeyCode::Char('e') if control => {
+                self.output = !self.output;
                 self.rebuild();
                 Vec::new()
             }
@@ -684,6 +716,14 @@ impl App {
     fn approval_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if key.code == KeyCode::Char('v') && !control && !alt {
+            // The raw-arguments switch never answers the ticket.
+            if let Modal::Approval { raw, .. } = &mut self.modal {
+                *raw = !*raw;
+                self.modal_scroll = 0;
+            }
+            return Vec::new();
+        }
         let Some(ticket) = self
             .view
             .as_ref()
@@ -1030,14 +1070,4 @@ fn fault_text(cause: &harness_core::runtime::FaultCause) -> String {
         FaultCause::Internal(code) => code,
     };
     format!("fault: {}", line(code))
-}
-
-/// A bounded, single-line view of a tool call, shared by the transcript and
-/// the approval dialog.
-pub(crate) fn call_summary(
-    name: &str,
-    arguments: &serde_json::Map<String, serde_json::Value>,
-) -> String {
-    let arguments = serde_json::Value::Object(arguments.clone()).to_string();
-    format!("{} {}", bounded(name, 80), bounded(&arguments, 320))
 }

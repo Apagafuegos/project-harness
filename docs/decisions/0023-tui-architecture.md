@@ -1,8 +1,8 @@
 # 0023: TUI architecture — the pure model and the `Action` boundary
 
 Status: Parts 1 and 2 implemented for Milestone 5 steps 02 and 03; Parts 3 to 5
-implemented for Milestone 5 steps 04 and 05 and Milestone 6 step 03; Part 6
-implemented for Milestone 7 step 05.
+implemented for Milestone 5 steps 04 and 05 and Milestone 6 step 03; Parts 6 and
+7 implemented for Milestone 7 steps 05 and 06.
 
 Date: 2026-10-31
 
@@ -687,3 +687,159 @@ Each mutation was applied alone, failed the named test (exit 101), and reverted:
 | `Color::Gray` in status drawing | `no_color_covers_transcript_prompt_errors_status_and_all_dialog_frames` | Gray cell instead of Reset |
 | Remove Ctrl-W binding | `help_table_covers_every_handled_key` | undocumented key: Ctrl-W |
 | Consult system time in model | `activity_spinner_elapsed_and_stream_size_use_only_injected_clock` | real epoch seconds instead of fake 12s |
+
+## Part 7: content rendering (m7-06)
+
+This part supersedes Part 6's statement that Markdown parsing, highlighting,
+tool content and approval-preview content were a later step. It keeps the pure
+model, the width-independent projection and the M5 boundary: the client formats
+what the view already carries and still builds no request, authorization or
+storage call. No core or runtime type changed; every fact the new content needs
+was already in `RuntimeView` (call name and arguments from the assistant
+response, and the call's result status, code, exit code and metadata).
+
+### Rows, marks and the ASCII fallback
+
+Two width-independent projection markers let the renderer do width-dependent
+work without the projection knowing the pane: a code row carries `CODE_ROW` and
+hard-wraps with `↪`, and a rule row carries `RULE_ROW` and becomes exactly the
+pane width. This replaces Part 6's text sniffing of `┌─ code` / `└─` frames, so
+a quoted or nested row can no longer be mistaken for code.
+
+Every decorative glyph is canonical Unicode in the projection, and `Theme::apply`
+translates it in ASCII mode: `▌`/`│`→`|`, `•`/`◦`/`▪`→`-`/`*`/`+`, `─`→`-`,
+`…`→`...`, `↪`→`>`, `✓`→`ok`, `✗`→`x`, `⊘`→`-`, `↑`/`↓`→`^`/`v`, `·`→`-`.
+Chrome the projection does not own (header, hints, status, prompt rule, dialog
+titles and footers, welcome text, help) goes through `Theme::ascii_ready`, and
+the prompt rule uses an ASCII border set, so `TERM=dumb` cell contents are pure
+ASCII. The theme gained five code roles (keyword/string/number/function/type)
+plus `Plain`; all colours are the named 16 ANSI variants.
+
+### Markdown
+
+`markdown.rs` walks `pulldown-cmark` with `ENABLE_TABLES`,
+`ENABLE_STRIKETHROUGH`, `ENABLE_TASKLISTS`, `ENABLE_FOOTNOTES` and `ENABLE_GFM`.
+Headings are H1 bold+accent+underlined, H2 bold, H3+ bold+dim, each preceded by
+one blank row except at the message start; paragraphs are separated by exactly
+one blank row and trailing blanks are trimmed. Emphasis is italic, strong bold,
+strikethrough crossed out, inline code a distinct dim style with no backticks,
+and links are underlined with a dim ` (url)` suffix unless text equals URL.
+Autolinks therefore stay underlined and URLs are never lost. Lists nest to any
+depth with hanging indents, bullets `•`/`◦`/`▪` cycling by depth, ordered lists
+keeping their start number, and `[x]`/`[ ]` task marks. Block quotes nest a dim
+`│ ` gutter per level; rules are the full pane width; images render
+`[image: alt]`; raw HTML stays literal; footnote references become `[^n]` and
+their definitions are collected and appended once at the end.
+
+**Tables.** The projection computes natural column widths from the header and
+rows and honours the delimiter row's alignment, with a bold header and single
+`─`/`┼` rule separators. A table that fits the pane keeps that shape. A table
+wider than the pane **hard-wraps** through the ordinary row wrapper; the brief
+offered hard-wrapping or a `header: value` fallback and this part chooses
+hard-wrapping because it keeps one projection for every width and never drops a
+cell. The alternative was rejected: a fallback would have to know the pane width
+inside the projection, which the width-independent contract forbids.
+
+### Code and highlighting
+
+A fenced block is a dim language label (`code` when untagged) plus a dim `│ `
+gutter over rows that never reflow. Highlighting uses `syntect` 5.3 with
+`default-features = false` and features `default-syntaxes`, `parsing`,
+`dump-load` and `regex-fancy`: bundled grammars, the pure-Rust `fancy-regex`
+engine, no C regex, and no download. The syntect theme is built at runtime from
+scope selectors whose foregrounds are **probe** colours; the highlighter maps a
+syntect style back to a semantic `Role` and applies `Theme::style`, so the only
+colours handed to Ratatui are the theme's ANSI variants. `NO_COLOR` and untagged
+or unknown languages render plain. A block over 2,000 lines or 256 KiB renders
+plain with one dim note. `syntect` is the only new dependency; `cargo tree`
+shows it in `crates/cli` only, and `Cargo.lock` grows by the crate plus
+`fancy-regex`, `bit-set`, `bit-vec`, `bincode`, `flate2`/`miniz_oxide`,
+`regex-syntax`, `same-file`, `walkdir` and their small supports.
+
+The release binary measured 18,745,256 bytes before this part and 19,705,032
+bytes after (`cargo build --release -p harness`, Rust 1.99.1, the repository
+profile), a 959,776-byte (+5.1%) increase that is almost entirely the bundled,
+compressed syntax dump.
+
+### Tool blocks
+
+Each call is one compact header: status mark, name, summary, then the exit code
+or failure code. Marks are `✓` succeeded, `✗` failed/invalid/timed out/
+infrastructure, `…` running (no result yet), `?` uncertain, and `⊘` denied or
+cancelled. Summaries are the command in code style for `bash`, the path and byte
+range for `read`, the path and byte count for `write`, and the path plus a
+red/green `-`/`+` diff for `edit` bounded to 12 rows with `… +N lines`; unknown
+tools show their compact arguments. A failed header always keeps its code, and
+the exit code wins for `bash`. Result bodies collapse to the first three lines
+plus a dim `… +N lines` row and expand with Ctrl-E, one global switch that
+rebuilds the projection exactly like Ctrl-R. Recorded approvals are one dim
+`approval: allowed/denied/requested` row under the call.
+
+Reasoning is dim italic behind `│ `, collapsed to one line until Ctrl-R. Model
+errors are one error-styled row with the stable code and the bounded provider
+message (the message is now shown, where Part 1 showed the code only).
+Provider state stays one dim row naming schema, byte count and owner, rather
+than disappearing behind the verbosity switch: the brief allowed either, and a
+single dim row can never look like a missing result.
+
+Part 6a is folded in: the approval body no longer repeats the key hints (the
+dialog frame and the footer keep them), non-normal turn outcomes are drawn
+inside the turn's `▌ ` gutter in warning (cancelled) or error style, and tool
+rows sit at the body indent instead of the old double indent.
+
+### Approval dialog
+
+The dialog keeps decision 9's keys and `ApprovalId`/`plan_digest` binding. Its
+body is human-readable: `bash` shows the command in code style, the resolved
+working directory, the timeout and `network: denied`; `edit` shows the path and
+the full diff, scrollable through the existing modal scroll; `write` shows the
+path, byte count, new-file/overwrite state and the first ten lines; `read` shows
+the path and byte range; any other tool pretty-prints its JSON arguments. `v`
+toggles raw JSON arguments and answers nothing. The plan digest stays visible and
+dim, and modal bodies now also go through `Theme::apply`, so `NO_COLOR` and
+ASCII mode cover them.
+
+### Projection cache
+
+`Renderer` caches a completed entry's rows by entry identity plus the switches
+and facts that can change them: the two toggles, the observed turn duration, and
+each call's approval decision and result status/code/exit code. Cached rows are
+cloned into the rebuilt transcript; only the live `PartialResponse` is parsed
+again, so a streaming delta never re-parses earlier Markdown. The cache is pruned
+to the current ancestry. `App::transcript_parses()` is the test hook counting
+entries rendered from scratch.
+
+### Offline evidence
+
+`crates/cli/tests/tui.rs` adds eight pure-`App` render tests with real storage
+and `ScriptedProvider`: a kitchen-sink GFM fixture compared to checked-in golden
+text at 80 and 120 columns plus cell-modifier assertions for every inline style
+and ANSI highlight; a `NO_COLOR` buffer with no colour and an ASCII buffer with
+no non-ASCII cell; a user message with leading spaces and a 1,000-character line
+wrapped but never truncated, and a fenced user block; tool headers and a
+collapsed read body expanded with Ctrl-E plus an `edit` diff in both transcript
+and dialog; the write approval preview and the `v` raw toggle (asserting the key
+hints appear only in the frame and footer); an unclosed fence while streaming,
+rendered as code and stable across frames; a cache test (repeated frames add no
+parses, a new entry adds one, a toggle re-renders once); and the 2,100-line cap
+note. Unit tests cover every `ToolStatus` mark and failure-code header, the
+bounded diff, the three approval previews plus raw mode, the ANSI-only palette
+and the ASCII glyph table.
+
+Rendering-only state changed: `tui/transcript.rs` lost its inline Markdown
+walker and gains `Renderer`; `tui/{markdown,highlight,tools}.rs` are new pure
+modules, and `tui_boundary` now scans them as pure model files. Four existing
+`tui.rs` tests changed expected *text* only, keeping their meaning: the
+streamed Markdown answer (a styled heading instead of `# Result`, a dim `rust`
+label instead of `┌─ code rust`), the approval and denied-tool tests
+(`✓ write note.txt` / `⊘ write note.txt` instead of `tool result: succeeded` /
+`denied`), and the failed turn (which now also shows the provider message).
+
+Each mutation was applied alone, failed the named test, and was reverted:
+
+| Mutation | Test | Observed failure |
+| --- | --- | --- |
+| Drop `ENABLE_TABLES` | `kitchen_sink_markdown_renders_the_same_projection_at_80_and_120_columns` | the table rows rendered as literal `|` paragraphs, so both goldens differed |
+| Truncate user lines to 400 characters | `user_text_keeps_indentation_and_wraps_long_lines_without_truncating` | only 400 of the 1,000 `x` characters reached the buffer |
+| Re-render completed entries on every projection | `completed_entries_render_once_and_only_the_partial_is_reparsed` | the parse counter grew on identical frames |
+| Emit an RGB colour from the highlighter | `no_color_has_no_colour_and_ascii_mode_has_no_wide_glyphs`, `rust_keywords_strings_and_comments_map_to_ansi_roles_only` | a `Color::Rgb` cell failed the ANSI-only assertion |

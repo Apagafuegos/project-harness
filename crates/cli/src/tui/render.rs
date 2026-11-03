@@ -16,12 +16,18 @@ use ratatui::{
 use super::{
     App, Modal, ResolutionMode,
     theme::{Role, Theme},
+    tools,
 };
 use crate::text::bounded;
 use unicode_segmentation::UnicodeSegmentation;
 
 /// Height bound of the prompt editor, including wrapped lines.
 const PROMPT_LINES: u16 = 6;
+
+/// A projection marker: a code body never word-reflows, it hard-wraps.
+pub(super) const CODE_ROW: &str = "\u{0}code";
+/// A projection marker: a horizontal rule expands to the pane width.
+pub(super) const RULE_ROW: &str = "\u{0}rule";
 
 pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
@@ -36,6 +42,7 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
                     app.theme.style(Role::Error),
                 )],
                 width,
+                app.theme.ascii,
             )
         })
         .unwrap_or_default();
@@ -58,7 +65,7 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
         .saturating_sub(banner + status + hints + prompt + header);
     let panes = Layout::vertical([Constraint::Length(header), Constraint::Min(0)]).split(area);
     frame.render_widget(
-        Paragraph::new(header_text(app)).style(app.theme.style(Role::Dim)),
+        Paragraph::new(app.theme.ascii_ready(header_text(app))).style(app.theme.style(Role::Dim)),
         panes[0],
     );
     let chunks = Layout::vertical([
@@ -73,16 +80,20 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
     draw_prompt(app, frame, chunks[1], width, framed);
     frame.render_widget(Paragraph::new(Text::from(errors)), chunks[2]);
     frame.render_widget(
-        Paragraph::new(Line::styled(hint_text(app), app.theme.style(Role::Dim))),
+        Paragraph::new(Line::styled(
+            app.theme.ascii_ready(hint_text(app)),
+            app.theme.style(Role::Dim),
+        )),
         chunks[3],
     );
     frame.render_widget(
-        Paragraph::new(status_text(app, width)).style(app.theme.style(Role::Status)),
+        Paragraph::new(app.theme.ascii_ready(status_text(app, width)))
+            .style(app.theme.style(Role::Status)),
         chunks[4],
     );
     if let Some((title, content)) = modal_content(app) {
         let hints = match app.modal {
-            Modal::Approval { .. } => "a allow · d deny · r remember · Esc deny",
+            Modal::Approval { .. } => "v raw · a allow · d deny · r remember · Esc deny",
             Modal::Uncertain { .. } => "↑↓ invocation · ←→ choice · Enter submit · PgUp/PgDn",
             _ => "y / Enter quit · n / Esc cancel",
         };
@@ -103,7 +114,7 @@ fn hint_text(app: &App) -> &'static str {
     if app.help {
         "↑↓ scroll · PgUp/PgDn page · Esc close"
     } else if matches!(app.modal, Modal::Approval { .. }) {
-        "a allow · d deny · r remember · Esc deny"
+        "v raw args · a allow · d deny · r remember · Esc deny"
     } else if !matches!(app.modal, Modal::None)
         || app.navigation_captures_input()
         || app.inspector_captures()
@@ -131,11 +142,21 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect, width: usize) {
     });
     let mut rows = if empty {
         vec![
-            Line::styled("Welcome to harness", app.theme.style(Role::Accent)),
-            Line::raw(format!("Workspace: {}", app.info.workspace.display())),
-            Line::raw(format!("Model: {}", model_name(&current_model(app)))),
             Line::styled(
-                "Enter send · Alt-Enter newline · Ctrl-O sessions · F1 help",
+                app.theme.ascii_ready("Welcome to harness"),
+                app.theme.style(Role::Accent),
+            ),
+            Line::raw(
+                app.theme
+                    .ascii_ready(format!("Workspace: {}", app.info.workspace.display())),
+            ),
+            Line::raw(
+                app.theme
+                    .ascii_ready(format!("Model: {}", model_name(&current_model(app)))),
+            ),
+            Line::styled(
+                app.theme
+                    .ascii_ready("Enter send · Alt-Enter newline · Ctrl-O sessions · F1 help"),
                 app.theme.style(Role::Dim),
             ),
         ]
@@ -146,7 +167,7 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect, width: usize) {
     while rows.last().is_some_and(|row| row.width() == 0) {
         rows.pop();
     }
-    let physical = wrap_lines(rows, width);
+    let physical = wrap_lines(rows, width, app.theme.ascii);
     let height = area.height as usize;
     let overflowing = physical.len() > height;
     let content_height = height.saturating_sub(usize::from(overflowing));
@@ -181,7 +202,10 @@ fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect, width: usize) {
             "100% · following".into()
         };
         frame.render_widget(
-            Paragraph::new(Line::styled(marker, app.theme.style(Role::Dim))),
+            Paragraph::new(Line::styled(
+                app.theme.ascii_ready(marker),
+                app.theme.style(Role::Dim),
+            )),
             Rect::new(area.x, area.y + area.height - 1, area.width, 1),
         );
     }
@@ -201,14 +225,20 @@ fn draw_prompt(app: &App, frame: &mut Frame, mut area: Rect, width: usize, frame
         } else {
             format!(" {mode} ")
         };
-        let block = Block::new()
+        let mut block = Block::new()
             .borders(Borders::TOP)
-            .title(title)
+            .title(app.theme.ascii_ready(title))
             .border_style(app.theme.style(if app.active_turn().is_some() {
                 Role::Dim
             } else {
                 Role::Accent
             }));
+        if app.theme.ascii {
+            block = block.border_set(ratatui::symbols::border::Set {
+                horizontal_top: "-",
+                ..ratatui::symbols::border::Set::default()
+            });
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
         area = inner;
@@ -279,7 +309,10 @@ fn prompt_layout(app: &App, width: usize) -> (Vec<Line<'static>>, (usize, usize)
     if app.prompt.is_empty() {
         lines[0] = Line::from(vec![
             Span::raw("> "),
-            Span::styled("Ask anything · F1 help", app.theme.style(Role::Dim)),
+            Span::styled(
+                app.theme.ascii_ready("Ask anything · F1 help"),
+                app.theme.style(Role::Dim),
+            ),
         ]);
     }
     (lines, cursor)
@@ -297,6 +330,10 @@ pub(super) fn draw_modal(
     scroll: &mut usize,
 ) -> Rect {
     let area = frame.area();
+    // Modal bodies are projection rows too: `NO_COLOR` strips their colour and
+    // ASCII mode gets the same glyph fallbacks as the transcript.
+    let mut content = content;
+    theme.apply(&mut content);
     let width = (content
         .iter()
         .map(Line::width)
@@ -310,10 +347,11 @@ pub(super) fn draw_modal(
         wrap_lines(
             content.iter().take(index).cloned().collect(),
             width.saturating_sub(2) as usize,
+            theme.ascii,
         )
         .len()
     });
-    let lines = wrap_lines(content, width.saturating_sub(2) as usize);
+    let lines = wrap_lines(content, width.saturating_sub(2) as usize, theme.ascii);
     let height = (lines.len() + 2).min(area.height.saturating_sub(2) as usize) as u16;
     let rect = Rect::new(
         area.x + (area.width - width) / 2,
@@ -324,7 +362,7 @@ pub(super) fn draw_modal(
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(theme.style(Role::Warning))
-        .title(format!(" {title} "));
+        .title(theme.ascii_ready(format!(" {title} ")));
     let mut inner = block.inner(rect);
     // At tiny sizes the frame collapses before content, but its title remains
     // present whenever there is room for chrome.
@@ -340,12 +378,12 @@ pub(super) fn draw_modal(
     }
     *scroll = (*scroll).min(lines.len().saturating_sub(inner.height as usize));
     let more = *scroll + (inner.height as usize) < lines.len();
-    let footer = format!(
+    let footer = theme.ascii_ready(format!(
         " {}{}{} ",
         if *scroll > 0 { "more ↑ · " } else { "" },
         if more { "more ↓ · " } else { "" },
         hints
-    );
+    ));
     frame.render_widget(Clear, rect);
     frame.render_widget(block.title_bottom(footer), rect);
     frame.render_widget(
@@ -365,7 +403,7 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
     let dim = app.theme.style(Role::Dim);
     match &app.modal {
         Modal::None => None,
-        Modal::Approval { approval_id } => {
+        Modal::Approval { approval_id, raw } => {
             let view = app.view()?;
             let ticket = view
                 .pending_approval
@@ -374,29 +412,21 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             let mut lines = Vec::new();
             match call_proposal(view, &ticket.call.call_id) {
                 Some((name, arguments)) => {
-                    lines.push(Line::raw(format!("tool: {}", bounded(&name, 80))));
-                    lines.push(Line::raw(format!("args: {}", bounded(&arguments, 240))));
+                    lines.extend(tools::approval(
+                        &app.info.workspace,
+                        &name,
+                        &arguments,
+                        *raw,
+                    ));
                 }
                 None => lines.push(Line::raw(format!(
                     "call: {}",
                     bounded(ticket.call.call_id.as_str(), 40)
                 ))),
             }
-            lines.push(Line::styled(
-                format!(
-                    "plan: {}",
-                    bounded(
-                        &ticket.plan_digest.as_str()[..12.min(ticket.plan_digest.as_str().len())],
-                        12
-                    )
-                ),
-                dim,
-            ));
             lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "a allow · d deny · r allow and remember · Esc deny",
-                app.theme.style(Role::Warning),
-            ));
+            lines.push(tools::digest(ticket.plan_digest.as_str()));
+            // The key hints live in the frame and footer, never in the body.
             Some(("approve tool call".into(), lines))
         }
         Modal::Uncertain { index, mode, input } => {
@@ -462,7 +492,7 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
 fn call_proposal(
     view: &RuntimeView,
     call: &harness_core::session::CallId,
-) -> Option<(String, String)> {
+) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {
     for (_, stored) in view.snapshot.entries() {
         if let harness_core::session::EntryPayload::AssistantResponse(response) =
             &stored.entry.payload
@@ -476,10 +506,7 @@ fn call_proposal(
                 } = block
                     && call_id == call
                 {
-                    return Some((
-                        name.clone(),
-                        serde_json::Value::Object(arguments.clone()).to_string(),
-                    ));
+                    return Some((name.clone(), arguments.clone()));
                 }
             }
         }
@@ -679,12 +706,36 @@ fn model_name(model: &ModelRef) -> String {
     )
 }
 
-/// Wrap logical rows by words and display cells; the existing code-frame
-/// markers are a width-independent no-reflow hint, not a Markdown reparse.
-pub(super) fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+/// Wrap logical rows by words and display cells. A row carrying [`CODE_ROW`]
+/// hard-wraps and a row carrying [`RULE_ROW`] becomes a full-width rule; both
+/// are width-independent projection hints, not a Markdown reparse.
+pub(super) fn wrap_lines(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    ascii: bool,
+) -> Vec<Line<'static>> {
     let mut out = Vec::new();
-    let mut code = false;
     for mut line in lines {
+        let mut code = false;
+        let mut rule = false;
+        line.spans.retain(|span| match span.content.as_ref() {
+            CODE_ROW => {
+                code = true;
+                false
+            }
+            RULE_ROW => {
+                rule = true;
+                false
+            }
+            _ => true,
+        });
+        if rule {
+            out.push(Line::styled(
+                if ascii { "-" } else { "─" }.repeat(width),
+                line.style,
+            ));
+            continue;
+        }
         let gutter = line
             .spans
             .first()
@@ -702,14 +753,11 @@ pub(super) fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'s
                 line.spans.insert(1, Span::raw(" ".repeat(padding)));
             }
         }
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        if text.starts_with("┌─ code") {
-            code = true;
-        }
         let wrapped = wrap_line(
             line,
             width.saturating_sub(usize::from(gutter.is_some()) * 2),
             code,
+            ascii,
         );
         out.extend(wrapped.into_iter().map(|mut row| {
             if let Some(gutter) = &gutter {
@@ -717,9 +765,6 @@ pub(super) fn wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'s
             }
             row
         }));
-        if text.starts_with("└─") {
-            code = false;
-        }
     }
     out
 }
@@ -728,12 +773,17 @@ fn hanging_indent(text: &str) -> usize {
     let leading = text.chars().take_while(|c| *c == ' ').count();
     let rest = &text[leading..];
     let marker = if rest.starts_with("• ")
+        || rest.starts_with("◦ ")
+        || rest.starts_with("▪ ")
         || rest.starts_with("- ")
         || rest.starts_with("* ")
+        || rest.starts_with("+ ")
         || rest.starts_with("> ")
         || rest.starts_with("│ ")
     {
         2
+    } else if rest.starts_with("[^") {
+        rest.find("] ").map_or(0, |end| end + 2)
     } else {
         rest.chars().take_while(char::is_ascii_digit).count()
     };
@@ -749,7 +799,7 @@ fn hanging_indent(text: &str) -> usize {
     leading + marker
 }
 
-fn wrap_line(line: Line<'static>, width: usize, code: bool) -> Vec<Line<'static>> {
+fn wrap_line(line: Line<'static>, width: usize, code: bool, ascii: bool) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![Line::default()];
     }
@@ -816,7 +866,7 @@ fn wrap_line(line: Line<'static>, width: usize, code: bool) -> Vec<Line<'static>
             let n = Span::raw(g.clone()).width();
             if code && used + n > width.saturating_sub(1).max(1) && used > 0 {
                 if used < width {
-                    spans.push(Span::styled("↪", line.style));
+                    spans.push(Span::styled(if ascii { ">" } else { "↪" }, line.style));
                 }
                 rows.push(Line::from(std::mem::take(&mut spans)).style(line.style));
                 used = 0;
@@ -857,10 +907,10 @@ mod tests {
     }
     #[test]
     fn word_wrap_keeps_words_and_hanging_indent() {
-        let rows = wrap_lines(vec![Line::raw("  • alpha beta gamma delta")], 14);
+        let rows = wrap_lines(vec![Line::raw("  • alpha beta gamma delta")], 14, false);
         assert_eq!(strings(&rows), ["  • alpha beta", "    gamma", "    delta"]);
         assert!(rows.iter().all(|r| r.width() <= 14));
-        let rows = wrap_lines(vec![Line::raw("one two three four")], 9);
+        let rows = wrap_lines(vec![Line::raw("one two three four")], 9, false);
         assert_eq!(strings(&rows), ["one two", "three", "four"]);
     }
     #[test]
@@ -873,29 +923,52 @@ mod tests {
                 Span::styled("defghijk", strong),
             ])],
             4,
+            false,
         );
         assert_eq!(strings(&rows), ["abcd", "efgh", "ijk"]);
         assert_eq!(rows[0].spans[0].style, accent);
         assert_eq!(rows[0].spans[3].style, strong);
-        let rows = wrap_lines(vec![Line::raw("界界 👩‍💻👩‍💻 e\u{301}lan")], 6);
+        let rows = wrap_lines(vec![Line::raw("界界 👩‍💻👩‍💻 e\u{301}lan")], 6, false);
         assert!(rows.iter().all(|r| r.width() <= 6), "{rows:?}");
         let all = strings(&rows).join("");
         assert!(all.contains("👩‍💻👩‍💻") && all.contains("e\u{301}lan"));
     }
     #[test]
     fn code_rows_hard_wrap_without_word_reflow() {
+        let marked = |text: &str| {
+            Line::from(vec![
+                Span::raw(CODE_ROW),
+                Span::raw("│ "),
+                Span::raw(text.to_owned()),
+            ])
+        };
         let rows = wrap_lines(
             vec![
-                Line::raw("┌─ code"),
-                Line::raw("│ alpha beta gamma"),
-                Line::raw("└─"),
+                Line::raw("rust"),
+                marked("alpha beta gamma"),
+                marked("delta"),
             ],
             10,
+            false,
         );
         let lines = strings(&rows);
         assert!(lines.contains(&"│ alpha b↪".to_owned()), "{lines:?}");
         assert!(lines.contains(&"eta gamma".to_owned()), "{lines:?}");
         assert!(rows.iter().all(|r| r.width() <= 10));
+        // Without the marker the same text reflows by words.
+        let plain = wrap_lines(vec![Line::raw("│ alpha beta gamma")], 10, false);
+        assert!(strings(&plain).contains(&"│ alpha".to_owned()), "{plain:?}");
+        // ASCII mode uses an ASCII continuation glyph and rule.
+        let rows = wrap_lines(
+            vec![
+                marked("alpha beta gamma"),
+                Line::styled(RULE_ROW, Style::new()),
+            ],
+            10,
+            true,
+        );
+        assert!(strings(&rows).contains(&"│ alpha b>".to_owned()));
+        assert_eq!(strings(&rows).last().unwrap(), &"-".repeat(10));
     }
 }
 

@@ -3,6 +3,11 @@
 //! Rows are width-independent Ratatui [`Line`]s. The renderer wraps them to the
 //! pane, so the projection can be tested without a terminal and a `Reset`
 //! always rebuilds exactly the same rows from the same view.
+//!
+//! Completed entries are rendered once and cached by entry identity plus the
+//! switches that change their rows (reasoning expansion, output expansion, and
+//! the tools' outcomes and approval decisions). Only the live partial response
+//! is re-parsed on every rebuild.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,13 +18,17 @@ use harness_core::{
         JournalEvent, ModelRef, Portability, ToolStatus, TurnId, TurnOutcome,
     },
 };
-use pulldown_cmark::{CodeBlockKind, Event as MarkdownEvent, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::Style,
     text::{Line, Span},
 };
+use serde_json::{Map, Value};
 
-use super::theme::{Role, Theme};
+use super::{
+    markdown,
+    theme::{Role, Theme},
+    tools,
+};
 use crate::text::{bounded, line};
 
 /// An observed non-durable fact that belongs in the log but not in a snapshot.
@@ -37,305 +46,438 @@ pub(crate) enum Notice {
     Info(String),
 }
 
-/// Project the durable branch and the live partial response into rows.
-pub(crate) fn project(
-    view: &RuntimeView,
-    reasoning: bool,
-    notices: &[Notice],
-    durations: &BTreeMap<TurnId, std::time::Duration>,
-) -> Vec<Line<'static>> {
-    let mut rows = Vec::new();
-    let ancestry = match view.snapshot.ancestry(view.snapshot.head()) {
-        Ok(ancestry) => ancestry,
-        Err(_) => return rows,
-    };
-    let branch: BTreeSet<EntryId> = ancestry
-        .iter()
-        .map(|stored| stored.entry.id.clone())
-        .collect();
-    let (outcomes, approvals) = audit_rows(view, &branch);
+/// The two expansion switches that change a completed entry's rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Toggles {
+    /// Show every reasoning line instead of the first.
+    pub(crate) reasoning: bool,
+    /// Show every tool-output line instead of the first three.
+    pub(crate) output: bool,
+}
 
-    let mut emitted: BTreeSet<TurnId> = BTreeSet::new();
-    // An excluded turn stays in history, in this transcript and in the report;
-    // it is only kept out of the model's request (decision 7). Dimming and one
-    // tag row say so, while the text stays readable.
-    let modes = super::turn_modes(&ancestry);
-    let mut tagged: BTreeSet<TurnId> = BTreeSet::new();
-    for (position, stored) in ancestry.iter().enumerate() {
-        let mode = stored
-            .entry
-            .turn_id
-            .as_ref()
-            .and_then(|turn| modes.get(turn))
-            .copied()
-            .unwrap_or_default();
-        let start = rows.len();
-        if mode == ContextMode::Excluded
-            && stored
+/// Rendered entries, keyed by their identity and the facts that can change them.
+#[derive(Default)]
+pub(crate) struct Renderer {
+    cache: BTreeMap<EntryId, Cached>,
+    parses: u64,
+}
+
+struct Cached {
+    key: u64,
+    rows: Vec<Line<'static>>,
+}
+
+impl Renderer {
+    /// How many entries were rendered from scratch. A hook for the cache test.
+    pub(crate) fn parses(&self) -> u64 {
+        self.parses
+    }
+
+    /// Project the durable branch and the live partial response into rows.
+    pub(crate) fn project(
+        &mut self,
+        view: &RuntimeView,
+        toggles: Toggles,
+        notices: &[Notice],
+        durations: &BTreeMap<TurnId, std::time::Duration>,
+    ) -> Vec<Line<'static>> {
+        let mut rows = Vec::new();
+        let ancestry = match view.snapshot.ancestry(view.snapshot.head()) {
+            Ok(ancestry) => ancestry,
+            Err(_) => return rows,
+        };
+        let branch: BTreeSet<EntryId> = ancestry
+            .iter()
+            .map(|stored| stored.entry.id.clone())
+            .collect();
+        let (outcomes, approvals) = audit_rows(view, &branch);
+        let calls = call_index(&ancestry);
+        self.cache.retain(|id, _| branch.contains(id));
+
+        let mut emitted: BTreeSet<TurnId> = BTreeSet::new();
+        // An excluded turn stays in history, in this transcript and in the report;
+        // it is only kept out of the model's request (decision 7). Dimming and one
+        // tag row say so, while the text stays readable.
+        let modes = super::turn_modes(&ancestry);
+        let mut tagged: BTreeSet<TurnId> = BTreeSet::new();
+        for (position, stored) in ancestry.iter().enumerate() {
+            let mode = stored
                 .entry
                 .turn_id
                 .as_ref()
-                .is_some_and(|turn| tagged.insert(turn.clone()))
+                .and_then(|turn| modes.get(turn))
+                .copied()
+                .unwrap_or_default();
+            let start = rows.len();
+            if mode == ContextMode::Excluded
+                && stored
+                    .entry
+                    .turn_id
+                    .as_ref()
+                    .is_some_and(|turn| tagged.insert(turn.clone()))
+            {
+                rows.push(Line::styled(
+                    "── excluded turn (kept in history; never sent to the model) ──",
+                    dim_style(),
+                ));
+            }
+            let key = entry_key(
+                &stored.entry.payload,
+                toggles,
+                &approvals,
+                &calls,
+                stored
+                    .entry
+                    .turn_id
+                    .as_ref()
+                    .and_then(|turn| durations.get(turn))
+                    .copied(),
+            );
+            let cached = self
+                .cache
+                .get(&stored.entry.id)
+                .filter(|cached| cached.key == key);
+            let mut entry_rows = match cached {
+                Some(cached) => cached.rows.clone(),
+                None => {
+                    self.parses += 1;
+                    let rendered = render_entry(
+                        &stored.entry.payload,
+                        toggles,
+                        &approvals,
+                        &calls,
+                        stored
+                            .entry
+                            .turn_id
+                            .as_ref()
+                            .and_then(|turn| durations.get(turn))
+                            .copied(),
+                    );
+                    self.cache.insert(
+                        stored.entry.id.clone(),
+                        Cached {
+                            key,
+                            rows: rendered.clone(),
+                        },
+                    );
+                    rendered
+                }
+            };
+            rows.append(&mut entry_rows);
+            let last_in_commit = ancestry
+                .get(position + 1)
+                .is_none_or(|next| next.sequence != stored.sequence);
+            if last_in_commit {
+                for (turn_id, finish) in &outcomes {
+                    if finish.2 == stored.sequence && !emitted.contains(turn_id) {
+                        push_outcome(&mut rows, finish.0, finish.1.as_deref());
+                        emitted.insert(turn_id.clone());
+                    }
+                }
+            }
+            if mode == ContextMode::Excluded {
+                dim(&mut rows[start..]);
+            }
+        }
+        // A turn may finish in a commit that carries no entry (cancellation or a
+        // failure before any response). Show those outcomes after the branch.
+        for (turn_id, finish) in &outcomes {
+            if emitted.insert(turn_id.clone()) {
+                push_outcome(&mut rows, finish.0, finish.1.as_deref());
+            }
+        }
+
+        if let Some(partial) = &view.partial {
+            let start = rows.len();
+            rows.push(assistant_label(
+                &partial.model,
+                partial.usage.as_ref(),
+                None,
+            ));
+            for block in partial.blocks.values() {
+                match block {
+                    PartialBlock::Text(text) => rows.extend(markdown::rows(text)),
+                    PartialBlock::ReasoningSummary(text) => {
+                        rows.extend(reasoning_rows(text, toggles.reasoning));
+                    }
+                    PartialBlock::ProviderState { schema, bytes } => {
+                        rows.push(provider_state(Some(schema.as_str()), *bytes as u64, None))
+                    }
+                    PartialBlock::ToolCall {
+                        name,
+                        arguments,
+                        ready,
+                        ..
+                    } => rows.extend(tools::partial(name, arguments, *ready)),
+                }
+            }
+            gutter(&mut rows[start..], Role::Assistant);
+            rows.push(Line::default());
+        } else if view.phase == harness_core::runtime::Phase::AwaitingResolution
+            && !view.awaiting.is_empty()
         {
             rows.push(Line::styled(
-                "── excluded turn (kept in history; never sent to the model) ──",
+                "waiting for a statement about an uncertain invocation",
+                error_style(),
+            ));
+            rows.push(Line::default());
+        }
+
+        for notice in notices {
+            match notice {
+                Notice::Diagnostic(text) => {
+                    rows.push(Line::styled(format!("diagnostic: {text}"), dim_style()))
+                }
+                Notice::Fault(text) => rows.push(Line::styled(text.clone(), error_style())),
+                Notice::CompactionFailed(code) => rows.push(Line::styled(
+                    format!("compaction failed: {}", bounded(code, 80)),
+                    error_style(),
+                )),
+                Notice::Recovered(text) => rows.push(Line::styled(text.clone(), dim_style())),
+                Notice::Info(text) => rows.push(Line::styled(text.clone(), dim_style())),
+            }
+        }
+        if view.phase == harness_core::runtime::Phase::Faulted
+            && !notices.iter().any(|n| matches!(n, Notice::Fault(_)))
+        {
+            rows.push(Line::styled("fault: runtime stopped", error_style()));
+        }
+        if rows.is_empty() {
+            rows.push(Line::styled(
+                "no messages yet — type a prompt and press Enter",
                 dim_style(),
             ));
         }
+        rows
+    }
+}
+
+/// Durable facts a header needs, gathered from the branch's tool results.
+struct Calls {
+    names: BTreeMap<CallId, (String, Map<String, Value>)>,
+    facts: BTreeMap<CallId, Facts>,
+}
+
+#[derive(Clone)]
+struct Facts {
+    status: ToolStatus,
+    code: Option<String>,
+    exit_code: Option<i32>,
+}
+
+fn call_index(ancestry: &[&harness_core::session::StoredEntry]) -> Calls {
+    let mut calls = Calls {
+        names: BTreeMap::new(),
+        facts: BTreeMap::new(),
+    };
+    for stored in ancestry {
         match &stored.entry.payload {
-            EntryPayload::UserMessage(message) => {
-                let start = rows.len();
-                push_label(&mut rows, "you");
-                for block in &message.content {
-                    media_or_text(&mut rows, block, "");
-                }
-                gutter(&mut rows[start..], Role::User);
-                rows.push(Line::default());
-            }
             EntryPayload::AssistantResponse(response) => {
-                let start = rows.len();
-                rows.push(assistant_label(
-                    &response.model,
-                    response.usage.as_ref(),
-                    stored
-                        .entry
-                        .turn_id
-                        .as_ref()
-                        .and_then(|id| durations.get(id))
-                        .copied(),
-                ));
-                if let Some(error) = &response.error {
-                    rows.push(Line::styled(
-                        format!("  error: {}", model_error_code(error.code)),
-                        error_style(),
-                    ));
-                }
                 for block in &response.content {
-                    match block {
-                        ContentBlock::Text { text } => {
-                            rows.extend(markdown(text));
-                        }
-                        ContentBlock::ReasoningSummary { text } => {
-                            rows.extend(reasoning_rows(text, reasoning));
-                        }
-                        ContentBlock::ToolCall {
-                            call_id,
-                            name,
-                            arguments,
-                            ..
-                        } => {
-                            rows.push(Line::styled(
-                                format!("  tool: {}", super::call_summary(name, arguments)),
-                                tool_style(),
-                            ));
-                            approval_rows(&mut rows, &approvals, call_id);
-                        }
-                        ContentBlock::ProviderState {
-                            owner,
-                            schema,
-                            artifact,
-                        } => rows.push(Line::styled(
-                            format!(
-                                "  provider state: {} ({} bytes, owner {}, not shown)",
-                                bounded(schema, 80),
-                                artifact.bytes,
-                                model_name(owner)
-                            ),
-                            dim_style(),
-                        )),
-                        other => media_or_text(&mut rows, other, "  "),
+                    if let ContentBlock::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } = block
+                    {
+                        calls
+                            .names
+                            .insert(call_id.clone(), (name.clone(), arguments.clone()));
                     }
                 }
-                gutter(&mut rows[start..], Role::Assistant);
-                rows.push(Line::default());
             }
             EntryPayload::ToolResult(result) => {
-                let status = tool_status(result.result.status);
-                let code = result
-                    .result
-                    .metadata
-                    .code
-                    .as_deref()
-                    .map(|code| format!(" ({})", bounded(code, 80)))
-                    .unwrap_or_default();
-                rows.push(Line::styled(
-                    format!("  tool result: {status}{code}"),
-                    tool_style(),
-                ));
-                let mut lines = 0usize;
-                for block in &result.result.content {
-                    if let ContentBlock::Text { text } = block {
-                        for text in text.lines() {
-                            if lines == 6 {
-                                rows.push(Line::styled("  …", dim_style()));
-                                break;
-                            }
-                            rows.push(Line::raw(format!("  {}", bounded(text, 200))));
-                            lines += 1;
-                        }
+                calls.facts.insert(
+                    result.result.call.call_id.clone(),
+                    Facts {
+                        status: result.result.status,
+                        code: result.result.metadata.code.clone(),
+                        exit_code: result.result.metadata.exit_code,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    calls
+}
+
+/// An entry's cache key: its switches plus the facts its own calls can show.
+fn entry_key(
+    payload: &EntryPayload,
+    toggles: Toggles,
+    approvals: &Approvals,
+    calls: &Calls,
+    duration: Option<std::time::Duration>,
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut mix = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    };
+    mix(u64::from(toggles.reasoning) | (u64::from(toggles.output) << 1));
+    if let Some(duration) = duration {
+        mix(duration.as_millis() as u64 + 1);
+    }
+    match payload {
+        EntryPayload::AssistantResponse(response) => {
+            for block in &response.content {
+                let ContentBlock::ToolCall { call_id, .. } = block else {
+                    continue;
+                };
+                if let Some((_, decision)) = approvals.get(call_id) {
+                    mix(match decision {
+                        Some(Decision::Allow) => 2,
+                        Some(Decision::Deny) => 3,
+                        None => 1,
+                    });
+                }
+                if let Some(facts) = calls.facts.get(call_id) {
+                    mix(facts.status as u64 + 4);
+                    mix(facts.exit_code.unwrap_or(i32::MIN) as u64);
+                    for byte in facts.code.as_deref().unwrap_or_default().bytes() {
+                        mix(u64::from(byte));
                     }
                 }
-                if result.result.metadata.output_truncated {
-                    rows.push(Line::styled("  output truncated", dim_style()));
-                }
-                if !result.result.metadata.artifacts.is_empty() {
-                    rows.push(Line::styled(
-                        format!(
-                            "  artifacts captured: {}",
-                            result.result.metadata.artifacts.len()
-                        ),
-                        dim_style(),
-                    ));
-                }
-                rows.push(Line::default());
-            }
-            EntryPayload::ModelChanged(changed) => {
-                rows.push(Line::styled(
-                    format!(
-                        "model switched: {} (portability: {})",
-                        model_name(&changed.model),
-                        portability(changed.portability)
-                    ),
-                    accent_style(),
-                ));
-                rows.push(Line::default());
-            }
-            EntryPayload::ContextControl(control) => {
-                let action = match control.mode {
-                    ContextMode::Pinned => "Pinned",
-                    ContextMode::Excluded => "Excluded",
-                    ContextMode::Default => "Reset",
-                };
-                rows.push(Line::styled(
-                    format!("{action} turn {}", turn_label(&control.turn_id)),
-                    accent_style(),
-                ));
-                rows.push(Line::default());
-            }
-            EntryPayload::Compaction(compaction) => {
-                rows.push(Line::styled(
-                    "── compaction summary ──────────────────────",
-                    accent_style(),
-                ));
-                let model = compaction
-                    .model
-                    .as_ref()
-                    .map(model_name)
-                    .unwrap_or_else(|| "no model".into());
-                rows.push(Line::styled(
-                    format!(
-                        "  {} · {} entries covered · {}",
-                        bounded(&compaction.strategy, 40),
-                        compaction.covered_entry_ids.len(),
-                        model
-                    ),
-                    dim_style(),
-                ));
-                for text in compaction.summary.lines() {
-                    rows.push(Line::raw(format!("  {}", bounded(text, 200))));
-                }
-                rows.push(Line::styled(
-                    "────────────────────────────────────────────",
-                    accent_style(),
-                ));
-                rows.push(Line::default());
             }
         }
-        let last_in_commit = ancestry
-            .get(position + 1)
-            .is_none_or(|next| next.sequence != stored.sequence);
-        if last_in_commit {
-            for (turn_id, finish) in &outcomes {
-                if finish.2 == stored.sequence && !emitted.contains(turn_id) {
-                    push_outcome(&mut rows, finish.0, finish.1.as_deref());
-                    emitted.insert(turn_id.clone());
-                }
-            }
+        EntryPayload::ToolResult(result) => {
+            mix(result.result.status as u64 + 4);
         }
-        if mode == ContextMode::Excluded {
-            dim(&mut rows[start..]);
-        }
+        _ => {}
     }
-    // A turn may finish in a commit that carries no entry (cancellation or a
-    // failure before any response). Show those outcomes after the branch.
-    for (turn_id, finish) in &outcomes {
-        if emitted.insert(turn_id.clone()) {
-            push_outcome(&mut rows, finish.0, finish.1.as_deref());
-        }
-    }
+    hash
+}
 
-    if let Some(partial) = &view.partial {
-        let start = rows.len();
-        rows.push(assistant_label(
-            &partial.model,
-            partial.usage.as_ref(),
-            None,
-        ));
-        for block in partial.blocks.values() {
-            match block {
-                PartialBlock::Text(text) => rows.extend(markdown(text)),
-                PartialBlock::ReasoningSummary(text) => {
-                    rows.extend(reasoning_rows(text, reasoning));
+fn render_entry(
+    payload: &EntryPayload,
+    toggles: Toggles,
+    approvals: &Approvals,
+    calls: &Calls,
+    duration: Option<std::time::Duration>,
+) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    match payload {
+        EntryPayload::UserMessage(message) => {
+            let start = rows.len();
+            rows.push(Line::styled("you", Theme::default().style(Role::User)));
+            for block in &message.content {
+                user_block(&mut rows, block);
+            }
+            gutter(&mut rows[start..], Role::User);
+            rows.push(Line::default());
+        }
+        EntryPayload::AssistantResponse(response) => {
+            let start = rows.len();
+            rows.push(assistant_label(
+                &response.model,
+                response.usage.as_ref(),
+                duration,
+            ));
+            if let Some(error) = &response.error {
+                rows.push(Line::styled(
+                    format!(
+                        "error {}: {}",
+                        model_error_code(error.code),
+                        bounded(&error.message, 240)
+                    ),
+                    error_style(),
+                ));
+            }
+            for block in &response.content {
+                match block {
+                    ContentBlock::Text { text } => rows.extend(markdown::rows(text)),
+                    ContentBlock::ReasoningSummary { text } => {
+                        rows.extend(reasoning_rows(text, toggles.reasoning));
+                    }
+                    ContentBlock::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } => {
+                        let facts = calls.facts.get(call_id);
+                        rows.extend(tools::call(
+                            name,
+                            arguments,
+                            tools::Facts {
+                                status: facts.map(|facts| facts.status),
+                                code: facts.and_then(|facts| facts.code.as_deref()),
+                                exit_code: facts.and_then(|facts| facts.exit_code),
+                            },
+                        ));
+                        approval_rows(&mut rows, approvals, call_id);
+                    }
+                    ContentBlock::ProviderState {
+                        owner,
+                        schema,
+                        artifact,
+                    } => rows.push(provider_state(
+                        Some(schema.as_str()),
+                        artifact.bytes,
+                        Some(owner),
+                    )),
+                    other => media(&mut rows, other),
                 }
-                PartialBlock::ProviderState { schema, bytes } => rows.push(Line::styled(
-                    format!(
-                        "  provider state: {} ({bytes} bytes, not shown)",
-                        bounded(schema, 80)
-                    ),
-                    dim_style(),
-                )),
-                PartialBlock::ToolCall {
-                    name,
-                    arguments,
-                    ready,
-                    ..
-                } => rows.push(Line::styled(
-                    format!(
-                        "  tool: {} {}{}",
-                        bounded(name, 80),
-                        bounded(arguments, 320),
-                        if *ready { "" } else { " …" }
-                    ),
-                    tool_style(),
-                )),
             }
+            gutter(&mut rows[start..], Role::Assistant);
+            rows.push(Line::default());
         }
-        gutter(&mut rows[start..], Role::Assistant);
-        rows.push(Line::default());
-    } else if view.phase == harness_core::runtime::Phase::AwaitingResolution
-        && !view.awaiting.is_empty()
-    {
-        rows.push(Line::styled(
-            "waiting for a statement about an uncertain invocation",
-            error_style(),
-        ));
-        rows.push(Line::default());
-    }
-
-    for notice in notices {
-        match notice {
-            Notice::Diagnostic(text) => {
-                rows.push(Line::styled(format!("diagnostic: {text}"), dim_style()))
+        EntryPayload::ToolResult(result) => {
+            output(&mut rows, result, toggles, calls);
+        }
+        EntryPayload::ModelChanged(changed) => {
+            rows.push(Line::styled(
+                format!(
+                    "model switched: {} (portability: {})",
+                    model_name(&changed.model),
+                    portability(changed.portability)
+                ),
+                accent_style(),
+            ));
+            rows.push(Line::default());
+        }
+        EntryPayload::ContextControl(control) => {
+            let action = match control.mode {
+                ContextMode::Pinned => "Pinned",
+                ContextMode::Excluded => "Excluded",
+                ContextMode::Default => "Reset",
+            };
+            rows.push(Line::styled(
+                format!("{action} turn {}", turn_label(&control.turn_id)),
+                accent_style(),
+            ));
+            rows.push(Line::default());
+        }
+        EntryPayload::Compaction(compaction) => {
+            rows.push(Line::styled(
+                "── compaction summary ──────────────────────",
+                accent_style(),
+            ));
+            let model = compaction
+                .model
+                .as_ref()
+                .map(model_name)
+                .unwrap_or_else(|| "no model".into());
+            rows.push(Line::styled(
+                format!(
+                    "  {} · {} entries covered · {}",
+                    bounded(&compaction.strategy, 40),
+                    compaction.covered_entry_ids.len(),
+                    model
+                ),
+                dim_style(),
+            ));
+            for text in compaction.summary.lines() {
+                rows.push(Line::raw(format!("  {}", bounded(text, 200))));
             }
-            Notice::Fault(text) => rows.push(Line::styled(text.clone(), error_style())),
-            Notice::CompactionFailed(code) => rows.push(Line::styled(
-                format!("compaction failed: {}", bounded(code, 80)),
-                error_style(),
-            )),
-            Notice::Recovered(text) => rows.push(Line::styled(text.clone(), dim_style())),
-            Notice::Info(text) => rows.push(Line::styled(text.clone(), dim_style())),
+            rows.push(Line::styled(
+                "────────────────────────────────────────────",
+                accent_style(),
+            ));
+            rows.push(Line::default());
         }
-    }
-    if view.phase == harness_core::runtime::Phase::Faulted
-        && !notices.iter().any(|n| matches!(n, Notice::Fault(_)))
-    {
-        rows.push(Line::styled("fault: runtime stopped", error_style()));
-    }
-    if rows.is_empty() {
-        rows.push(Line::styled(
-            "no messages yet — type a prompt and press Enter",
-            dim_style(),
-        ));
     }
     rows
 }
@@ -381,7 +523,14 @@ fn push_outcome(rows: &mut Vec<Line<'static>>, outcome: Option<TurnOutcome>, cod
     while rows.last().is_some_and(|row| row.width() == 0) {
         rows.pop();
     }
-    rows.push(outcome_row(outcome, code));
+    let mut row = outcome_row(outcome, code);
+    let role = match outcome {
+        Some(TurnOutcome::Cancelled) => Role::Warning,
+        _ => Role::Error,
+    };
+    row.spans
+        .insert(0, Span::styled("▌ ", Theme::default().style(role)));
+    rows.push(row);
     rows.push(Line::default());
 }
 
@@ -411,8 +560,13 @@ fn assistant_label(
 /// Width-independent gutter spans; the renderer repeats them on wrapped rows.
 fn gutter(rows: &mut [Line<'static>], role: Role) {
     for row in rows.iter_mut().filter(|row| row.width() > 0) {
+        let at = usize::from(
+            row.spans
+                .first()
+                .is_some_and(|span| span.content.starts_with('\u{0}')),
+        );
         row.spans
-            .insert(0, Span::styled("▌ ", Theme::default().style(role)));
+            .insert(at, Span::styled("▌ ", Theme::default().style(role)));
     }
 }
 
@@ -428,41 +582,20 @@ fn outcome_row(outcome: Option<TurnOutcome>, code: Option<&str>) -> Line<'static
         Some(code) => format!("{label} ({})", bounded(code, 80)),
         None => label.to_owned(),
     };
-    Line::styled(
-        text,
-        if outcome == TurnOutcome::Completed {
-            dim_style()
-        } else {
-            error_style()
-        },
-    )
+    Line::styled(text, error_style())
 }
 
+/// One dim line under the call: a recorded approval or a pending one.
 fn approval_rows(rows: &mut Vec<Line<'static>>, approvals: &Approvals, call: &CallId) {
-    let Some((requested, decided)) = approvals.get(call) else {
+    let Some((_, decided)) = approvals.get(call) else {
         return;
     };
-    if let Some(approval_id) = requested {
-        rows.push(Line::styled(
-            format!(
-                "  approval requested: {} (a allow · d deny · r allow and remember)",
-                short_id(approval_id.as_str())
-            ),
-            accent_style(),
-        ));
-    }
-    if let Some(decision) = decided {
-        rows.push(Line::styled(
-            format!(
-                "  approval: {}",
-                match decision {
-                    Decision::Allow => "allowed",
-                    Decision::Deny => "denied",
-                }
-            ),
-            tool_style(),
-        ));
-    }
+    let text = match decided {
+        Some(Decision::Allow) => "approval: allowed",
+        Some(Decision::Deny) => "approval: denied",
+        None => "approval: requested",
+    };
+    rows.push(Line::styled(text, dim_style()));
 }
 
 /// Dim rows an excluded turn owns. Wrapping keeps span styles and the renderer
@@ -477,75 +610,129 @@ fn dim(rows: &mut [Line<'static>]) {
     }
 }
 
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
-fn push_label(rows: &mut Vec<Line<'static>>, label: &str) {
-    rows.push(Line::styled(
-        label.to_owned(),
-        Theme::default().style(Role::User),
-    ));
-}
-
-fn media_or_text(rows: &mut Vec<Line<'static>>, block: &ContentBlock, prefix: &str) {
+fn user_block(rows: &mut Vec<Line<'static>>, block: &ContentBlock) {
     match block {
-        ContentBlock::Text { text } => {
-            if text.is_empty() {
-                rows.push(Line::raw(prefix.to_owned()));
-            }
-            for text in text.lines() {
-                rows.push(Line::raw(format!("{prefix}{}", bounded(text, 400))));
-            }
-        }
+        ContentBlock::Text { text } => rows.extend(markdown::user_rows(text)),
+        other => media(rows, other),
+    }
+}
+
+fn media(rows: &mut Vec<Line<'static>>, block: &ContentBlock) {
+    match block {
         ContentBlock::Image { mime_type, .. } => rows.push(Line::styled(
-            format!("{prefix}[image {}]", bounded(mime_type, 60)),
+            format!("[image {}]", bounded(mime_type, 60)),
             dim_style(),
         )),
         ContentBlock::Audio { mime_type, .. } => rows.push(Line::styled(
-            format!("{prefix}[audio {}]", bounded(mime_type, 60)),
+            format!("[audio {}]", bounded(mime_type, 60)),
             dim_style(),
         )),
         ContentBlock::File {
             mime_type, name, ..
         } => rows.push(Line::styled(
-            format!(
-                "{prefix}[file {} {}]",
-                bounded(name, 60),
-                bounded(mime_type, 60)
-            ),
+            format!("[file {} {}]", bounded(name, 60), bounded(mime_type, 60)),
             dim_style(),
         )),
-        ContentBlock::ReasoningSummary { text } => {
-            rows.extend(reasoning_rows(text, false));
-        }
-        // Tool calls and native state are rendered by their own owners.
-        ContentBlock::ToolCall { .. } | ContentBlock::ProviderState { .. } => {}
+        ContentBlock::ReasoningSummary { text } => rows.extend(reasoning_rows(text, false)),
+        // Tool calls, native state and text have their own renderers.
+        ContentBlock::Text { .. }
+        | ContentBlock::ToolCall { .. }
+        | ContentBlock::ProviderState { .. } => {}
     }
 }
 
-/// Collapse a reasoning summary to one bounded line unless expanded.
+fn provider_state(schema: Option<&str>, bytes: u64, owner: Option<&ModelRef>) -> Line<'static> {
+    let mut text = format!(
+        "provider state: {} ({bytes} bytes, not shown",
+        bounded(schema.unwrap_or("schema"), 80)
+    );
+    if let Some(owner) = owner {
+        text.push_str(&format!(", owner {}", model_name(owner)));
+    }
+    text.push(')');
+    Line::styled(text, dim_style())
+}
+
+/// Collapse a reasoning summary to one dim italic line unless expanded.
 fn reasoning_rows(text: &str, expanded: bool) -> Vec<Line<'static>> {
     if text.is_empty() {
         return Vec::new();
     }
+    let italic = dim_style().add_modifier(ratatui::style::Modifier::ITALIC);
+    let gutter_span = Span::styled("│ ", dim_style());
     if expanded {
         return text
             .lines()
-            .map(|text| Line::styled(format!("  {text}"), dim_style()))
+            .map(|text| Line::from(vec![gutter_span.clone(), Span::styled(line(text), italic)]))
             .collect();
     }
     let first = text.lines().next().unwrap_or_default();
     let more = text.lines().count().saturating_sub(1);
     let suffix = if more > 0 {
-        format!(" … (+{more} lines, Ctrl-R)")
+        format!(" … (+{more} lines · Ctrl-R)")
     } else {
         " (Ctrl-R)".into()
     };
-    vec![Line::styled(
-        format!("  reasoning: {}{suffix}", bounded(first, 160)),
-        dim_style(),
-    )]
+    vec![Line::from(vec![
+        gutter_span,
+        Span::styled(format!("reasoning: {}", bounded(first, 160)), italic),
+        Span::styled(suffix, dim_style()),
+    ])]
+}
+
+/// A tool result's body: the first three rows, or all of them when expanded.
+fn output(
+    rows: &mut Vec<Line<'static>>,
+    result: &harness_core::session::ToolResultEntry,
+    toggles: Toggles,
+    calls: &Calls,
+) {
+    let mut block = Vec::new();
+    let mut lines = Vec::new();
+    for content in &result.result.content {
+        match content {
+            ContentBlock::Text { text } => {
+                for text in text.lines() {
+                    lines.push(text.to_owned());
+                }
+            }
+            other => media(&mut block, other),
+        }
+    }
+    if !calls.names.contains_key(&result.result.call.call_id) {
+        // A result whose call is not on this branch still names its own status.
+        let mark = tools::Mark::of(Some(result.result.status));
+        block.push(Line::from(vec![
+            Span::styled(mark.glyph(), mark.style()),
+            Span::styled(
+                format!(" tool result: {}", tool_status(result.result.status)),
+                dim_style(),
+            ),
+        ]));
+    }
+    let total = lines.len();
+    let shown = if toggles.output { total } else { total.min(3) };
+    for text in lines.iter().take(shown) {
+        block.push(tools::output_row(text));
+    }
+    if total > shown {
+        block.push(tools::note(format!(
+            "… +{} lines (Ctrl-E for full output)",
+            total - shown
+        )));
+    }
+    if result.result.metadata.output_truncated {
+        block.push(tools::note("output truncated by the tool"));
+    }
+    if !result.result.metadata.artifacts.is_empty() {
+        block.push(tools::note(format!(
+            "artifacts captured: {}",
+            result.result.metadata.artifacts.len()
+        )));
+    }
+    gutter(&mut block, Role::Assistant);
+    rows.append(&mut block);
+    rows.push(Line::default());
 }
 
 fn tool_status(status: ToolStatus) -> &'static str {
@@ -613,235 +800,10 @@ fn dim_style() -> Style {
     Theme::default().style(Role::Dim)
 }
 
-fn tool_style() -> Style {
-    Theme::default().style(Role::Tool)
-}
-
 fn error_style() -> Style {
     Theme::default().style(Role::Error)
 }
 
 fn accent_style() -> Style {
     Theme::default().style(Role::Accent)
-}
-
-fn code_style() -> Style {
-    Theme::default().style(Role::Code)
-}
-
-/// Minimal Markdown: headings, emphasis, lists, quotes, inline code and fenced
-/// code as a distinct block. No syntax highlighting and no HTML execution.
-fn markdown(text: &str) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let mut builder = MarkdownBuilder::default();
-    for event in Parser::new_ext(text, Options::empty()) {
-        builder.event(event, &mut out);
-    }
-    builder.flush(&mut out);
-    if !out.is_empty() && out.last().is_some_and(|line| line.width() > 0) {
-        out.push(Line::default());
-    }
-    out
-}
-
-#[derive(Default)]
-struct MarkdownBuilder {
-    spans: Vec<Span<'static>>,
-    emphasis: usize,
-    strong: usize,
-    heading: bool,
-    quote: usize,
-    lists: Vec<Option<u64>>,
-    item: Option<String>,
-    code: Option<Vec<String>>,
-    code_language: String,
-    link: bool,
-}
-
-impl MarkdownBuilder {
-    fn event(&mut self, event: MarkdownEvent<'_>, out: &mut Vec<Line<'static>>) {
-        match event {
-            MarkdownEvent::Start(tag) => self.start(tag, out),
-            MarkdownEvent::End(tag) => self.end(tag, out),
-            MarkdownEvent::Text(text) => {
-                if let Some(code) = &mut self.code {
-                    code.extend(text.split('\n').map(str::to_owned));
-                } else {
-                    self.push(&text);
-                }
-            }
-            MarkdownEvent::Code(text) => self.push_styled(&text, inline_code_style()),
-            MarkdownEvent::SoftBreak => self.push(" "),
-            MarkdownEvent::HardBreak => self.flush(out),
-            MarkdownEvent::Rule => {
-                self.flush(out);
-                self.separate(out);
-                out.push(Line::styled("────", dim_style()));
-            }
-            MarkdownEvent::TaskListMarker(done) => {
-                self.push(if done { "[x] " } else { "[ ] " });
-            }
-            // Raw HTML is shown as inert text, never interpreted.
-            MarkdownEvent::Html(text) | MarkdownEvent::InlineHtml(text) => self.push(&text),
-            MarkdownEvent::FootnoteReference(label) => self.push(&format!("[{label}]")),
-            _ => {}
-        }
-    }
-
-    fn start(&mut self, tag: Tag<'_>, out: &mut Vec<Line<'static>>) {
-        match tag {
-            Tag::Paragraph => {}
-            Tag::Heading { level, .. } => {
-                self.flush(out);
-                self.separate(out);
-                let hashes = usize::from(level as u8).clamp(1, 6);
-                self.item = Some(format!("{} ", "#".repeat(hashes)));
-                self.heading = true;
-            }
-            Tag::BlockQuote(_) => {
-                self.flush(out);
-                self.separate(out);
-                self.quote += 1;
-            }
-            Tag::CodeBlock(kind) => {
-                self.flush(out);
-                self.code = Some(Vec::new());
-                self.code_language = match kind {
-                    CodeBlockKind::Fenced(language) => bounded(&language, 40),
-                    CodeBlockKind::Indented => String::new(),
-                };
-            }
-            Tag::List(start) => {
-                self.flush(out);
-                self.separate(out);
-                self.lists.push(start);
-            }
-            Tag::Item => {
-                self.flush(out);
-                let depth = self.lists.len().saturating_sub(1);
-                let indent = "  ".repeat(depth);
-                let marker = match self.lists.last_mut() {
-                    Some(Some(next)) => {
-                        let marker = format!("{next}. ");
-                        *next += 1;
-                        marker
-                    }
-                    _ => "• ".to_owned(),
-                };
-                self.item = Some(format!("{indent}{marker}"));
-            }
-            Tag::Emphasis => self.emphasis += 1,
-            Tag::Strong => self.strong += 1,
-            Tag::Link { .. } => self.link = true,
-            Tag::Image { .. } => self.push("[image]"),
-            _ => {}
-        }
-    }
-
-    fn end(&mut self, tag: TagEnd, out: &mut Vec<Line<'static>>) {
-        match tag {
-            TagEnd::Paragraph => {
-                self.flush(out);
-                self.separate(out);
-            }
-            TagEnd::Heading(_) => {
-                self.flush(out);
-                self.heading = false;
-                self.separate(out);
-            }
-            TagEnd::BlockQuote(_) => {
-                self.flush(out);
-                self.quote = self.quote.saturating_sub(1);
-                self.separate(out);
-            }
-            TagEnd::CodeBlock => {
-                if let Some(lines) = self.code.take() {
-                    let language = std::mem::take(&mut self.code_language);
-                    let title = if language.is_empty() {
-                        "┌─ code".to_owned()
-                    } else {
-                        format!("┌─ code {language}")
-                    };
-                    let mut lines = lines;
-                    while lines.last().is_some_and(|text| text.is_empty()) {
-                        lines.pop();
-                    }
-                    out.push(Line::styled(title, code_style()));
-                    for text in lines {
-                        out.push(Line::styled(format!("│ {}", line(&text)), code_style()));
-                    }
-                    out.push(Line::styled("└─", code_style()));
-                    self.separate(out);
-                }
-            }
-            TagEnd::List(_) => {
-                self.flush(out);
-                self.lists.pop();
-                self.separate(out);
-            }
-            TagEnd::Item => self.flush(out),
-            TagEnd::Emphasis => self.emphasis = self.emphasis.saturating_sub(1),
-            TagEnd::Strong => self.strong = self.strong.saturating_sub(1),
-            TagEnd::Link => self.link = false,
-            _ => {}
-        }
-    }
-
-    fn push(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.push_styled(text, self.style());
-    }
-
-    fn push_styled(&mut self, text: &str, style: Style) {
-        if text.is_empty() {
-            return;
-        }
-        self.spans.push(Span::styled(line(text), style));
-    }
-
-    fn style(&self) -> Style {
-        let mut style = if self.heading {
-            Theme::default().style(Role::Assistant)
-        } else {
-            Style::new()
-        };
-        if self.emphasis > 0 {
-            style = style.patch(Theme::default().style(Role::Emphasis));
-        }
-        if self.strong > 0 {
-            style = style.patch(Theme::default().style(Role::Strong));
-        }
-        if self.link {
-            style = style.patch(Theme::default().style(Role::Link));
-        }
-        style
-    }
-
-    fn flush(&mut self, out: &mut Vec<Line<'static>>) {
-        if self.spans.is_empty() && self.item.is_none() {
-            return;
-        }
-        let mut spans = Vec::new();
-        if self.quote > 0 {
-            spans.push(Span::styled("│ ".repeat(self.quote), dim_style()));
-        }
-        if let Some(item) = self.item.take() {
-            spans.push(Span::styled(item, label_style()));
-        }
-        spans.append(&mut self.spans);
-        out.push(Line::from(spans));
-    }
-
-    /// One blank row between blocks; repeated calls add none.
-    fn separate(&self, out: &mut Vec<Line<'static>>) {
-        if out.last().is_some_and(|line| line.width() > 0) {
-            out.push(Line::default());
-        }
-    }
-}
-
-fn inline_code_style() -> Style {
-    Theme::default().style(Role::InlineCode)
 }

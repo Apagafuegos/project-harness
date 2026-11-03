@@ -137,6 +137,12 @@ const KEYS: &[Binding] = &[
     ),
     binding!(
         "Context",
+        "Ctrl-E",
+        "toggle full tool output",
+        (Char('e'), M::CONTROL)
+    ),
+    binding!(
+        "Context",
         "Ctrl-K",
         "inspector: m preview model, c preview compaction, Enter commit shown preview",
         (Char('k'), M::CONTROL)
@@ -159,7 +165,7 @@ const KEYS: &[Binding] = &[
     Binding {
         area: "Dialogs",
         label: "Text / paste",
-        description: "edit only; approval a allow, d deny, r remember; quit y/Enter or n/Esc; help Esc/F1 closes",
+        description: "edit only; approval a allow, d deny, r remember, v raw arguments; quit y/Enter or n/Esc; help Esc/F1 closes",
         chords: &[],
     },
 ];
@@ -219,6 +225,7 @@ mod tests {
             "Ctrl-T",
             "Ctrl-L",
             "Ctrl-R",
+            "Ctrl-E",
             "Ctrl-K",
             "F1 / ?",
             "Tab / Shift-Tab",
@@ -230,7 +237,7 @@ mod tests {
                 "undocumented key: {label}"
             );
         }
-        for c in ['c', 'd', 'r', 'k', 'o', 't', 'l', 'u', 'w'] {
+        for c in ['c', 'd', 'r', 'e', 'k', 'o', 't', 'l', 'u', 'w'] {
             assert!(documented(KeyEvent::new(Char(c), M::CONTROL)));
         }
     }

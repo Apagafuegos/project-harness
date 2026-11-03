@@ -35,6 +35,8 @@ tempfile = "3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+# M7-06 decision 10: pure-Rust highlighting, bundled grammars, no C regex engine.
+syntect = { version = "5.3", default-features = false, features = ["default-syntaxes", "parsing", "dump-load", "regex-fancy"] }
 
 # One development profile for check.sh, CI and ad-hoc cargo commands. Debug
 # level and incremental mode are part of an artifact's identity, so any

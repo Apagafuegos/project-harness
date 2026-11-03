@@ -56,6 +56,9 @@ const PURE_MODEL: &[&str] = &[
     "inspector.rs",
     "keys.rs",
     "theme.rs",
+    "markdown.rs",
+    "highlight.rs",
+    "tools.rs",
 ];
 
 /// Storage names a direct journal write would need. A control is appended by
