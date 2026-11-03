@@ -412,6 +412,9 @@ impl DataRoot {
             );
             journals += 1;
         }
+        // Serialize selection (including every mtime read) and unlink against
+        // artifact publication/reuse, not against the earlier journal scan.
+        let _artifact_lock = self.lock_artifacts(true)?;
         let now = SystemTime::now();
         let mut candidates = Vec::new();
         for item in fs::Dir::read_from(&self.artifacts)? {
@@ -442,6 +445,7 @@ impl DataRoot {
                 bytes: metadata.len(),
             });
         }
+        self.io.check(super::io::Point::GcSelected)?;
         if !options.dry_run {
             for candidate in &candidates {
                 match fs::unlinkat(&self.artifacts, candidate.sha256.as_str(), AtFlags::empty()) {

@@ -212,9 +212,16 @@ The grace window is what makes this safe for shared storage: a writer stores an
 artifact *before* the journal commit that references it, so an artifact is
 unreferenced for a moment; and `DataRoot::put_artifact*` refreshes an existing
 artifact's modification time on a dedupe hit with `utimensat`, so an in-flight
-reuse is never old. Collection stats each candidate without following a
-symlink and deletes only private regular files it verified, then syncs the
-artifacts directory.
+reuse is never old. To prevent reuse between the mtime check and unlink,
+collection holds an exclusive artifact-directory `flock` from before candidate
+selection through the last unlink and directory sync. Artifact publication holds
+the same lock shared across rename, dedupe verification and mtime refresh. Each
+operation opens a separate `NOFOLLOW | CLOEXEC` directory description: reuse
+either finishes first and is young when collection checks, or waits until
+collection finishes and publishes fresh bytes. No lock file or journal format
+change is involved. Collection stats each candidate under that lock without
+following a symlink and deletes only private regular files it verified, then
+syncs the artifacts directory.
 
 `--dry-run` lists the candidates and their total size and changes nothing. A real
 run without a terminal needs `--yes`. Both print the artifact count, the total

@@ -82,6 +82,23 @@ the artifacts directory is synced.
 AT_SYMLINK_NOFOLLOW)` after accepting an existing artifact. A reuse therefore
 looks exactly as young as a fresh write, which is what the grace window needs.
 
+### Artifact publication and collection share a data-root lock
+
+The grace window alone does not serialize an mtime check with unlink. Collection
+holds an exclusive, blocking `flock` on the artifacts directory from before
+candidate selection (all mtime reads are under the lock) through the last unlink
+and directory sync. `put_artifact_reader`, including `put_artifact`, holds a shared
+lock across publication, dedupe verification, mtime refresh and directory sync.
+Streaming the temporary file happens before acquiring that lock.
+
+Each operation opens `.` relative to the pinned artifacts descriptor with
+`DIRECTORY | NOFOLLOW | CLOEXEC`, checks its private mode/ownership, and retains
+that distinct open file description until completion. A descriptor clone would
+share flock ownership and would not serialize threads using the same DataRoot.
+No lock file or journal/schema change is needed. Collection acquires its artifact
+lock only after the journal scan, so a writer holding a journal lock cannot
+introduce a journal/artifact lock-order deadlock.
+
 ### The TUI only names the work
 
 The sessions screen gains `d` and `e`. The pure model emits
@@ -103,8 +120,8 @@ an artifact, and commits a journal that references it, some time later.
 | Situation | Outcome |
 | --- | --- |
 | Writer publishes bytes, has not committed yet | No journal references them, but their mtime is seconds old, so the 24-hour window keeps them. |
-| Writer dedupe-hits an existing artifact, then commits | The hit refreshed the mtime, so the artifact is young again; a collection that had already decided it was a candidate still requires the artifact to be older than the window. |
-| Writer dedupe-hits an artifact exactly as a collection unlinks it | The writer's `verify_artifact` fails with `artifact_missing_or_invalid` and the commit fails loudly; the engine reports a storage fault rather than committing a record whose bytes are gone. The window is microseconds and no silent partial commit is possible. |
+| Writer finishes a dedupe reuse before collection acquires the artifact lock | Verification and mtime refresh finish under the shared lock. Collection then reads the fresh mtime under its exclusive lock and keeps the young artifact. |
+| Writer attempts reuse after collection selects an old orphan, including a writer opened after the journal scan | Publication waits for collection's exclusive artifact lock. After the unlink and lock release, rename publishes the writer's synced temporary file as fresh bytes; no successful reuse can be unlinked by that selection. |
 | Collection runs while a journal is locked by its writer | The run refuses with `gc_journal_unreadable: <id>`, so it never computes a reference set from a partially readable journal. |
 | Deletion runs while another session's writer holds shared artifacts | Deletion removes only a journal; no artifact is touched, so a shared artifact survives. |
 | Deletion runs while the same session's engine is writing | The exclusive writer lock refuses it with `session_locked`; nothing waits. |
@@ -117,6 +134,13 @@ Deletion and collection never touch anything outside `<data_root>/sessions` and
 file-level maintenance around an append-only journal.
 
 ## Evidence and consequences
+
+`session::tests::artifact_gc::artifact_gc_serializes_selection_and_unlink_with_dedupe_reuse`
+pauses collection at `Io::GcSelected` before unlink, starts a separately opened
+writer reusing the old orphan, verifies publication waits, and reopens a journal
+referencing the surviving bytes. It also tests a refresh that finishes before
+collection. Removing the shared writer lock makes the gated reuse lose its
+artifact and the test fail.
 
 `crates/cli/tests/session_maintenance.rs` covers the Markdown golden for the
 active branch and for `--all-branches`, determinism, `export_exists`, a journal

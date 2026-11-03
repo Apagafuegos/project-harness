@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+mod artifact_gc;
 mod controls;
 mod versions;
 

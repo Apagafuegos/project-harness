@@ -83,6 +83,22 @@ pub(crate) fn refresh_mtime(directory: &File, name: &str) -> Result<()> {
 }
 
 impl DataRoot {
+    /// Open a distinct description of the pinned private artifacts directory.
+    /// Cloning its descriptor would share flock ownership between operations.
+    pub(crate) fn lock_artifacts(&self, exclusive: bool) -> Result<File> {
+        let directory = open_dir(&self.artifacts, std::ffi::OsStr::new("."))?;
+        verify_private(&directory, true)?;
+        fs::flock(
+            &directory,
+            if exclusive {
+                fs::FlockOperation::LockExclusive
+            } else {
+                fs::FlockOperation::LockShared
+            },
+        )?;
+        Ok(directory)
+    }
+
     /// Resolve the documented XDG default without creating it.
     pub fn default_path() -> Result<PathBuf> {
         if let Some(value) = std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
@@ -208,6 +224,7 @@ impl DataRoot {
                 sha256: format!("{:x}", hash.finalize()).parse().expect("SHA-256"),
                 bytes,
             };
+            let _artifact_lock = self.lock_artifacts(false)?;
             match fs::renameat_with(
                 &self.artifacts,
                 name.as_str(),
