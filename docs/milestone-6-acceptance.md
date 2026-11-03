@@ -72,7 +72,7 @@ migration or artifact rewrite was added for the chosen default.
 
 | Criterion | Evidence running in the gate | Status | Note |
 | --- | --- | --- | --- |
-| DeepSeek is a Messages-adapter profile with its own instance, key, catalog and native-state owner | `every_conformance_case_passes_on_deepseek_fixtures`, `a_plain_deepseek_turn_is_one_messages_body`, `images_follow_the_deepseek_catalog`, `an_unsigned_thinking_block_maps_only_on_deepseek`, `an_unsigned_thinking_payload_replays_only_on_deepseek`, `redacted_thinking_is_outside_the_deepseek_vocabulary`, `the_deepseek_key_is_sent_as_x_api_key_and_never_rendered`, `a_missing_deepseek_credential_fails_before_submission`, `env_deepseek_key_selects_the_api_key_header`, `catalog_rows_match_the_deepseek_models_page`, `deepseek_is_registered_with_its_key_and_skipped_without_it`, `deepseek_provider_requires_its_own_key_and_no_openai_auth_flag` | met | No new wire format, no core branch: profile data plus mapping hooks. `deepseek-flash` and `deepseek-v4-pro` are sourced catalog rows. Missing key is skipped unless selected, then exit 3 with no secret. The live endpoint itself is exercised by both matrices below, not by `scripts/live-check.sh deepseek` (which had no key at m6-00). |
+| DeepSeek is a Messages-adapter profile with its own instance, key, catalog and native-state owner | `every_conformance_case_passes_on_deepseek_fixtures`, `a_plain_deepseek_turn_is_one_messages_body`, `images_follow_the_deepseek_catalog`, `an_unsigned_thinking_block_maps_only_on_deepseek`, `an_unsigned_thinking_payload_replays_only_on_deepseek`, `redacted_thinking_is_outside_the_deepseek_vocabulary`, `the_deepseek_key_is_sent_as_x_api_key_and_never_rendered`, `a_missing_deepseek_credential_fails_before_submission`, `env_deepseek_key_selects_the_api_key_header`, `catalog_rows_match_the_deepseek_models_page`, `deepseek_is_registered_with_its_key_and_skipped_without_it`, `deepseek_provider_requires_its_own_key_and_no_openai_auth_flag` | met | No new wire format, no core branch: profile data plus mapping hooks. `deepseek-flash` and `deepseek-v4-pro` are sourced catalog rows. Missing key is skipped unless selected, then exit 3 with no secret. The live endpoint is exercised by both matrices below and the M7-01 `scripts/live-check.sh deepseek` pass (2026-11-03, `8724ff6`, `deepseek-flash`), including tool round trip, usage and stored thinking replay. |
 | Evaluation is a dev-only crate with no core/product types and no binary linkage | `crates/eval` (`publish = false`), `offline_pipeline_is_deterministic_complete_and_does_not_leak_the_check`, `scripts/check.sh` runs `cargo test -p harness-eval --test offline_gate -- --ignored` | met | `harness` does not depend on `harness-eval`; core gains no evaluation type. |
 | Fixed tasks record configuration/input provenance, and metrics are deterministic where they can be | `every_task_declares_exactly_the_files_its_history_changed`, `a_summary_that_drops_a_requirement_lowers_projection_retention`, `a_continuation_that_does_not_fix_the_task_completes_false`, `completion_rejects_a_change_to_the_forbidden_math_file`, `completion_rejects_an_extra_file_in_the_no_new_files_task`, `byte_identical_output_includes_the_final_newline`, `aggregate_halves_are_derived_from_the_records`, `cli_records_a_real_commit_and_refuses_a_malformed_one`, `a_non_compaction_configuration_change_changes_source_provenance`, `live_plan_replays_the_fixed_history_before_the_first_live_request`, `live_and_scripted_plans_replay_identical_history_and_workspaces` | met | Requirement retention is literal-substring matching against each task's stated requirements; file recall is from the recorded tool results; completion is the task's hidden check in Bubblewrap. `session_configuration` and `compaction_policy` are separate identities (decision 15). |
 | The offline matrix proves mechanics and is separate from explicit live checks | `offline_pipeline_is_deterministic_complete_and_does_not_leak_the_check`, `the_hidden_check_runs_inside_the_sandbox_and_never_on_the_host`, `hidden_check_publication_refuses_links_and_existing_paths`, `a_failed_compaction_skips_the_probe_and_the_hidden_check`, `a_probe_failure_is_attributed_and_skips_the_hidden_check`, `a_stalled_probe_times_out_and_the_continuation_never_runs`, `a_successful_live_plan_reaches_completion_without_offline_reply_leakage`, `hidden_check_cleanup_preserves_a_replaced_regular_file` | met | The offline target runs the full pipeline with `ScriptedProvider` and is required in both CI jobs. Live mode is `scripts/eval.sh --live --yes`, opt-in, bounded, never in CI, and needs `DEEPSEEK_API_KEY`. |
@@ -145,6 +145,41 @@ in this acceptance step. The table describes what their assertions protect.
 | Cover a pinned turn | `c02_automatic_summaries_respect_pins`, `storage_refuses_a_compaction_covering_a_pinned_turn` | Controlled turns stay outside coverage. |
 | Send an excluded turn to the summarizer | `summarizer_never_receives_a_controlled_entry` | Controlled entries are absent from narrowed source. |
 
+## Evidence log — M7-01, 2026-11-03
+
+Source commit: `8724ff6` (`test: add provider selection to opt-in live TUI smoke`)
+on this host. One paid invocation of `scripts/live-check.sh deepseek`, exit 0,
+with the supplied key passed inline through the environment; no retries:
+
+```text
+live deepseek: model=deepseek-flash context=1000000 max_output=384000 request_max_output=4096
+streamed tool turn: pass (completed)
+tool round trip: pass
+usage: pass (input=172 output=45)
+thinking replay turn: pass (completed)
+thinking replay: pass (2 block(s) replayed, continuation completed)
+summary: pass
+```
+
+The initially specified key file did not exist. That initial invocation printed
+`live deepseek: skipped (no DEEPSEEK_API_KEY)` and exited 77 without an API call.
+A replacement was supplied through the private secret prompt before the paid
+run; no alternate credential source or copied key file was used. Only sanitized
+example output is recorded, never raw logs, headers, account IDs or requests.
+
+Both live TUI smokes also passed once at this commit: Codex `gpt-6.1-sol` and
+DeepSeek `deepseek-flash`, exit 0, completed answer and terminal restored. Their
+sanitized outputs are in [M5's Evidence log](milestone-5-acceptance.md#evidence-log--m7-01-2026-11-03).
+Anthropic live compatibility and live cross-provider switching were not attempted
+and remain partial: no `ANTHROPIC_API_KEY` was supplied.
+
+The M7-01 full gate `CARGO_NET_OFFLINE=true ./scripts/check.sh` passed with
+exit 0 under a 3,900-second timeout: 44 test-result groups, 1,257 passing test
+executions, zero failures. This includes the unchanged offline PTY scenarios,
+required sandbox/security suites and offline evaluation. `cargo fmt --all` was
+run; only this worktree's `target/` was used. No product source, dependency,
+ordinary CI live-call policy or gate script changed.
+
 ## Partial rows
 
 | Item | What is missing | Where it belongs |
@@ -152,8 +187,8 @@ in this acceptance step. The table describes what their assertions protect.
 | A general quality ranking of the three strategies | Four fixed, prose-heavy tasks × one repetition per matrix; lexical matchers; one probe turn; no LLM judge. This cannot estimate variation or significance, and `multi-file-change` scores 0/3 on the probe in every arm. | Future evaluation with a larger suite and repetitions. Not inferred from M6. |
 | `observation_masking` as a memory product | Masking is lossy for observations, guarantees neither a shorter projection nor workspace rollback, and grew the estimated projection (+6.0%) on this suite. The default is the user's measured provisional choice (2026-11-02, decision 18), not a universal result. | [Context experiments: Limits](context-experiments.md#limits) and ADR 0026's m6-07 amendment. |
 | Live Anthropic compatibility and cross-provider live switching | One live run with `ANTHROPIC_API_KEY` | Carried from M4/M5; ADR 0018/0020. Outside M6. |
-| Live TUI end-to-end | One completed live answer in the TUI; the M5 smoke hit `rate_limit` | Carried from M5; opt-in procedure. M6's TUI controls are covered offline through the production loop. |
-| `scripts/live-check.sh deepseek` | The m6-00 step had no key, so that script's pass path was unrun; the live DeepSeek endpoint is proven by the two matrices instead | ADR 0024's opt-in check remains available. |
+| Live TUI end-to-end (closed 2026-11-03) | None for the live-answer smoke: Codex `gpt-6.1-sol` and DeepSeek `deepseek-flash` passed at `8724ff6` | **Met**; M5 Evidence log. M6's TUI controls remain covered offline through the production loop. |
+| `scripts/live-check.sh deepseek` (closed 2026-11-03) | None: `deepseek-flash` passed streamed tool turn, tool round trip, usage and thinking replay on this host at `8724ff6` | **Met**; Evidence log above, exit 0. Historical m6-00 skip is not treated as a pass. |
 | Exact token counts and workspace rollback | Estimator-only byte counts; no tokenizer and no filesystem checkpointing | ADR 0026 / roadmap “Outside v0.1”. |
 
 ## Known limits recorded by this milestone
@@ -170,7 +205,7 @@ in this acceptance step. The table describes what their assertions protect.
 - **Controls are whole turns.** There is no per-entry pin, no control of an
   unfinished turn, and no rewrite: undo is another control.
 - **Live evidence is DeepSeek Flash only** (plus the catalog row for Pro), with a
-  small fixed suite. No Anthropic or OpenAI live comparison was run for M6.
+  small fixed suite. No Anthropic or OpenAI strategy comparison was run for M6; M7-01's Codex TUI smoke is separate live-answer evidence, not a strategy comparison.
 - **No paid request is part of CI.** `scripts/eval.sh --live` is opt-in, bounded
   and requires an explicit `--yes` and a key; ordinary tests are offline.
 

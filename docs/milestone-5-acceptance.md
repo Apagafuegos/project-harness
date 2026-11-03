@@ -3,9 +3,9 @@
 Milestone 5, “Ratatui client”, is complete within its agreed scope as of
 **2026-10-31**. This maps every sentence-level criterion in
 [roadmap §5](roadmap.md#5-ratatui-client--complete) and the behavioral settled
-decisions 1–4, 9–11 and 14 to evidence that runs in the gate. The live TUI
-end-to-end run met the subscription's Codex quota limit and is recorded as
-partial below; nothing else in scope is uncovered.
+decisions 1–4, 9–11 and 14 to evidence that runs in the gate. The original live
+TUI run hit the subscription's Codex quota limit; the M7-01 evidence below
+closes that limitation on 2026-11-03. Nothing else in scope is uncovered.
 
 Status: **met** means covered within the agreed milestone scope; **partial**
 means a recorded limitation with its owning decision or later milestone named;
@@ -50,7 +50,7 @@ engine boundary and the terminal lifecycle are recorded in
 | Decision **9**: key map, dismiss denies, durable quit | `every_decision_9_key_binding`, `approval_modal_captures_a_d_r_and_esc`, `approval_allow_deny_and_dismiss`, `esc_cancel_and_double_ctrl_c_quit_are_durable`, `streamed_answer_paste_resize_and_ctrl_d`, `dialogs_render_and_map_keys_without_the_loop` | met | Enter sends, Shift/Alt+Enter newline, Esc cancels, Ctrl-C cancels then quits within the busy period, Ctrl-D quits on an empty prompt, quit mid-turn cancels durably first, and the modal captures input until answered. |
 | Decision **10**: `ask` unchanged and scriptable | `exact_stdout_streamed_answer_and_reasoning_only_on_stderr`, `continue_session_preserves_history_without_reprinting_old_answer`, `stdin_dash_is_prompt_not_approval_input`, `lag_resets_preserve_exact_stdout_without_duplicates`, `budget_failure_is_1_without_opening_provider`, `ask_help_and_usage_errors` | met | Only assistant text reaches stdout; approvals use `/dev/tty`; exit codes and flags are unchanged by M5. The TUI and `ask` share `wiring`, not state. |
 | Decision **14**: catalog accessor is the only core addition | `iter_lists_every_model_in_instance_then_name_order`, `empty_catalog_and_strays_are_ignored`, `live_writer_is_busy_and_listing_never_takes_exclusive_lock_or_changes_bytes`, `torn_corrupt_unsupported_and_unsafe_sessions_stay_listed_without_changes`, `sessions_help_empty_missing_and_relative_root` | met | `ModelCatalog::iter()` is read-only and ordered by instance then model name. `DataRoot::sessions()` is the read-only catalog; listing takes a shared lock, writes nothing and repairs nothing. |
-| Product goal: a real coding session end to end in the TUI | `streamed_answer_paste_resize_and_ctrl_d`, `approval_allow_deny_and_dismiss`, `opening_another_and_back_releases_old_writer_durably_and_new_session`, `branch_selection_reprojects_and_edit_resubmit_preserves_original_sibling`, `actual_crash_uncertain_resolution_then_next_turn`; opt-in live `tui` below | partial | The offline evidence runs a real streamed turn, a real approved write through the tool host, durable handover, branch re-projection and crash resolution. The single live run stopped at the subscription `rate_limit` before answering, so live end-to-end is not claimed (see Live checks). |
+| Product goal: a real coding session end to end in the TUI | `streamed_answer_paste_resize_and_ctrl_d`, `approval_allow_deny_and_dismiss`, `opening_another_and_back_releases_old_writer_durably_and_new_session`, `branch_selection_reprojects_and_edit_resubmit_preserves_original_sibling`, `actual_crash_uncertain_resolution_then_next_turn`; opt-in live `tui` below | met | The offline evidence runs a real streamed turn, a real approved write through the tool host, durable handover, branch re-projection and crash resolution. On 2026-11-03, commit `8724ff6`, both live PTY smokes completed a pong answer and restored the terminal (Codex `gpt-6.1-sol`, DeepSeek `deepseek-flash`, exit 0). The live smoke proves answer/quit/restoration, not a live coding/tool workflow; the latter remains offline evidence. |
 
 ## Running the evidence
 
@@ -147,19 +147,65 @@ summary: fail
 The verifier reached the real binary under a PTY, the subscription reported
 `rate_limit`, and the binary still restored the terminal and exited zero; only
 the assertion that an answer arrived failed. This is a quota state, not a
-product failure, and no live TUI answer is claimed. Re-run
-`scripts/live-check.sh tui` once quota is available; it remains outside
-`check.sh` and CI.
+product failure, and that run establishes no live TUI answer. It is superseded
+for the live-answer criterion by the passing M7-01 evidence below. The smoke
+remains outside `check.sh` and CI.
 
 An earlier invocation of the same command (10:43 UTC) produced no output at all
 because the surrounding agent run ended mid-command; it is not evidence and is
 not counted as a result.
 
+## Evidence log — M7-01, 2026-11-03
+
+Source commit: `8724ff6` (`test: add provider selection to opt-in live TUI smoke`)
+on this host. Each paid smoke ran once, with no retries. These are sanitized
+outputs; the two verbose termios Debug lines per run are normalized to the
+verified equality below. No raw screen capture, session content or credentials
+are retained. The PTY verifier also requires `completed` and the answer in
+addition to the echoed prompt before quitting.
+
+### `scripts/live-check.sh tui --provider openai` — exit 0
+
+```text
+live tui: provider=openai
+auth=codex
+model=gpt-6.1-sol
+termios before/after: identical
+sequences: enter alternate, enable paste, disable paste, leave alternate, show cursor; exit=0; pong observed
+summary: pass
+```
+
+### `scripts/live-check.sh tui --provider deepseek` — exit 0
+
+```text
+live tui: provider=deepseek
+model=deepseek-flash
+termios before/after: identical
+sequences: enter alternate, enable paste, disable paste, leave alternate, show cursor; exit=0; pong observed
+summary: pass
+```
+
+M7-01 negative-input checks (no paid calls, no persistent changes):
+
+```text
+live tui: provider=deepseek
+skipped (no DEEPSEEK_API_KEY)
+exit: 0
+usage: tui_smoke BINARY [--provider openai|deepseek]
+exit: 2
+usage: scripts/live-check.sh tui [--provider openai|deepseek]
+exit: 2
+```
+
+The latter two invocations passed `--provider unknown`. The missing-key run
+removed the key from the child environment only; no source mutation remained
+to revert. The offline PTY tests retain their existing scenarios and assertions.
+
 ## Partial rows
 
 | Item | What is missing | Where it belongs |
 | --- | --- | --- |
-| Live TUI end-to-end | One completed live answer in the TUI; the run hit `rate_limit` | Opt-in live procedure, [development](../docs/development.md#using-the-tui); no product change |
+| Live TUI end-to-end (closed 2026-11-03) | None for the live-answer smoke: Codex `gpt-6.1-sol` and DeepSeek `deepseek-flash` passed on this host at `8724ff6` | **Met**; Evidence log above. Original rate-limit evidence is preserved; no product change. |
 | Anthropic live compatibility | `ANTHROPIC_API_KEY` and one live run | Carried from M4; ADR 0018 |
 | Cross-provider live switching | A live OpenAI → Anthropic → OpenAI session | Carried from M4; ADR 0020 amendment |
 | Exact token counts | The inspector shows labelled heuristic estimates | Carried from M4; a tokenizer decision |
