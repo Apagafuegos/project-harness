@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
   pull_request:
 
@@ -20,7 +21,7 @@ jobs:
     name: Rust workspace
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the repository toolchain
         run: rustup toolchain install
       - name: Install Bubblewrap and load the reviewed CI profile
@@ -30,6 +31,8 @@ jobs:
           bwrap --version
       - name: Fetch locked dependencies (bootstrap only)
         run: CARGO_NET_OFFLINE=false cargo fetch --locked
+      - name: Test release tooling (offline)
+        run: ./scripts/with-offline-network.sh ./scripts/test-release.sh
       - name: Validate (including required S02 security suite)
         # Do not carry the runner's non-CLOEXEC pipe into the test harness.
         run: ./scripts/with-offline-network.sh ./scripts/with-clean-fds.sh ./scripts/check.sh
@@ -41,7 +44,7 @@ jobs:
     # Pinned: the AppArmor userns restriction is image-specific (ADR 0008).
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install the repository toolchain
         run: rustup toolchain install
       - name: Install Bubblewrap
@@ -76,7 +79,7 @@ jobs:
             jq '{summary, bubblewrap: {version: .bubblewrap.version, setuid: .bubblewrap.setuid, failures: .bubblewrap.failures, host_maps: .bubblewrap.probe.host_maps, stderr: .bubblewrap.probe.stderr}, cgroup: {bus_source: .cgroup.bus_source, reason: .cgroup.reason, stderr: .cgroup.probe.stderr}, host}' "$report"
             echo '```'
           done >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: harness-doctor

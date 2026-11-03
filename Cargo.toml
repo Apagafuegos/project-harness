@@ -7,6 +7,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 publish = false
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Apagafuegos/project-harness"
 
 [workspace.dependencies]
 unicode-segmentation = "1.13.3"
@@ -33,6 +35,13 @@ tempfile = "3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# Terminal and runtime cleanup must retain unwinding (ADR 0023).
+panic = "unwind"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

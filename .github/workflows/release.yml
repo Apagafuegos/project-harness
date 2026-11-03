@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and upload artifacts without publishing (dispatch never publishes)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_NET_OFFLINE: "true"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      epoch: ${{ steps.version.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check tag against workspace version before building
+        id: version
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+        run: ./scripts/release-version.sh
+
+  # Same jobs/steps as ordinary CI, not a second copy of check.sh provisioning.
+  verify:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: [version, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.version.outputs.epoch }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      RELEASE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Provision pinned Rust, native musl C compiler and dependencies
+        run: |
+          rustup toolchain install
+          rustup target add "$RELEASE_TARGET"
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools file binutils
+          CARGO_NET_OFFLINE=false cargo fetch --locked --target "$RELEASE_TARGET"
+      - name: Build static binary (no external network)
+        run: |
+          ./scripts/with-offline-network.sh cargo build --release --locked -p harness --bin harness --target "$RELEASE_TARGET"
+      - name: Verify static linking and smoke (no external network)
+        run: |
+          binary="target/$RELEASE_TARGET/release/harness"
+          file "$binary"
+          file "$binary" | grep -E 'statically linked|static-pie linked'
+          ! readelf -l "$binary" | grep INTERP
+          test "$(./scripts/with-offline-network.sh "$binary" --version)" = "harness $RELEASE_VERSION"
+          ./scripts/with-offline-network.sh "$binary" --help
+          ./scripts/with-offline-network.sh "$binary" doctor --help
+      - name: Package and prove byte-reproducible archives
+        run: |
+          ./scripts/package-release.sh "$RELEASE_VERSION" "$RELEASE_TARGET" "target/$RELEASE_TARGET/release/harness" dist
+          ./scripts/package-release.sh "$RELEASE_VERSION" "$RELEASE_TARGET" "target/$RELEASE_TARGET/release/harness" repeat
+          cmp "dist/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz" "repeat/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz"
+          rm -rf repeat
+          tar tzvf "dist/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: harness-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  package:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: harness-*
+          merge-multiple: true
+          path: dist
+      - name: Check both archives and generate sorted checksums
+        working-directory: dist
+        run: |
+          test "$(find . -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 2
+          LC_ALL=C sha256sum *.tar.gz > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: [version, package]
+    # Even a dispatch on a tag with dry_run=false cannot publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify assets and publish the existing tag only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        working-directory: dist
+        run: |
+          sha256sum -c SHA256SUMS
+          # Regenerate and compare, rather than trusting only the artifact manifest.
+          LC_ALL=C sha256sum *.tar.gz > SHA256SUMS.checked
+          cmp SHA256SUMS SHA256SUMS.checked
+          rm SHA256SUMS.checked
+          gh release create "$RELEASE_TAG" --verify-tag --target "$RELEASE_SHA" \
+            --title "$RELEASE_TAG" --generate-notes ./*.tar.gz SHA256SUMS

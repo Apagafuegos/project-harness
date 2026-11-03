@@ -791,6 +791,98 @@ Loopback fixture sockets are intentional; “offline” means no external networ
 not no sockets. CI checkout/toolchain/apt/dependency provisioning does use the
 network; it is not part of the offline validation claim.
 
+## Releases
+
+The release pipeline is defined in `.github/workflows/release.yml` and
+[ADR 0029](decisions/0029-release-pipeline.md). It ships prebuilt static Linux
+musl binaries for x86_64 and aarch64, not crates.io packages. The native runners
+are pinned to `ubuntu-24.04` and `ubuntu-24.04-arm`; apt `musl-tools` supplies
+the native musl C compiler for ring. No OpenSSL or aws-lc occurs in the locked
+normal/build dependency tree. Rust's target libraries complete static linking.
+
+The distributable profile is thin LTO, one codegen unit, stripped symbols and
+`panic = "unwind"`. Inspection of `TerminalGuard` in `tui/runtime.rs` confirms
+both the pre-diagnostic restoration hook and its `Drop` cleanup; the existing
+feature-enabled PTY panic test runs in `check.sh`. Do not change this to abort.
+
+### Local candidate measurement (M7-07)
+
+On this aarch64 Linux host with Rust 1.99.1, the **only** local release build was:
+
+```sh
+CARGO_NET_OFFLINE=true cargo build --release --locked -p harness --bin harness \
+  --target aarch64-unknown-linux-musl
+```
+
+It completed in **266 seconds** (Cargo: 4m 26s), with a binary of
+**10,427,912 bytes**. `file` reports a stripped, statically linked AArch64 ELF;
+`ldd` reports `not a dynamic executable`, and `readelf -d` finds no dynamic
+section. Smoke checks passed: `harness 0.1.0`, `--help`, and `doctor --help`.
+Before-profile and aarch64-gnu baselines are **unavailable**: decision 15 limits
+local validation to this one musl build. No comparative size/time delta is
+claimed. Release dependency/incremental artifacts and test archives are removed
+after measuring; only this worktree's `target/` is used.
+
+### Release operations
+
+After all milestone acceptance, an authorized maintainer bumps
+`[workspace.package] version`, updates `Cargo.lock` and the changelog, and merges
+only after ordinary CI passes. To cut a release (not part of M7-07 validation):
+
+```sh
+# Example only: use the agreed version, and only after acceptance.
+git tag -a v0.1.0 -m 'Release v0.1.0'
+git push origin v0.1.0
+```
+
+A tag must exactly equal `v` plus the workspace version. The version job refuses
+mismatches before building; `verify` reuses both ordinary CI jobs without
+forking their provisioning or gates. The build matrix compiles offline, checks
+static linking, runs version/help/doctor-help, and packages twice to prove
+byte-identical tarballs. The package job generates `SHA256SUMS` and uploads the
+complete asset set. Only a tag-push publish job can write repository contents;
+it uses preinstalled `gh release create --verify-tag` and never creates a tag.
+Dispatch is always non-publishing, even if `dry_run=false` or the ref is a tag:
+
+```sh
+gh workflow run release.yml --ref m7-release-pipeline -f dry_run=true
+```
+
+For a newly introduced workflow, GitHub may require default-branch registration
+first. In that case the implementer hands off local and ordinary exact-head CI
+results with dispatch **pending**. Under decision 15 the orchestrator integrates
+the exact reviewed SHA after review, then dispatches and verifies both targets
+and artifacts **before accepting M7-07**; registration creates no tag or Release.
+If the native ARM job is unavailable or queues longer than 20 minutes, arrange
+and prove the apt-only cross-compile fallback described in the brief before
+acceptance. No unproven fallback or reduced target set is accepted.
+
+Archives contain `harness`, both licenses, README, CHANGELOG and, when present,
+`docs/user-guide.md` beneath `harness-VERSION-TARGET/`. A missing user guide
+produces a note until M7-09 supplies it. Packaging uses sorted GNU tar entries,
+normalized modes/ownership, commit-time `SOURCE_DATE_EPOCH`, and `gzip -n`.
+For the same binary/documents/epoch/tool versions, the tarballs are reproducible;
+this does not claim cross-toolchain binary reproducibility. To package locally:
+
+```sh
+export SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+./scripts/package-release.sh 0.1.0 aarch64-unknown-linux-musl \
+  target/aarch64-unknown-linux-musl/release/harness target/release-assets
+```
+
+Download `SHA256SUMS` and both archives from the same Release, then verify:
+
+```sh
+sha256sum -c SHA256SUMS
+tar tzvf harness-0.1.0-aarch64-unknown-linux-musl.tar.gz
+```
+
+Dry-run artifacts expire after one day. After inspection, delete each run's
+artifacts with `gh api -X DELETE repos/Apagafuegos/project-harness/actions/artifacts/ID`
+to avoid private-repository storage usage. Build/smoke network is restricted;
+checkout, provisioning, artifact transfers and publishing necessarily use the
+network. Never supply credentials to offline tests or tarballs.
+
 ## Secrets and runtime data
 
 Ordinary tests/examples require no credentials and never read the real Codex
