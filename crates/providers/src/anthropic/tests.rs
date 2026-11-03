@@ -2775,3 +2775,21 @@ mod deepseek {
         );
     }
 }
+
+#[test]
+fn http_unknown_error_types_are_sensitive() {
+    let sentinel = "SENTINEL-CREDENTIAL-ERROR-TYPE";
+    let original = ModelError {
+        code: ModelErrorCode::ProviderFailure,
+        message: "safe".into(),
+        provider_code: Some("http_500".into()),
+        retry_after_ms: None,
+    };
+    let body = serde_json::to_vec(&json!({"error":{"type":sentinel,"message":sentinel}})).unwrap();
+    let model = super::refine_http(original, &body);
+    assert_eq!(model.provider_code.as_deref(), Some("http_500"));
+    assert!(
+        !serde_json::to_string(&model).unwrap().contains(sentinel),
+        "credential leaked"
+    );
+}

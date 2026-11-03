@@ -82,6 +82,8 @@ jobs:
           test "$(./scripts/with-offline-network.sh "$binary" --version)" = "harness $RELEASE_VERSION"
           ./scripts/with-offline-network.sh "$binary" --help
           ./scripts/with-offline-network.sh "$binary" doctor --help
+      - name: Collect dependency licences and corresponding source locations
+        run: ./scripts/third-party-notices.sh target/third-party-notices
       - name: Package and prove byte-reproducible archives
         run: |
           ./scripts/package-release.sh "$RELEASE_VERSION" "$RELEASE_TARGET" "target/$RELEASE_TARGET/release/harness" dist

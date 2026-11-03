@@ -382,7 +382,7 @@ fn refine_http(profile: Profile, mut model: ModelError, body: &[u8]) -> ModelErr
     if !precedent {
         model.code = events::classify(code, message);
     }
-    if let Some(code) = code {
+    if let Some(code) = code.and_then(events::safe_provider_code) {
         model.provider_code = Some(code.to_owned());
     }
     model.message = events::safe_message(model.code, profile);

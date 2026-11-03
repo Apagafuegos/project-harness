@@ -36,6 +36,11 @@ install -m 755 -- "$binary" "$stage/$name/harness"
 for doc in LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md; do
     install -m 644 -- "$root/$doc" "$stage/$name/$doc"
 done
+# Dependency notices are generated once from locked sources by the release job.
+notices=$root/target/third-party-notices
+[[ -s $notices/INDEX.txt ]] || { echo 'generate target/third-party-notices first' >&2; exit 2; }
+cp -R -- "$notices" "$stage/$name/third-party-notices"
+find "$stage/$name/third-party-notices" -type f -exec chmod 644 {} +
 if [[ -f $root/docs/user-guide.md ]]; then
     mkdir -- "$stage/$name/docs"
     install -m 644 -- "$root/docs/user-guide.md" "$stage/$name/docs/user-guide.md"
@@ -49,6 +54,13 @@ tar --sort=name --format=gnu --mtime="@$SOURCE_DATE_EPOCH" \
     gzip -n -9 >"$stage/archive.tar.gz"
 # Independent required-content manifest: omitting a copy above must fail here.
 {
+    find "$notices" -printf '%P\n' | while IFS= read -r rel; do
+        if [[ -d $notices/$rel ]]; then
+            printf '%s/\n' "$name/third-party-notices${rel:+/$rel}"
+        else
+            printf '%s\n' "$name/third-party-notices/$rel"
+        fi
+    done
     printf '%s\n' "$name/" "$name/harness" "$name/LICENSE-MIT" \
         "$name/LICENSE-APACHE" "$name/README.md" "$name/CHANGELOG.md"
     if [[ -f $root/docs/user-guide.md ]]; then
@@ -60,6 +72,7 @@ if ! diff -u "$stage/expected" "$stage/actual"; then
     echo 'archive content self-check failed' >&2
     exit 1
 fi
+tar -xOf "$stage/archive.tar.gz" "$name/third-party-notices/INDEX.txt" | cmp - "$notices/INDEX.txt"
 for doc in LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md; do
     tar -xOf "$stage/archive.tar.gz" "$name/$doc" | cmp - "$root/$doc"
 done

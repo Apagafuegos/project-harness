@@ -109,3 +109,31 @@ fn artifact_gc_serializes_selection_and_unlink_with_dedupe_reuse() {
     );
     root.verify_artifact(&reference).unwrap();
 }
+
+#[test]
+fn journal_export_checks_the_copied_bytes_not_only_the_verified_source() {
+    let (temp, root, store) = fresh();
+    let id = store.snapshot().session_id().clone();
+    let artifact = store.snapshot().configuration().clone();
+    drop(store);
+    let path = root.path().join("artifacts").join(artifact.sha256.as_str());
+    let original = fs::read(&path).unwrap();
+    let (verified, finish_copy) = gate(&root, Point::ExportArtifactVerified);
+    let destination = temp.path().join("copy");
+    let exporter = {
+        let root = root.clone();
+        let destination = destination.clone();
+        std::thread::spawn(move || root.export_journal(&id, &destination))
+    };
+    verified.blocking_recv().unwrap();
+    let mut corrupt = original.clone();
+    corrupt[0] ^= 1;
+    fs::write(&path, &corrupt).unwrap();
+    finish_copy.send(()).unwrap();
+    assert!(matches!(
+        exporter.join().unwrap(),
+        Err(MaintenanceError::ArtifactInvalid(_))
+    ));
+    assert!(!destination.join("sessions").exists());
+    assert!(!destination.join("artifacts").exists());
+}

@@ -414,9 +414,32 @@ fn provider_error(profile: Profile, value: Option<&Value>) -> ModelError {
         code: mapped,
         // The provider's own message may quote request content; use a fixed one.
         message: safe_message(mapped, profile),
-        provider_code: code.map(str::to_owned),
+        provider_code: code.and_then(safe_provider_code).map(str::to_owned),
         retry_after_ms: None,
     }
+}
+
+// Only protocol vocabulary may enter a journal; arbitrary codes can echo keys.
+pub(super) fn safe_provider_code(code: &str) -> Option<&'static str> {
+    const KNOWN: &[&str] = &[
+        "context_length_exceeded",
+        "rate_limit_exceeded",
+        "insufficient_quota",
+        "usage_limit_reached",
+        "billing_hard_limit_reached",
+        "invalid_api_key",
+        "authentication_error",
+        "token_expired",
+        "invalid_request_error",
+        "invalid_prompt",
+        "invalid_value",
+        "missing_required_parameter",
+        "unknown_parameter",
+        "model_not_found",
+        "limit_exceeded",
+        "server_error",
+    ];
+    KNOWN.iter().copied().find(|known| *known == code)
 }
 
 /// Provider error code to normalized category.

@@ -36,6 +36,10 @@ jobs:
           bwrap --version
       - name: Fetch locked dependencies (bootstrap only)
         run: CARGO_NET_OFFLINE=false cargo fetch --locked
+      - name: Collect dependency notices (offline)
+        run: ./scripts/third-party-notices.sh target/third-party-notices
+      - name: Test history scanner (offline, synthetic markers)
+        run: ./scripts/test-history-scan.sh
       - name: Test release tooling (offline)
         run: ./scripts/with-offline-network.sh ./scripts/test-release.sh
       - name: Validate (including required S02 security suite)

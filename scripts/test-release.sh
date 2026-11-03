@@ -21,6 +21,8 @@ if ./scripts/release-version.sh >"$scratch/wrong-tag.log" 2>&1; then
 fi
 grep 'does not match workspace version' "$scratch/wrong-tag.log"
 test ! -s "$GITHUB_OUTPUT"
+# Use the real locked dependency notices (generated separately; no Cargo here).
+test -s target/third-party-notices/INDEX.txt
 export SOURCE_DATE_EPOCH=1700000000
 binary=${1:-/bin/true}
 (
@@ -33,6 +35,10 @@ binary=${1:-/bin/true}
 )
 cmp "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" \
     "$scratch/second/harness-$version-aarch64-unknown-linux-musl.tar.gz"
+tar -tzf "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" | grep '/third-party-notices/INDEX.txt$'
+tar -xOf "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" \
+    "harness-$version-aarch64-unknown-linux-musl/third-party-notices/imbl-7.0.2/LICENSE-MPL-2.0" | cmp - docs/security/licenses/MPL-2.0.txt
+# A packaging regression dropping notices must fail independently of generation.
 if SOURCE_DATE_EPOCH=invalid ./scripts/package-release.sh "$version" aarch64-unknown-linux-musl "$binary" "$scratch/invalid" >"$scratch/invalid.log" 2>&1; then
     echo 'invalid epoch unexpectedly accepted' >&2
     exit 1

@@ -1179,3 +1179,20 @@ fn age(path: PathBuf, days: u64) {
         .unwrap();
     let _: &Path = &path;
 }
+
+#[test]
+fn export_refuses_symlink_outputs_without_touching_the_target() {
+    let _serial = serial();
+    let f = fixture();
+    let outside = f._temp.path().join("outside");
+    fs::write(&outside, b"keep").unwrap();
+    let linked = f._temp.path().join("link");
+    std::os::unix::fs::symlink(&outside, &linked).unwrap();
+    for result in [
+        f.root.export_markdown_to(&f.id, &linked, false),
+        f.root.export_journal(&f.id, &linked),
+    ] {
+        assert!(matches!(result, Err(MaintenanceError::Exists)));
+    }
+    assert_eq!(fs::read(outside).unwrap(), b"keep");
+}

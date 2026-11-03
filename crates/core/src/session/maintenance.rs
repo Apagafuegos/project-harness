@@ -546,6 +546,7 @@ fn copy_artifact(root: &DataRoot, directory: &File, digest: &Digest) -> Result<(
     };
     root.verify_artifact(&reference)
         .map_err(|_| MaintenanceError::ArtifactInvalid(digest.clone()))?;
+    root.io.check(super::io::Point::ExportArtifactVerified)?;
     let mut source = root.artifact_file(digest)?;
     let mut target = fs::openat(
         directory,
@@ -554,6 +555,8 @@ fn copy_artifact(root: &DataRoot, directory: &File, digest: &Digest) -> Result<(
         Mode::RUSR | Mode::WUSR,
     )
     .map(File::from)?;
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
     let mut copied = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -562,11 +565,13 @@ fn copy_artifact(root: &DataRoot, directory: &File, digest: &Digest) -> Result<(
             break;
         }
         copied += read as u64;
+        hasher.update(&buffer[..read]);
         target.write_all(&buffer[..read])?;
     }
     target.flush()?;
     target.sync_all()?;
-    if copied != reference.bytes {
+    if copied != reference.bytes || format!("{:x}", hasher.finalize()) != reference.sha256.as_str()
+    {
         return Err(MaintenanceError::ArtifactInvalid(digest.clone()));
     }
     Ok(())

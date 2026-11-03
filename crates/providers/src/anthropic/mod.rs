@@ -451,7 +451,7 @@ fn refine_http(mut model: ModelError, body: &[u8]) -> ModelError {
     if !precedent {
         model.code = classify(kind, message);
     }
-    if let Some(kind) = kind {
+    if let Some(kind) = kind.and_then(events::safe_provider_code) {
         model.provider_code = Some(kind.to_owned());
     }
     model.message = safe_message(model.code);

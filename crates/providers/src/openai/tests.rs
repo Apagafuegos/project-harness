@@ -1630,3 +1630,23 @@ pub(crate) mod tests_support {
         }
     }
 }
+
+#[test]
+fn unknown_error_codes_are_sensitive_in_http_and_streams() {
+    let sentinel = "SENTINEL-CREDENTIAL-ERROR-CODE";
+    let original = ModelError {
+        code: ModelErrorCode::ProviderFailure,
+        message: "safe".into(),
+        provider_code: Some("http_500".into()),
+        retry_after_ms: None,
+    };
+    let body = serde_json::to_vec(&json!({"error":{"code":sentinel,"message":sentinel}})).unwrap();
+    for profile in [Profile::Platform, Profile::ChatGptCodex] {
+        let model = super::refine_http(profile, original.clone(), &body);
+        assert_eq!(model.provider_code.as_deref(), Some("http_500"));
+        assert!(
+            !serde_json::to_string(&model).unwrap().contains(sentinel),
+            "credential leaked"
+        );
+    }
+}

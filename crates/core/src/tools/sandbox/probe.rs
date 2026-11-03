@@ -679,10 +679,7 @@ fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
         return unavailable(base, reason, Value::Null);
     }
     let scope = |command: &mut Command| {
-        // Only this child sees a derived runtime directory.
-        if let Some(dir) = &bus.runtime_dir {
-            command.env("XDG_RUNTIME_DIR", dir);
-        }
+        scope_environment(command, &bus);
         command
             .arg("--user")
             .arg("--scope")
@@ -734,6 +731,22 @@ fn cgroup_probe(programs: &Programs, bwrap_available: bool) -> Value {
     base["status"] = json!("available");
     base["probe"] = probe;
     base
+}
+
+// Match the runtime launcher's environment boundary. In particular, neither
+// provider credentials nor loader/shell startup variables may reach probes.
+fn scope_environment(command: &mut Command, bus: &Bus) {
+    command.env_clear().env("PATH", "/usr/bin:/bin");
+    if let Some(dir) = bus
+        .runtime_dir
+        .clone()
+        .or_else(|| std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+    {
+        command.env("XDG_RUNTIME_DIR", dir);
+    }
+    if let Some(address) = std::env::var_os("DBUS_SESSION_BUS_ADDRESS") {
+        command.env("DBUS_SESSION_BUS_ADDRESS", address);
+    }
 }
 
 /// Where `systemd-run --user` finds the user bus.
@@ -807,6 +820,40 @@ fn runtime_dir_check(dir: &Path, euid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_probe_environment_is_an_allowlist() {
+        let bus = Bus {
+            source: "derived",
+            runtime_dir: Some("/run/user/probe-test".into()),
+            reason: None,
+        };
+        let mut command = Command::new("/usr/bin/env");
+        // Also clear explicitly installed variables, not just inherited ones.
+        command.env("OPENAI_API_KEY", "SENTINEL-CREDENTIAL-PROBE");
+        command.env("LD_PRELOAD", "SENTINEL-LOADER-PROBE");
+        scope_environment(&mut command, &bus);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !text.contains("SENTINEL"),
+            "probe leaked an environment value"
+        );
+        for line in text.lines() {
+            let (name, _) = line.split_once('=').unwrap();
+            assert!(matches!(
+                name,
+                "PATH" | "XDG_RUNTIME_DIR" | "DBUS_SESSION_BUS_ADDRESS"
+            ));
+        }
+        assert!(text.lines().any(|line| line == "PATH=/usr/bin:/bin"));
+        assert!(
+            text.lines()
+                .any(|line| line == "XDG_RUNTIME_DIR=/run/user/probe-test")
+        );
+    }
 
     /// A `/run/user` stand-in holding `<euid>/bus` as a live socket.
     fn run_user() -> (tempfile::TempDir, PathBuf, std::os::unix::net::UnixListener) {

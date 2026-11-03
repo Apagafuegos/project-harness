@@ -1158,3 +1158,54 @@ fn fs_bash_and_foreign_workspace_plan_are_infrastructure_failures() {
     assert_code(execute(&view, &plan), ResultCode::InfrastructureFailure);
     assert!(!root.path().join("new").exists());
 }
+
+#[test]
+fn s01_fifo_and_device_nodes_are_not_read_or_mutated() {
+    let root = TempDir::new().unwrap();
+    let directory = std::fs::File::open(root.path()).unwrap();
+    rustix::fs::mkfifoat(
+        &directory,
+        "fifo",
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )
+    .unwrap();
+    let view = workspace(&root);
+    assert_eq!(view.inspect(&path("fifo")).unwrap().kind, FileKind::Other);
+    for (name, arguments) in [
+        ("read", json!({"path":"fifo"})),
+        ("write", json!({"path":"fifo","text":"x"})),
+        ("edit", json!({"path":"fifo","old_text":"x","new_text":"y"})),
+    ] {
+        assert_eq!(
+            plan(&view, name, arguments).unwrap_err().code,
+            ResultCode::NotRegularFile
+        );
+    }
+    // Existing character device: no root privilege and no mknod/skip required.
+    let dev =
+        FsWorkspace::open(std::path::Path::new("/dev"), &FsProtectedPaths::default()).unwrap();
+    assert_eq!(dev.inspect(&path("null")).unwrap().kind, FileKind::Other);
+    assert_eq!(
+        dev.read_text(&path("null"), 1).unwrap_err().code,
+        ResultCode::NotRegularFile
+    );
+}
+
+#[test]
+fn s01_long_paths_and_names_are_bounded_refusals() {
+    let root = TempDir::new().unwrap();
+    let view = workspace(&root);
+    let long = "n".repeat(256);
+    let refusal = plan(&view, "read", json!({"path":long})).unwrap_err();
+    assert_eq!(refusal.code, ResultCode::TooLarge);
+    assert!(refusal.detail.len() < 240);
+    assert!(WorkspacePath::new(&"n".repeat(4097)).is_err());
+    let longest = format!("{}n", "a/".repeat(2047));
+    assert!(WorkspacePath::new(&longest).is_ok());
+    assert_eq!(
+        plan(&view, "read", json!({"path":longest}))
+            .unwrap_err()
+            .code,
+        ResultCode::NotFound
+    );
+}

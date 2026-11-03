@@ -436,7 +436,18 @@ pub(crate) fn provider_error(
         _ => ModelErrorCode::ProviderFailure,
     };
     // Never copy arbitrary provider strings: even an unknown error type can echo a key.
-    let known = [
+    ModelError {
+        provider_code: safe_provider_code(native).map(str::to_owned),
+        retry_after_ms: retry
+            .or_else(|| v["retry_after_ms"].as_u64())
+            .or_else(|| v["error"]["retry_after_ms"].as_u64()),
+        ..error(code, profile.error_message())
+    }
+}
+
+// Unknown error types are sensitive response content, not diagnostics.
+pub(super) fn safe_provider_code(native: &str) -> Option<&'static str> {
+    const KNOWN: &[&str] = &[
         "authentication_error",
         "permission_error",
         "rate_limit_error",
@@ -446,11 +457,5 @@ pub(crate) fn provider_error(
         "api_error",
         "not_found_error",
     ];
-    ModelError {
-        provider_code: known.contains(&native).then(|| native.into()),
-        retry_after_ms: retry
-            .or_else(|| v["retry_after_ms"].as_u64())
-            .or_else(|| v["error"]["retry_after_ms"].as_u64()),
-        ..error(code, profile.error_message())
-    }
+    KNOWN.iter().copied().find(|known| *known == native)
 }

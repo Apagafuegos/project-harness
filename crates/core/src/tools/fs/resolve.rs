@@ -541,6 +541,11 @@ pub(super) fn read_range(
 
 pub(super) fn errno(error: Errno) -> Refusal {
     let (code, name, detail) = match error {
+        Errno::NAMETOOLONG => (
+            ResultCode::TooLarge,
+            "ENAMETOOLONG",
+            "path component too long",
+        ),
         Errno::LOOP => (ResultCode::SymlinkRejected, "ELOOP", "symlink rejected"),
         Errno::XDEV => (ResultCode::ProtectedPath, "EXDEV", "crosses a mount"),
         Errno::NOENT => (ResultCode::NotFound, "ENOENT", "target does not exist"),
