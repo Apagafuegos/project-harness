@@ -69,7 +69,10 @@ jobs:
           rustup target add "$RELEASE_TARGET"
           sudo apt-get update -q
           sudo apt-get install -y -q musl-tools file binutils
-          CARGO_NET_OFFLINE=false cargo fetch --locked --target "$RELEASE_TARGET"
+          # Every platform's locked sources, not just this target's: the notice
+          # collector resolves the whole lockfile offline as a conservative
+          # superset of either shipped binary.
+          CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Build static binary (no external network)
         run: |
           ./scripts/with-offline-network.sh cargo build --release --locked -p harness --bin harness --target "$RELEASE_TARGET"

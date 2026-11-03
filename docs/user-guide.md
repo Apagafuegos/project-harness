@@ -6,10 +6,11 @@ Branching and compaction never undo workspace changes.
 
 ## Install a prebuilt binary
 
-The repository is public and licensed `MIT OR Apache-2.0`. v0.1.0 publication
-is pending release acceptance/tagging; these instructions apply once its assets
-appear on the [GitHub Release](https://github.com/Apagafuegos/project-harness/releases).
-No Rust toolchain is needed to run a prebuilt binary.
+The repository is public and licensed `MIT OR Apache-2.0`. v0.1.0 assets are
+built and published from the `v0.1.0` tag; see the
+[GitHub Release](https://github.com/Apagafuegos/project-harness/releases). A
+missing archive means that release run is still in progress. No Rust toolchain
+is needed to run a prebuilt binary.
 
 Choose `x86_64-unknown-linux-musl` for Linux x86_64 (`uname -m`: `x86_64`), or
 `aarch64-unknown-linux-musl` for Linux ARM64 (`aarch64`). Download the matching
