@@ -1,0 +1,14 @@
+# Version updates for the SHA-pinned workflow actions. Cargo dependencies
+# change only deliberately (docs/development.md); vulnerable ones still get
+# Dependabot security-update pull requests from the repository setting.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci

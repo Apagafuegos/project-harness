@@ -146,6 +146,10 @@ evaluation harness and the chosen default; [context
 experiments](docs/context-experiments.md) records the two bounded live matrices
 and their limits. See the [roadmap](docs/roadmap.md).
 
+## Security
+
+Report vulnerabilities privately; see [SECURITY.md](SECURITY.md).
+
 ## License
 
 Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

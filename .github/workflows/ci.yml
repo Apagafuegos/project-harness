@@ -4,6 +4,11 @@ on:
   workflow_call:
   push:
   pull_request:
+  workflow_dispatch:
+  # Weekly on the default branch: catches runner-image drift in the pinned
+  # sandbox setup (ADR 0008) even when nothing is pushed.
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -13,7 +18,7 @@ env:
   CARGO_NET_OFFLINE: "true"
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

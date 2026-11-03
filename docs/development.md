@@ -795,6 +795,31 @@ Loopback fixture sockets are intentional; “offline” means no external networ
 not no sockets. CI checkout/toolchain/apt/dependency provisioning does use the
 network; it is not part of the offline validation claim.
 
+## Repository policy
+
+The GitHub repository is public. Its settings, which are not in the tree, are
+recorded here:
+
+- `main` has an active ruleset with no bypass actors. It cannot be deleted or
+  force-pushed, its history must be linear, and the two CI checks `Rust
+  workspace` and `Host sandbox security (S02)` (from GitHub Actions) must pass
+  on the exact commit, which must already contain `main`. Land work by pushing
+  a branch, waiting for green CI on its head, then fast-forwarding `main` to
+  that SHA or rebase-merging its pull request. A push of a commit without
+  passing checks is rejected. Rebase is the only pull request merge method.
+- Merged head branches are deleted automatically. Branches finished without a
+  pull request are deleted when they land.
+- Only repository administrators can create `v*` release tags; once created,
+  such tags cannot be moved or deleted.
+- CI also runs weekly on `main` and on manual dispatch. Workflow actions must be
+  GitHub-owned and pinned to a full commit SHA. Workflow runs from outside
+  contributors' pull requests wait for maintainer approval. The default workflow
+  token is read-only.
+- Secret scanning with push protection, Dependabot alerts and security updates,
+  CodeQL analysis of the workflows, and private vulnerability reporting are on.
+  Dependabot proposes weekly updates for the pinned actions only
+  (`.github/dependabot.yml`). See `SECURITY.md` for how to report a vulnerability.
+
 ## Releases
 
 The release pipeline is defined in `.github/workflows/release.yml` and
