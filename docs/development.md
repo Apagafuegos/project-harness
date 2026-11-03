@@ -40,10 +40,14 @@ print the compaction fixture's golden report, and two runs of the
 must match. Provider examples use attributed loopback fixtures, not credentials.
 It can also be invoked
 from another working directory. CI runs the same script with the repository
-toolchain. Validation uses debug level 1 and disables incremental artifacts so
-the default/conformance/test-provider matrix fits hosted-runner disk bounds;
-line-level debugging remains available and no test or security gate is skipped.
-Ordinary `cargo build` profiles are unchanged.
+toolchain. The workspace `dev` profile (also used by tests) gives workspace
+crates debug level 1, gives dependencies no debug information and disables
+incremental artifacts, so the default/conformance/test-provider matrix fits
+hosted-runner disk bounds. Line-level debugging remains available and no test
+or security gate is skipped. `check.sh` sets no profile overrides, so ordinary
+`cargo build` and `cargo test` share its artifacts instead of building a second
+set; avoid `CARGO_PROFILE_*` and `CARGO_INCREMENTAL` overrides for the same
+reason.
 
 The checks exercise J01–J03 storage behavior, the runtime core against real
 storage including crashes and recovery, the context builder and its golden

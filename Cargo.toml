@@ -36,6 +36,18 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 crossterm = { version = "0.29", default-features = false, features = ["events"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 
+# One development profile for check.sh, CI and ad-hoc cargo commands. Debug
+# level and incremental mode are part of an artifact's identity, so any
+# mismatch compiles and stores every crate twice. Workspace code keeps
+# line-level debug information for backtraces; dependencies carry none, which
+# makes every test binary cheaper to link. Incremental state is not cached.
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
