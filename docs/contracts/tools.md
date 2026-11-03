@@ -1,7 +1,11 @@
 # Contract 2: Tools
 
-Status: High-level behavior provisionally agreed; concrete interface and result
-format proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
+Status: Implemented v0.1 boundary. [RFC-001](../rfcs/001-core-types-state-persistence.md)
+is refined by accepted [policy](../decisions/0009-tool-policy.md),
+[pipeline](../decisions/0010-tool-pipeline.md),
+[file](../decisions/0011-trusted-file-tools.md),
+[sandbox](../decisions/0012-sandbox-backend.md) and
+[recovery](../decisions/0013-tool-recovery.md) decisions.
 
 ## Inputs and ownership
 
@@ -44,7 +48,23 @@ exit is an operation result, not a provider transport failure.
   the entire context merely because the command printed a large log.
 - Uncertain side effects are reconciled explicitly, never replayed automatically.
 
-The RFC specifies argument objects, literal single-match editing, write defaults,
-opaque authorized-operation types, scheduling, and limits. Execution restrictions
+Shipped argument objects reject unknown keys. `read` pages regular UTF-8 files
+(up to 1 MiB per range); `write` defaults to no overwrite and requires an existing
+parent; `edit` requires exactly one literal match, including overlapping matches.
+Writes/edits accept at most 1 MiB. Bash command bytes are bounded to 64 KiB,
+with workspace-relative cwd and 1–600,000 ms timeout (default 120,000 ms).
+File calls have 30-second deadlines. Output is bounded to 32 KiB inline and
+64 MiB captured per call; exceeding capture limits terminates the process.
+[Tool usage](../tools.md) records the precise result fields and limitations.
+
+Opaque `AuthorizedOperation` values bind the canonical plan, invocation,
+decision and policy revision; model JSON cannot manufacture them. Remembered
+grants are narrow configuration allowances, never a sandbox bypass. The clients
+refuse continuation with changed allowances (including remembered grants); see
+[the guide](../user-guide.md#continue-and-recorded-instructions). Execution restrictions
 are owned by [contract 3](execution-security.md); persistence is owned by
-[contract 4](sessions.md). Conformance cases T01–T02 and S01–S02 gate implementation.
+[contract 4](sessions.md). T01–T02 and S01–S02 are mapped to behavioral tests in
+[Milestone 3 acceptance](../milestone-3-acceptance.md):
+`crates/core/src/tools/tests.rs`, `runtime/tests/tool_gates.rs`,
+`runtime/tests/pipeline.rs`, `tools/fs/tests.rs` and the real sandbox/tool-host
+integration suites. Missing enforcement fails, never skips successfully.

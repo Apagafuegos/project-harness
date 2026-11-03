@@ -1,8 +1,7 @@
 # Contract 5: Context Management
 
-Status: Independent context projection, rolling summaries, automatic/manual
-compaction, and headless observability are provisionally agreed. Concrete types
-and algorithms are proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
+Status: Implemented v0.1 boundary. Accepted ADRs below refine the original
+[RFC-001](../rfcs/001-core-types-state-persistence.md) design.
 Projection of recorded history, the report, budgets and the inspection API are
 implemented under [decision 0006](../decisions/0006-context-builder.md). Summary
 generation, preview/commit, automatic triggering, whole-turn pins/exclusions and
@@ -24,19 +23,37 @@ The report exposes active branch/head, included/excluded entries, reasons,
 summary provenance, token estimates/estimator version, reserves, portability
 diagnostics, and configuration identity. Actual provider usage remains separately
 labeled and does not pretend to measure a request not sent yet. The engine
-inspection API is part of the first headless slice; the Ratatui inspector comes later.
+inspection API is part of the first headless slice; the shipped Ratatui inspector
+uses that same headless API.
 
 ## Compaction
 
-Start with rolling summarization of an older completed span while retaining
-recent history. Both automatic overflow protection and user-requested compaction
-are required. A strategy interface separates selection/generation from projection.
+Three strategies use one selection/preview/commit path: model-based
+`rolling_summary`, deterministic model-free `observation_masking`, and
+`structured_state` (bounded deterministic extracts plus model narrative).
+New clients record `observation_masking`; decoding an omitted legacy strategy
+still means `rolling_summary`. Continuations retain the recorded strategy;
+explicit differing creation flags/config defaults are refused on continuation.
+An idle typed `SetCompactionStrategy` appends a configuration change and stales
+previews; no CLI/TUI switching shortcut exists.
+
+Selection retains at least two recent completed turns, skips whole pinned and
+excluded turns, and stops at non-completed/unfinished barriers. Pins remain
+verbatim and exclusions never reach summarization. Automatic compaction is a
+separate recorded policy (clients enable it with `summary_model`), not implied
+by the masking default. It runs at the 85% usable-input threshold after a turn,
+or while idle before a prospective start overflows; never within a turn or as
+a reopen/failure retry. Each trigger has one attempt. Model-based strategies
+require an independent summary model; masking needs none. Manual generation
+is preview-first and commitment is explicit. Source/head/sequence/model/policy
+changes refuse stale previews, rather than regenerating silently.
 
 Each committed summary identifies exact covered ancestors, strategy/version,
 generation inputs, and superseded summaries. Originals remain in the JSONL tree.
-Summary generation is a separate asynchronous operation; reusing its recorded
-result makes projection repeatable. A preview reports the before/after projection
-and must be rejected if the source head/configuration changes before commitment.
+Model-based generation is a separate asynchronous operation; masking is a
+pure deterministic rendering. Reusing recorded results makes projection
+repeatable. A preview reports the before/after projection and must be rejected
+if the source head/configuration changes before commitment.
 
 ## Guarantees
 
@@ -54,3 +71,14 @@ and must be rejected if the source head/configuration changes before commitment.
 
 RFC cases C01–C02 specify reproducibility, exact source spans, branch isolation,
 tool grouping, stale previews, retained recent turns, pins, and budget failures.
+`crates/core/src/context/tests.rs`, `compaction_tests.rs` and
+`runtime/tests/compaction.rs` exercise those gates; client evidence is in
+`crates/cli/tests/tui_inspector.rs` and `tui_controls.rs`.
+
+[ADR 0015's M7 amendment](../decisions/0015-switching-model-metadata.md)
+implements projection-only ConvertSupported, with per-part conversion reports
+and fingerprints over converted text. Opaque state is never textualized and
+originals return for a capable model. Token budgets remain labelled heuristics,
+not exact provider tokenizer counts. Masking can increase estimated context,
+all summaries are lossy, and the bounded [experiments](../context-experiments.md)
+do not establish a general quality ranking or any filesystem rollback.

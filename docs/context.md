@@ -193,11 +193,15 @@ other than the snapshot's current configuration (`configuration_mismatch`).
 
 New sessions created through `harness::wiring` (including `harness ask`) record a
 built-in system instruction with the absolute workspace and actual available
-registry tools, followed by developer instructions from the workspace's root
-`AGENTS.md` when present. The source is framed explicitly. Root project text is
-read descriptor-relatively, capped at 64 KiB and required to be valid UTF-8;
-unsafe, oversized or unreadable files are skipped with a client warning, never
-silently truncated. Nested `AGENTS.md` files are not read in v0.1. Continued
+registry tools, followed by developer instructions from the optional user file,
+then root and lexicographically ordered nested project `AGENTS.md` files. Sources
+and nested directory scopes are framed explicitly. Project text is read through
+the descriptor-rooted API without symlinks; discovery skips dot/build/vendor
+directories, visits depths 0–8 and at most 4,000 directories including root.
+User instructions use the user-owned std-fs boundary. Each file is valid UTF-8
+and capped at 64 KiB; user plus project content is capped at 256 KiB. Unsafe,
+oversized or over-total files are skipped whole with content-free warnings,
+never truncated. Continued
 sessions keep recorded instructions: edits apply to **new sessions only**.
 Older sessions without instructions still report `absent`.
 See [decision 0022](decisions/0022-recorded-model-instructions.md).

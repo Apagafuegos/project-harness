@@ -929,11 +929,25 @@ local validation to this one musl build. No comparative size/time delta is
 claimed. Release dependency/incremental artifacts and test archives are removed
 after measuring; only this worktree's `target/` is used.
 
+### Accepted dry-run evidence
+
+Both native targets passed after default-branch registration:
+[41625756606](https://github.com/Apagafuegos/project-harness/actions/runs/41625756606)
+at `9223c52c0ea1fd98d26f006009fb32b7d78e0adc`, then
+[41628110546](https://github.com/Apagafuegos/project-harness/actions/runs/41628110546)
+at `305305b35601f41200c93dc2be3dfd8a43b20981`. In the latter, version,
+`verify / Rust workspace`, `verify / Host sandbox security (S02)`, both native
+musl builds and package succeeded; publish was skipped. Static-link, version/
+help/doctor-help and twice-packaged byte comparisons passed for each target,
+and aggregation produced sorted SHA256SUMS. These predate audit notices and
+the mandatory guide, and are not final-asset or publication evidence.
+
 ### Release operations
 
-After all milestone acceptance, an authorized maintainer bumps
-`[workspace.package] version`, updates `Cargo.lock` and the changelog, and merges
-only after ordinary CI passes. To cut a release (not part of M7-07 validation):
+The v0.1 candidate already has workspace version 0.1.0; no version/dependency
+bump is needed for its documentation acceptance. After all milestone acceptance,
+the orchestrator integrates the reviewed candidate only after exact-head CI
+passes. To cut a release (not part of M7-07 validation):
 
 ```sh
 # Example only: use the agreed version, and only after acceptance.
@@ -963,9 +977,11 @@ If the native ARM job is unavailable or queues longer than 20 minutes, arrange
 and prove the apt-only cross-compile fallback described in the brief before
 acceptance. No unproven fallback or reduced target set is accepted.
 
-Archives contain `harness`, both licenses, README, CHANGELOG and, when present,
-`docs/user-guide.md` beneath `harness-VERSION-TARGET/`. A missing user guide
-produces a note until M7-09 supplies it. Packaging uses sorted GNU tar entries,
+Archives require `harness`, both licenses, README, CHANGELOG,
+`docs/user-guide.md` and the generated `third-party-notices/` beneath
+`harness-VERSION-TARGET/`. Missing/empty guide refuses packaging with exit 2;
+`test-release.sh` tests guide bytes and an isolated missing/empty-guide fixture.
+Packaging uses sorted GNU tar entries,
 normalized modes/ownership, commit-time `SOURCE_DATE_EPOCH`, and `gzip -n`.
 For the same binary/documents/epoch/tool versions, the tarballs are reproducible;
 this does not claim cross-toolchain binary reproducibility. To package locally:
@@ -985,7 +1001,7 @@ tar tzvf harness-0.1.0-aarch64-unknown-linux-musl.tar.gz
 
 Dry-run artifacts expire after one day. After inspection, delete each run's
 artifacts with `gh api -X DELETE repos/Apagafuegos/project-harness/actions/artifacts/ID`
-to avoid private-repository storage usage. Build/smoke network is restricted;
+to limit Actions storage usage. Build/smoke network is restricted;
 checkout, provisioning, artifact transfers and publishing necessarily use the
 network. Never supply credentials to offline tests or tarballs.
 
@@ -1000,7 +1016,9 @@ and tool subprocess environments. Tool environment inheritance is allowlisted.
 
 The library and `harness ask` create private state roots, checksummed journals
 and content-addressed artifacts. `harness context` only reads an existing one. See [session storage](session-storage.md) for API usage and limits.
-Retention/deletion UI remains future work.
+Session export and journal-only deletion are implemented, including TUI keys;
+explicit GC reclaims old unreferenced artifacts under ADR 0030. Automatic
+retention remains future work. See the [user guide](user-guide.md).
 
 ## Specification artifacts
 

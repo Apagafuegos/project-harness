@@ -215,6 +215,11 @@ to revert. The offline PTY tests retain their existing scenarios and assertions.
 
 ## Known limits recorded by this milestone
 
+This list is historical M5 scope. [M7 acceptance](milestone-7-acceptance.md)
+closes config, user/nested instructions, syntax highlighting, session export/
+deletion and projection-only ConvertSupported. Remaining limits below still
+apply where not explicitly closed there.
+
 - **No config file** (decision 3): seven command-line flags only after M6.
 - **Nested `AGENTS.md` files are not read**; only the workspace root, capped at
   64 KiB, at session creation (ADR 0022).

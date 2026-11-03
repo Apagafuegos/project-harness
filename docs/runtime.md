@@ -216,7 +216,10 @@ with `Rejection::PortabilityLoss(Box<PreviewReport>)` (`portability_loss`).
 `OmitOptional` allows only optional native losses. The reply and the post-ack
 `EventKind::ModelSwitched { preview }` contain every affected entry/part, owner,
 schema and byte count, never payload. Required incompatibilities cannot be
-omitted. `ConvertSupported` returns `Invalid("unsupported_policy")` in M4.
+omitted. Since M7, explicit `ConvertSupported` replaces incompatible displayable
+media/tools with deterministic metadata/bounded text in the projection only,
+reports every converted part and hashes the converted input. Opaque state is
+never translated. A capable switch-back restores original blocks.
 Refusals append nothing; successful switches persist only the existing
 `ModelChanged { model, portability }`. History is never rewritten.
 See [decision 0015](decisions/0015-switching-model-metadata.md).

@@ -1,7 +1,7 @@
 # Contract 1: Model Provider
 
-Status: High-level behavior provisionally agreed. Concrete types, lifecycle,
-and defaults are proposed in [RFC-001](../rfcs/001-core-types-state-persistence.md).
+Status: Implemented v0.1 boundary. [RFC-001](../rfcs/001-core-types-state-persistence.md)
+is the original design; accepted ADRs and source tests below settle concrete details.
 The stream seam and deterministic scripted mock are implemented in
 `harness_core::model` ([decision 0005](../decisions/0005-provider-stream.md)).
 Milestone 4 step 01a adds complete tool/options input and fingerprints,
@@ -10,9 +10,13 @@ artifact access and core-enforced inference deadlines
 ([decision 0014](../decisions/0014-model-seam.md)).
 Milestone 4 step 01b adds catalog capabilities, enforced model-switch policies
 ([decision 0015](../decisions/0015-switching-model-metadata.md)) and a public
-fixture conformance suite. OpenAI Responses and Anthropic Messages now run
-that suite through real native adapters ([providers](../providers.md),
-[Milestone 4 acceptance](../milestone-4-acceptance.md)).
+fixture conformance suite. OpenAI Responses, Anthropic Messages and the DeepSeek
+Messages-compatible profile run that suite through real native adapters
+([providers](../providers.md), [ADR 0024](../decisions/0024-deepseek-profile.md),
+[Milestone 4 acceptance](../milestone-4-acceptance.md)). M7 step 02 adds explicit
+projection-only `ConvertSupported` ([ADR 0015 amendment](../decisions/0015-switching-model-metadata.md));
+M7-01 records sanitized live Codex and DeepSeek answer evidence while Anthropic
+live compatibility and live cross-provider switching remain partial.
 
 ## Purpose and ownership
 
@@ -47,7 +51,8 @@ A `ModelRequest` conceptually contains:
 - Provider instance and model identity.
 - Ordered conversation items with structured content, including text, supported
   media references, assistant tool-call proposals, and associated tool results.
-- Instructions with explicit precedence; the RFC proposes ordered system/developer text.
+- Ordered system/developer instructions recorded at creation, including user,
+  root and bounded nested project instructions ([ADR 0022](../decisions/0022-recorded-model-instructions.md)).
 - Enabled tool definitions with names, descriptions, and input schemas.
 - Options such as output budget, reasoning controls, or sampling parameters,
   subject to capability validation.
@@ -69,8 +74,9 @@ must be explicit; its payload is not something orchestration interprets.
 
 Response-level continuation and per-item native state are different lifetimes.
 A previous-response handle alone cannot represent every provider's replay needs.
-The eventual Rust shape must support both without exposing hidden reasoning as
-ordinary user-visible text.
+The Rust seam supports both without exposing hidden reasoning as ordinary
+user-visible text. Neither shipped native adapter emits response-level continuations;
+core continuation tests are not evidence of that provider feature.
 
 State must be serializable if needed to resume a persisted session, treated as
 sensitive, and omitted from ordinary logs/inspection displays. A provider/model
@@ -84,28 +90,26 @@ The conceptual interface is:
 
 ```rust,ignore
 pub trait ModelProvider: Send + Sync {
-    fn stream(&self, request: ModelRequest) -> ModelEventStream;
+    fn stream(&self, request: ModelRequest, control: OperationControl) -> ModelEventStream;
 }
 ```
 
-The RFC refines this sketch with an owned stream and operation controls for
-cancellation/deadlines. Setup failures become terminal stream events.
+The owned stream accepts cancellation/deadline controls. Setup failures become
+terminal stream events. The concrete `ProviderEvent` names (ADR 0005/0014) are:
 
-Proposed logical events:
+<!-- The descriptions below summarize the typed seam, not wire event names. -->
 
-- `ResponseStarted`: stable response identity, selected model, and safe metadata.
-- `TextDelta`: append text to an identified output item/block.
-- `ToolCallStarted`: identify the response-scoped call, item, and tool name.
-- `ToolArgumentsDelta`: append an argument fragment for that call; it may be
-  incomplete JSON and is never executable.
-- `ToolCallReady`: the fully assembled argument value and stable call association.
-- `UsageUpdated`: usage reported so far, with explicit availability and semantics.
-- `ResponseFinished`: successful completion, finish reason, and available final
-  usage/continuation state.
+- `Started`: response opened; identity comes from its request.
+- `TextDelta` / `ReasoningSummaryDelta`: displayable text by block index.
+- `ToolCallStarted` / `ToolArgumentsDelta` / `ToolCallReady`: response-local
+  indices, native identity and fully parsed arguments; fragments never execute.
+- `UsageUpdated`: nullable cumulative replacement snapshots.
+- `ProviderState`: opaque replay bytes/schema at a fresh block index; the core
+  publishes owner-tagged artifacts.
+- `Finished`: one completed, failed or cancelled outcome with finish reason/error
+  and optional native continuation (completed only).
 
-An error or cancellation is a distinct terminal outcome, not successful
-completion. The RFC proposes a single terminal event with completed, failed,
-or cancelled outcomes and nullable cumulative usage snapshots.
+The core allocates engine call IDs. Failure/cancellation is never success.
 
 ## Behavioral guarantees
 
@@ -131,20 +135,23 @@ or cancelled outcomes and nullable cumulative usage snapshots.
    cleanup. It does not promise that the provider stopped billing or computation.
    Partial content remains identifiable as partial. Dropping a stream must not
    leave a detached task producing events indefinitely.
-8. Stream backpressure must be bounded. Adapters must not silently discard tool
-   fragments or lifecycle events. Buffer limits, overflow behavior, and cleanup
-   must be specified and tested with the eventual async interface.
+8. Stream backpressure is bounded by event count and bytes. Adapters do not
+   silently discard tool fragments or lifecycle events; overflow and cleanup
+   behavior is explicit and covered by the shared transport tests.
 9. Transport/protocol failures preserve the distinction between partial output
    and a completed response. Adapters do not silently restart a stream after
    publishing content; retries are explicit engine policy.
 
 ## Failures
 
-Structured failures need a category, safe diagnostic, optional provider code,
+Structured failures carry a category, safe diagnostic, optional provider code,
 retry guidance or delay where known, and enough information to recognize partial
-output. Proposed categories are invalid request, unsupported capability,
-authentication, rate limit, transport, provider failure, malformed stream,
-context overflow, and cancellation. Provider refusal is a finish outcome when
+output. The implemented codes are `invalid_request`, `unsupported_capability`,
+`authentication`, `rate_limit`, `transport`, `provider_failure`,
+`malformed_stream`, `limit_exceeded` and `context_overflow`; cancellation is a
+terminal outcome. Provider-supplied `code`/`type` strings are admitted only from
+an explicit protocol vocabulary (or the transport's `http_<status>`), because an
+echoed value could otherwise persist request text or a credential (audit A02). Provider refusal is a finish outcome when
 the API represents it as a completed response.
 
 Raw headers, credentials, and unrestricted request/response bodies must not be
@@ -161,15 +168,18 @@ The mock adapter must support deterministic scripts covering:
 - Cancellation during setup/streaming, stream drop, and bounded buffering.
 - Native replay state preservation and rejection of incompatible state.
 
-A common conformance suite should run against mock/native-event fixtures for
-each adapter. OpenAI Responses and native Anthropic Messages are implemented;
+The common conformance suite runs against mock and native-event fixtures for
+each adapter with exactly one of each of the 17 scenarios. OpenAI Responses,
+native Anthropic Messages and the DeepSeek Messages profile are implemented;
 their ADRs cite the official API specifications and own their wire mappings.
-This high-level contract does not prescribe provider wire formats.
+This contract does not prescribe provider wire formats.
 
-Live streaming text, complete tool-call reconstruction, usage, errors, and
-cancellation must be checked explicitly. A second provider must work without
-provider-specific branches in orchestration before this abstraction is
-considered validated. Routine tests must not require credentials or network.
+A second provider works without provider-specific branches in orchestration,
+which is what validates the abstraction; the shipped adapter count exceeds that
+bar. Live streaming text, complete tool-call reconstruction, usage, errors and
+cancellation are checked only in the separate, explicit opt-in live scripts.
+Routine tests require neither credentials nor network, and no automatic
+inference retry, refresh-token rotation or expired-continuation replay exists.
 
 ## Public adapter conformance suite
 
@@ -219,11 +229,23 @@ every validator, including cross-kind index reuse and continuation on failure.
 consumer; no credentials or network are required. Native queue bounds are tested by the shared transport tests, and explicit
 opt-in live checks remain separate from ordinary validation.
 
-## Concrete specification
+## Switching and implementation limits
 
-RFC-001 proposes owned boxed streams, cancellation tokens/deadlines, explicit
-terminal outcomes, cumulative usage, bounded buffering, multimodal content,
-scoped native state, configured capabilities, and diagnostic model switching.
-Review those details there before implementation; they replace the original
-list of unresolved interface choices. The second native provider remains an
-abstraction-validation gate, not an excuse to discard native differences.
+[ADR 0015](../decisions/0015-switching-model-metadata.md) and its M7 amendment
+implement idle-only Reject, OmitOptional and explicit ConvertSupported.
+Conversion affects the projection only: unsupported user media becomes metadata
+references; tool-less targets receive bounded text calls/results. Every converted
+part is reported and the fingerprint hashes the converted input. Opaque native
+state is omitted only under the explicit policy, never translated. Switching
+back restores original capable content; history and artifacts are unchanged.
+See `convert_supported_policy_matrix_is_projection_only`,
+`convert_supported_opaque_state_is_omitted_never_textualized` and
+`convert_supported_switch_back_restores_original_media` in core driver tests.
+
+Both native adapters and DeepSeek's Messages profile pass fixture conformance;
+Anthropic live compatibility and live cross-provider switching remain partial
+(no key supplied). Unsupported native features are explicit capability errors;
+no automatic retry, refresh-token rotation or remote-expiry replay fallback is
+implemented. Provider-specific media/options and preserved-thinking limits live
+in [providers](../providers.md). [M7 acceptance](../milestone-7-acceptance.md)
+separates offline gates from bounded live evidence.

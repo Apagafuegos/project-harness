@@ -38,10 +38,26 @@ cmp "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" \
 tar -tzf "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" | grep '/third-party-notices/INDEX.txt$'
 tar -xOf "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" \
     "harness-$version-aarch64-unknown-linux-musl/third-party-notices/imbl-7.0.2/LICENSE-MPL-2.0" | cmp - docs/security/licenses/MPL-2.0.txt
+tar -xOf "$scratch/first/harness-$version-aarch64-unknown-linux-musl.tar.gz" \
+    "harness-$version-aarch64-unknown-linux-musl/docs/user-guide.md" | cmp - docs/user-guide.md
+# Isolate the missing-guide case; never move the real guide or alter the checkout.
+mkdir -p "$scratch/fixture/scripts" "$scratch/fixture/docs"
+cp scripts/package-release.sh "$scratch/fixture/scripts/"
+for state in missing empty; do
+    if [[ $state == empty ]]; then
+        : >"$scratch/fixture/docs/user-guide.md"
+    fi
+    status=0
+    "$scratch/fixture/scripts/package-release.sh" "$version" x86_64-unknown-linux-musl \
+        "$binary" "$scratch/refused-$state" >"$scratch/$state.log" 2>&1 || status=$?
+    test "$status" = 2
+    grep -Fx 'required release document missing or empty: docs/user-guide.md' "$scratch/$state.log"
+    test ! -e "$scratch/refused-$state"
+done
 # A packaging regression dropping notices must fail independently of generation.
 if SOURCE_DATE_EPOCH=invalid ./scripts/package-release.sh "$version" aarch64-unknown-linux-musl "$binary" "$scratch/invalid" >"$scratch/invalid.log" 2>&1; then
     echo 'invalid epoch unexpectedly accepted' >&2
     exit 1
 fi
 grep 'SOURCE_DATE_EPOCH must' "$scratch/invalid.log"
-echo 'release tooling tests passed (wrong-tag refusal, packaging, reproducibility, invalid epoch)'
+echo 'release tooling tests passed (wrong-tag refusal, packaging, reproducibility, required guide, invalid epoch)'

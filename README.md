@@ -10,9 +10,15 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: Milestones 1–6 complete within their recorded scope.** `harness-core`
-implements validated session trees, checksummed JSONL transactions, immutable
-snapshots, private content-addressed artifacts, single-writer locking, and
+**Status: v0.1 release candidate; Milestones 1–7 implemented within their
+recorded scope.** Publication/tagging remains pending acceptance. Start with the
+[user guide](docs/user-guide.md) for prebuilt Linux x86_64/aarch64 musl
+installation, authentication, configuration, TUI keys and maintenance. [M7
+acceptance](docs/milestone-7-acceptance.md) and the [security
+audit](docs/security/v0.1-audit.md) distinguish evidence from remaining limits.
+
+`harness-core` implements validated session trees, checksummed JSONL
+transactions, immutable snapshots, private content-addressed artifacts, single-writer locking, and
 explicit torn-tail repair. J01–J03 tests cover replay, corruption rejection and
 injected durability failures. Its `runtime` module is a pure, synchronous turn
 state machine: typed inputs and effects, one commit in flight, journal-backed
@@ -44,9 +50,13 @@ strategies share one registry, including the deterministic, model-free
 an omitted strategy in older journals still means `rolling_summary`. A dev-only
 offline evaluation crate and two separate, opt-in DeepSeek Flash matrices measure
 the strategies. Validation is offline after provisioning; live checks are
-separate. Anthropic live evidence still needs an API key, and the live TUI smoke
-met the Codex quota limit; both are recorded as partial in the acceptance
-documents.
+separate. M7 adds strict user TOML defaults, recorded user/nested instructions,
+projection-only ConvertSupported switching, session export/journal-only deletion
+and delayed artifact GC, richer TUI UX/GFM/highlighting and a dual-target release
+pipeline with dependency notices and a mandatory guide. Codex and DeepSeek live
+TUI answer/terminal-restoration smokes passed (M7-01); a live coding/tool workflow
+is not claimed. Anthropic live compatibility and live cross-provider switching
+remain partial because no Anthropic key was supplied.
 
 ## Getting started
 
@@ -93,15 +103,16 @@ harness ask --workspace ~/src/my-project "Explain the build script"
 printf 'Now the tests' | harness ask --workspace ~/src/my-project --session SESSION_ID -
 ```
 
-A new session records a built-in instruction plus the workspace's root
-`AGENTS.md`. The default provider is OpenAI through the read-only Codex login
+A new session records built-in instructions plus optional user and bounded
+root/nested workspace `AGENTS.md` files; continuation keeps the recorded text.
+The default provider is OpenAI through the read-only Codex login
 (`codex login` once); `--provider anthropic` uses `ANTHROPIC_API_KEY`, and
 `--provider deepseek` uses `DEEPSEEK_API_KEY` on DeepSeek's
 Anthropic-compatible endpoint. New sessions record `observation_masking` as
 their compaction strategy (`--compaction-strategy` overrides it; a continuation
-keeps its recorded strategy unless explicitly changed, and naming a different one
-is refused). Press Ctrl-K in the TUI for the context inspector, `p`/`x` in the
-branch tree (Ctrl-T) to pin or exclude a turn, and Ctrl-D to quit.
+keeps its recorded strategy; naming a different one through continuation flags
+or config is refused). Press Ctrl-K in the TUI for the context inspector, `p`/`x`
+in the branch tree (Ctrl-T) to pin or exclude a turn, and Ctrl-D to quit.
 
 ## Repository
 
@@ -109,7 +120,7 @@ branch tree (Ctrl-T) to pin or exclude a turn, and Ctrl-D to quit.
 crates/core/       Headless session storage, runtime core and context builder (harness-core)
 crates/cli/        Terminal client and headless ask/context/journal/doctor CLI (harness)
 crates/providers/  Native adapters, router, HTTP/SSE and credentials (harness-providers)
-docs/             Architecture, contract drafts, decisions, and roadmap
+docs/             User guide, implemented contracts, decisions, acceptance and roadmap
 scripts/check.sh  Shared local/CI checks
 ```
 
@@ -144,7 +155,12 @@ acceptance](docs/milestone-6-acceptance.md) maps whole-turn pins/exclusions,
 record version 3, the three strategies, the DeepSeek profile, the offline
 evaluation harness and the chosen default; [context
 experiments](docs/context-experiments.md) records the two bounded live matrices
-and their limits. See the [roadmap](docs/roadmap.md).
+and their limits. [M7 acceptance](docs/milestone-7-acceptance.md) covers
+configuration, instructions, conversion, maintenance, TUI polish, release tooling
+and the accepted audit. See ADRs [0028](docs/decisions/0028-user-config.md),
+[0029](docs/decisions/0029-release-pipeline.md),
+[0030](docs/decisions/0030-session-export-deletion-and-gc.md) and the
+[roadmap](docs/roadmap.md).
 
 ## Security
 

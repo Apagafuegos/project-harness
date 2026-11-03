@@ -5,9 +5,17 @@ headless mock lifecycle with context inspection (Milestone 2), and tools,
 selective security and recovery (Milestone 3), and native providers, rolling
 compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
-bounded experiments (Milestone 6) are complete within their recorded scope. Live
-Anthropic evidence still needs an API key, and the live TUI smoke met the
-subscription's Codex quota limit; both are recorded rather than claimed.
+bounded experiments (Milestone 6), and v0.1 documentation/release readiness
+(Milestone 7) are implemented within their recorded scope. Tagging/publication
+remain pending the orchestrator. Anthropic live compatibility and live
+cross-provider switching remain partial (no key supplied). M7-01's successful
+Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
+M5 quota limit; it does not claim a live coding/tool workflow.
+
+Sections 0–6 describe each milestone's historical scope; later closure is
+linked rather than changing old measurements. See [M7
+acceptance](milestone-7-acceptance.md) and the [user guide](user-guide.md) for
+the current product.
 
 ## 0. Foundation and proposed specification — present
 
@@ -32,7 +40,8 @@ head transactions, single-writer locking, sync ordering, artifact publication,
 torn-tail diagnostics/repair, and corruption rejection with fault injection.
 RFC cases J01–J03 and all serialization fixtures run offline. No tool effects
 exist. See [usage and limitations](session-storage.md): blocking storage API,
-explicit recovery commits, local Linux storage, no salvage/export command.
+explicit recovery commits and local Linux storage. No corruption-salvage command;
+M7 adds verified exports (ADR 0030).
 
 ## 2. Headless mock lifecycle and context inspection — complete
 
@@ -139,8 +148,9 @@ twice in the gate. Known partials/limits:
 
 - Anthropic live checks and cross-provider live switching need
   `ANTHROPIC_API_KEY`; fixture coverage is complete, not live compatibility proof.
-- `ConvertSupported` is refused; continuation conversion needs a later decision
-  (ADR 0015). Neither M4 adapter emits a response-level continuation (ADR 0014).
+- M4 refused `ConvertSupported`; **closed in M7** by ADR 0015's projection-only
+  conversion amendment. Neither native adapter emits response-level continuation
+  (ADR 0014).
 - Pins did not exist in M4 (C02, ADR 0019). Closed by Milestone 6: whole-turn
   pins/exclusions are implemented and mapped in
   [Milestone 6 acceptance](milestone-6-acceptance.md).
@@ -156,9 +166,10 @@ model plus a thin asynchronous shell over the existing headless engine: the
 client renders, navigates, streams, cancels, asks for approvals and inspects
 context, and the engine still builds every request, authorizes every call and
 runs every tool. Rendering is a width-independent projection of the published
-snapshot plus the live partial response, with minimal Markdown and no syntax
-highlighting. Cancellation and quit are durable: the terminal is restored first,
-then the turn is cancelled and storage is drained.
+snapshot plus the live partial response. M5 shipped minimal Markdown; M7 adds
+GFM and bounded bundled syntax highlighting (ADR 0023 Parts 6–7). Cancellation
+and quit are durable: the terminal is restored first, then the turn is cancelled
+and storage is drained.
 
 Navigation covers sessions (Ctrl-O), the branch tree (Ctrl-T) and models
 (Ctrl-L) over the read-only session catalog and the merged, sourced model
@@ -188,15 +199,16 @@ sandbox type, and no approval decision outside the modal key handler. The shell
 settled decisions to gate tests and records sanitized live evidence. Known
 partials/limits:
 
-- The live TUI smoke hit the subscription's `rate_limit`, so live end-to-end is
-  recorded, not claimed; the offline end-to-end tests cover the same path.
+- The original M5 live smoke hit `rate_limit`; **closed for answer/restoration**
+  by M7-01's Codex/DeepSeek passes in M5's Evidence log. Coding/tools remain
+  end-to-end offline evidence, not a live coding-workflow claim.
 - Anthropic live checks and cross-provider live switching still need
   `ANTHROPIC_API_KEY` (ADR 0018, ADR 0020 amendment).
-- Flags only: no config file (decision 3). Nested `AGENTS.md` files are not read;
-  only the root file, at session creation (ADR 0022).
-- No syntax highlighting, no workspace switching, no session deletion/retention
-  or export UI, and no credential UI. A torn journal is still repaired with
-  `harness journal repair`, never automatically.
+- M5's flags-only/root-only instructions are **superseded in M7** by user TOML
+  (ADR 0028) and recorded user/nested instructions (ADR 0022 amendment).
+- M7 adds syntax highlighting and session deletion/export UI (ADRs 0023/0030).
+  Workspace switching, automatic retention and credential UI remain unimplemented.
+  Torn tails still require `harness journal repair`, never automatic repair.
 - Inspector budgets are heuristic estimates, not tokenizer counts. Pins and
   context experiments were M6 and are now implemented; see
   [Milestone 6 acceptance](milestone-6-acceptance.md).
@@ -236,10 +248,40 @@ relevant C01/C02/RFC 6.1 clauses to gate tests. Known partials/limits:
   tasks, one repetition per matrix, lexical matchers and one probe turn.
 - Masking is lossy, guarantees neither a shorter projection nor workspace
   rollback, and the default is the user's measured provisional choice.
-- Anthropic live compatibility and the live TUI end-to-end run remain partial
-  from M4/M5.
-- `scripts/live-check.sh deepseek` was unrun at m6-00 for lack of a key; the live
-  DeepSeek endpoint is evidenced by the two matrices instead.
+- Anthropic live compatibility and live cross-provider switching remain partial.
+  The live TUI answer/restoration smoke was closed by M7-01 (M5 Evidence log).
+- The m6-00 DeepSeek scripted check was initially unrun; M7-01's single passing
+  run now covers streaming/tools/usage/thinking replay (M6 Evidence log).
+
+## 7. v0.1 polish and release readiness — implemented, publication pending
+
+[M7 acceptance](milestone-7-acceptance.md) maps all goals and decisions 1–17:
+
+- Successful sanitized Codex/DeepSeek TUI smokes and DeepSeek scripted check;
+  Anthropic/live cross-provider partials remain explicit.
+- Explicit projection-only `ConvertSupported`, loss reports and restored originals
+  on capable switch-back ([ADR 0015](decisions/0015-switching-model-metadata.md)).
+- Strict user-only TOML defaults, path/show/no-config, ask-only settings and
+  creation-time bounded user/nested instructions
+  ([ADR 0028](decisions/0028-user-config.md),
+  [0022 amendment](decisions/0022-recorded-model-instructions.md)).
+- Verified Markdown/journal exports, journal-only delete and explicit 24-hour
+  artifact GC with publication/dedupe locking
+  ([ADR 0030](decisions/0030-session-export-deletion-and-gc.md)).
+- Minimal-chrome TUI UX, wrapping/history/help/paste, activity, scrollable dialogs,
+  GFM/highlighting, tool blocks and approval previews (ADR 0023 Parts 6–7).
+- Effective MIT OR Apache-2.0 licensing in the public repository; native x86_64
+  and ARM64 musl builds, smoke checks, reproducible archives, checksums and
+  third-party notices ([ADR 0029](decisions/0029-release-pipeline.md)).
+- Accepted [security audit](security/v0.1-audit.md), all four medium findings fixed
+  with regressions; no claim of vulnerability absence. Residual risks are retained.
+- Reconciled six contracts, [user guide](user-guide.md), changelog and the
+  required-guide packaging/refusal regression. No runtime or journal-format
+  change in step 09.
+
+The two-target release dry run already passed; it is not a tagged release.
+Final exact-head offline/S02 CI is required for this documentation step. Release
+workflow dispatch/tag/asset verification and publication belong to the orchestrator.
 
 ## Outside v0.1
 
@@ -247,4 +289,5 @@ Subagents, MCP client, plugin runtime, semantic memory, remote workspaces,
 multi-agent orchestration, separate server/JSON-RPC, and filesystem checkpoints.
 Restricted subprocess networking also needs an actual constrained-egress backend
 before the proposed deny-network-only implementation can grant exceptions.
-Pick a license before publishing packages or claiming reuse terms.
+No automatic retention, workspace switching or credential UI is provided.
+Licensing is settled and effective: MIT OR Apache-2.0.

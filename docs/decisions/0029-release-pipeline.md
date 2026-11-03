@@ -1,13 +1,14 @@
 # 0029: Release pipeline
 
-Status: Implemented; dual-target workflow-dispatch proof pending default-branch
-registration and orchestrator validation (M7 decision 15).
+Status: Implemented; dual-target workflow-dispatch proof passed after registration
+(M7 decision 15). Tagging/publication remain pending M7 acceptance.
 
 Date: 2026-11-03
 
 ## Decision
 
-Distribute `harness` as private GitHub Release assets, not crates.io packages.
+Distribute `harness` as public GitHub Release assets, not crates.io packages.
+M7 decision 17 supersedes the original private-repository premise.
 The workspace and all four crates declare `MIT OR Apache-2.0`, inherit the
 repository URL, and retain `publish = false`.
 
@@ -17,10 +18,11 @@ supplies `musl-gcc` for ring's C/assembly code; Rust supplies the target's
 self-contained musl link libraries. No linker overrides, Docker, Zig, cross
 wrapper or extra language toolchain is needed. The locked normal/build tree
 contains ring 0.17.14 and cc 1.10.0, but no OpenSSL, aws-lc or cmake. Local ARM
-compilation and static-link smoke passed. Hosted ARM availability is not yet
-proven: if unavailable or queued over 20 minutes, the orchestrator must arrange
-and verify the apt-only cross-compile fallback before acceptance, including
-execution of both binaries' smoke checks. Do not silently drop ARM.
+compilation and static-link smoke passed. Hosted native ARM and x86_64 builds,
+static-link/smoke checks and packaging were subsequently proven by dry runs
+[41625756606](https://github.com/Apagafuegos/project-harness/actions/runs/41625756606)
+and [41628110546](https://github.com/Apagafuegos/project-harness/actions/runs/41628110546).
+No cross-compile fallback was needed.
 
 The release profile uses thin LTO, one codegen unit, symbol stripping, and
 **unwind**, not abort. ADR 0023's panic hook restores the terminal before the
@@ -66,7 +68,10 @@ It requires `SOURCE_DATE_EPOCH`, taken from the checked-out commit's timestamp
 numeric UID/GID to zero, normalizes permissions, and uses GNU format. `gzip -n`
 omits original names/timestamps. The independent archive manifest and content
 comparisons fail if either license or another mandatory member is omitted.
-An absent future user guide is explicitly noted, not silently assumed present.
+The user guide is mandatory since M7-09: an absent/empty `docs/user-guide.md`
+refuses packaging with exit 2 before creating an output directory. The
+independent manifest and byte comparison always require it. Dependency
+licence/source notices are mandatory since the accepted security audit.
 Each CI target packages twice and compares bytes. Aggregation generates sorted
 `SHA256SUMS` in a short-lived artifact even for dry runs. Publish verifies and
 regenerates that manifest before attaching the two archives and checksums.
@@ -81,4 +86,9 @@ The single permitted local ARM musl build took **266 seconds**, producing a
 `doctor --help` passed. Before-profile and aarch64-gnu measurements are
 unavailable under the one-release-build budget; no size delta is claimed.
 See [development](../development.md#releases) for operations. Hosted dual-target
-proof is a separate acceptance requirement, not implied by this local result.
+proof is separate from this local result: the latest accepted dry run above used
+`305305b35601f41200c93dc2be3dfd8a43b20981`; both verify jobs, both native builds,
+version and package succeeded, while publish was skipped. The later audit adds
+notices and M7-09 makes the guide mandatory, so this historical run does not
+verify final release assets. The orchestrator must verify the final candidate
+before tagging/publication. See [M7 acceptance](../milestone-7-acceptance.md).

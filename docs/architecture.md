@@ -1,6 +1,7 @@
 # Architecture
 
-Status: Six high-level contracts provisionally agreed. Session storage is
+Status: Six v0.1 contracts implemented, with limitations and source evidence
+in [M7 acceptance](milestone-7-acceptance.md). Session storage is
 implemented under [decision 0003](decisions/0003-jsonl-storage.md). The pure
 runtime core, async driver and recovery are implemented under decisions
 0004–0007. Milestones 3–4 add real tools/sandboxing, native providers, rolling
@@ -10,7 +11,7 @@ compaction and headless ask (ADRs 0009–0020). Remaining proposals in
 ## Engine and client
 
 `harness` owns CLI parsing, terminal lifecycle, navigation, input, approval
-presentation, and future Ratatui rendering. It owns the Tokio runtime and talks
+presentation, and Ratatui rendering. It owns the Tokio runtime and talks
 to `harness-core` through in-process typed commands and events. It does not
 assemble provider requests, authorize actions independently, or execute tools.
 
@@ -31,8 +32,8 @@ of orchestration.
    MCP/extensions must integrate through the registry. See [tools](contracts/tools.md).
 3. **Execution and security:** trusted built-in Rust file operations may run
    directly under descriptor-based workspace policies. Every external executable
-   uses Linux Bubblewrap. Default network denial and explicit, auditable elevation
-   are enforced separately from user authorization. No unrestricted fallback.
+   uses Linux Bubblewrap. Network is always denied in v0.1; elevation is planned,
+   not offered. Enforcement is separate from authorization, with no host fallback.
    See [execution and security](contracts/execution-security.md).
 4. **Session storage:** one append-only JSONL journal per session contains tree
    entries and ordered audit events, with a durable active head. One writer,
@@ -91,8 +92,8 @@ separately enforced backend and cannot silently become host networking.
 
 ## Implementation status
 
-The three-crate workspace includes a blocking headless session store and J01–J03
-behavioral tests: exact-byte checksums, atomic commits/head selection, semantic
+The four-crate workspace (including the dev-only `harness-eval` crate) includes
+a blocking headless session store and J01–J03 behavioral tests: exact-byte checksums, atomic commits/head selection, semantic
 replay, locking, artifact integrity, writer poisoning and explicit tail repair.
 The schema and all three example journals are exercised by tests. See
 [session storage usage](session-storage.md) for API limits.

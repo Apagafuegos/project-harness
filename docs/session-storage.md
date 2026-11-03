@@ -177,7 +177,9 @@ prefix is never repeated. A session with a single branch is one
 exist (`export_exists`), containing `sessions/<id>.jsonl` as an exact copy and
 `artifacts/<sha256>` for every artifact the journal references. Each artifact is
 verified before and while it is copied, and an absent or altered artifact fails
-the export (`export_artifact_invalid`) after the partial directory is removed.
+the export (`export_artifact_invalid`). Created partial children are removed;
+an empty newly created destination directory may remain. Pre-existing output
+is never removed or overwritten.
 References include configuration, command and manifest digests, media, provider
 state, plan artifacts and a quarantine artifact, exactly as storage validation
 sees them.

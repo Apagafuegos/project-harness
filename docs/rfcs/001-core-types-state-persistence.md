@@ -3,8 +3,12 @@
 Status: Storage details accepted and implemented under
 [decision 0003](../decisions/0003-jsonl-storage.md), with J01–J03 behavioral tests.
 The pure runtime core is implemented under
-[decision 0004](../decisions/0004-pure-runtime-core.md), which records the runtime turn commits. Other subsystem details
-remain proposed; no complete agent runtime is implemented.
+[decision 0004](../decisions/0004-pure-runtime-core.md). Subsequent accepted ADRs
+implement providers, tools, sandboxing, recovery, compaction, context controls
+and the TUI; see [M7 acceptance](../milestone-7-acceptance.md) and the
+[implemented contracts](../README.md). This RFC retains original design sketches
+for provenance, not a claim that their API names/defaults are all current.
+Accepted ADR amendments and shipped source settle those details.
 
 Date: 2026-10-16
 
@@ -13,9 +17,9 @@ Architecture baseline: [decision 0002](../decisions/0002-v01-contracts.md).
 ## 1. Scope and normative language
 
 This RFC refines the six provisionally agreed contracts into an implementation
-target. MUST, MUST NOT, and SHOULD describe requirements of the future
-implementation. Implemented storage behavior and remaining scope are distinguished
-in decision 0003 and the storage usage guide.
+target. MUST, MUST NOT, and SHOULD describe behavioral requirements; historical
+API sketches are not a second implementation. Implementation and limitations
+are distinguished in the accepted ADRs, contracts and acceptance documents.
 
 The Rust shapes below specify ownership and behavior. Serialization is defined
 by the accompanying JSON Schemas, one per record version
@@ -465,9 +469,10 @@ sandbox policy by itself. [See upstream's security guidance.](https://github.com
 ### 5.1 Layout, framing, and version
 
 An explicitly selected private data root holds `sessions/<session-id>.jsonl` and
-`artifacts/<sha256>`. The initial default is
-`$XDG_STATE_HOME/project-harness`, or `$HOME/.local/state/project-harness` when
-unset. Directories are mode 0700; files 0600. Refuse unsafe ownership/symlinks;
+`artifacts/<sha256>`. The shipped clients default to
+`$XDG_DATA_HOME/harness`, or `$HOME/.local/share/harness` when unset, with an
+explicit `--data-root`/user TOML override (ADR 0028). Directories are mode 0700;
+files 0600. Refuse unsafe ownership/symlinks;
 keep this root outside authorized workspace/process mounts. No secrets are
 embedded in workspace paths or configuration records.
 
@@ -493,9 +498,9 @@ duplicate keys at all depths and verify byte checksums before semantic replay.
 Every record carries the previous record's SHA-256 value (null only at seq 0).
 This detects accidental alteration, not a malicious writer able to recompute hashes.
 
-Every record carries its own `version`. Readers support versions 1 and 2 and
+Every record carries its own `version`. Readers support versions 1, 2 and 3 and
 validate each record against that version's schema; writers write the latest
-version, 2, including when appending to a session created under version 1.
+version, 3, including when appending to older sessions (ADR 0025).
 Versions never decrease within a journal, and an unknown version fails closed.
 Records also carry monotonic contiguous `seq` starting at zero,
 unique record identity, immutable session identity, and a timestamp. The first
@@ -672,12 +677,15 @@ automatic rollback to an older valid prefix and no guessing missing entries.
 > implements projection and its report as `ContextBuilder::build(snapshot,
 > head, model_override)`, without `ProjectionInput` or a `ContextBuilder`
 > trait. Instructions come from the configuration artifact; tools, options and
-> continuation selection are deferred. As C01 requires, execution rejects an
+> continuation selection were deferred in that first slice and subsequently
+> implemented by ADR 0014. As C01 requires, execution rejects an
 > unknown context limit (`context_budget_unknown`); inspection reports it as
 > unknown. Sibling entries are not listed as
 > `other_branch`, and the exclusion reasons are the closed set in
-> [context](../context.md#inclusion-rules). Summary generation (6.1) is not
-> implemented. The proposal below is kept for reference.
+> [context](../context.md#inclusion-rules). Summary generation and runtime
+> triggers (6.1) are implemented under ADR 0019, amended by 0025/0026 for
+> controls and three strategies. The proposal below is kept for historical
+> reference.
 >
 > **Implementation note (m6-02).** Decision 14, the
 > [m6-02 amendment to decision 0019](../decisions/0019-compaction.md#m6-02-amendment),
@@ -962,9 +970,13 @@ cleanup failure holds the session in a blocked/recovery condition, not idle.
 
 ## 8. Conformance requirements
 
-These are implementation gates. J01–J03 have storage tests; other cases remain
-future gates. Give each
-case a deterministic test with a fake clock, scripted provider, counted executor,
+These are implementation gates. All cases have source-test mappings in
+[Milestone 3](../milestone-3-acceptance.md),
+[Milestone 4](../milestone-4-acceptance.md),
+[Milestone 5](../milestone-5-acceptance.md),
+[Milestone 6](../milestone-6-acceptance.md) and
+[M7 acceptance](../milestone-7-acceptance.md); live-provider partials remain
+explicit. Give each case a deterministic test with a fake clock, scripted provider, counted executor,
 fault-injected journal, and temporary local storage. Ordinary CI is offline.
 
 - **M01** Interleave two tool argument streams; reconstruct correct IDs/JSON in

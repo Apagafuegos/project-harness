@@ -91,6 +91,9 @@ jobs:
           cmp "dist/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz" "repeat/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz"
           rm -rf repeat
           tar tzvf "dist/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz"
+          # The user guide is required in every archive, not merely packaged.
+          tar tzf "dist/harness-$RELEASE_VERSION-$RELEASE_TARGET.tar.gz" |
+            grep -qx "harness-$RELEASE_VERSION-$RELEASE_TARGET/docs/user-guide.md"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-archive-${{ matrix.target }}

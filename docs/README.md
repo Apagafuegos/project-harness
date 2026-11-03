@@ -1,7 +1,25 @@
 # Documentation
 
-This repository begins with environment setup and design contracts. A document
-describing a future component is not evidence that it is implemented.
+v0.1 is a release candidate with implemented headless and terminal clients.
+Start with the [user guide](user-guide.md) for installation and daily use.
+A design document alone is not evidence of implementation; acceptance documents
+separate behavioral tests, historical live runs and remaining partials.
+
+Key v0.1 documents:
+
+- [User guide](user-guide.md): installing a prebuilt binary, first turn, config,
+  instructions, approvals, keys, sessions, context and maintenance.
+- [M7 acceptance](milestone-7-acceptance.md): decisions 1–17, shipped features,
+  full offline/S02 evidence, release dry runs, audit and pending publication.
+- [Security audit](security/v0.1-audit.md): accepted findings, fixes and residual risks.
+- [User config](decisions/0028-user-config.md): strict user-only TOML precedence
+  and ask-only approval/startup-switch defaults.
+- [Release pipeline](decisions/0029-release-pipeline.md): public dual-target musl
+  archives, dependency notices, mandatory guide and non-publishing dry runs.
+- [Session maintenance](decisions/0030-session-export-deletion-and-gc.md): verified
+  exports, journal-only deletion and GC publication/reuse locking.
+
+The full index:
 
 - [Development](development.md): toolchain, commands, CI, dependencies, and checks.
 - [Architecture](architecture.md): component ownership and the session/context boundary.
@@ -53,7 +71,8 @@ describing a future component is not evidence that it is implemented.
   provider, policy and instruction assembly shared by both clients, plus the
   read-only `DataRoot::sessions()` catalog.
 - [Recorded instructions](decisions/0022-recorded-model-instructions.md): the
-  built-in base instruction and the root `AGENTS.md`, recorded at creation.
+  built-in, user, root and bounded nested `AGENTS.md` instructions, recorded once
+  at creation (M7 amendment).
 - [TUI architecture](decisions/0023-tui-architecture.md): the pure model, the
   `Action` boundary, the terminal lifecycle, key map and navigation.
 - [DeepSeek profile](decisions/0024-deepseek-profile.md): the second Messages
@@ -105,8 +124,8 @@ describing a future component is not evidence that it is implemented.
 **Accepted decisions** describe the chosen direction. Change them by recording
 the reason and consequences in a decision record.
 
-**Provisionally agreed contracts** establish the six behavioral boundaries and
-the architectural constraints in decision 0002. These choices supersede earlier
+**Implemented contracts** describe the six v0.1 behavioral boundaries and the
+architectural constraints in decision 0002. These choices supersede earlier
 options such as SQLite or parallel initial tool execution.
 
 **RFC details** specify how to implement those boundaries. Storage details are
@@ -125,6 +144,11 @@ M6 implements the DeepSeek profile (0024), whole-turn context controls and
 record version 3 (0025), compaction strategy selection (0026) and the offline
 evaluation harness (0027); the live matrices and the user's chosen
 default are recorded in [context experiments](context-experiments.md).
+M7 implements projection-only conversion (0015 amendment), user TOML (0028),
+user/nested instructions (0022 amendment), TUI UX/GFM/highlighting (0023 Parts
+6–7), public release tooling (0029) and session maintenance (0030). The accepted
+security audit baseline is `5b89aa2f0f3b038b73993d4c1d137da494c6027f`.
+Tagging and publication remain the orchestrator's pending actions.
 Schema/examples alone are not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is
