@@ -15,10 +15,11 @@ use harness_core::{
 };
 use pulldown_cmark::{CodeBlockKind, Event as MarkdownEvent, Options, Parser, Tag, TagEnd};
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 
+use super::theme::{Role, Theme};
 use crate::text::{bounded, line};
 
 /// An observed non-durable fact that belongs in the log but not in a snapshot.
@@ -41,6 +42,7 @@ pub(crate) fn project(
     view: &RuntimeView,
     reasoning: bool,
     notices: &[Notice],
+    durations: &BTreeMap<TurnId, std::time::Duration>,
 ) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     let ancestry = match view.snapshot.ancestry(view.snapshot.head()) {
@@ -82,14 +84,26 @@ pub(crate) fn project(
         }
         match &stored.entry.payload {
             EntryPayload::UserMessage(message) => {
+                let start = rows.len();
                 push_label(&mut rows, "you");
                 for block in &message.content {
-                    media_or_text(&mut rows, block, "  ");
+                    media_or_text(&mut rows, block, "");
                 }
+                gutter(&mut rows[start..], Role::User);
                 rows.push(Line::default());
             }
             EntryPayload::AssistantResponse(response) => {
-                push_label(&mut rows, "assistant");
+                let start = rows.len();
+                rows.push(assistant_label(
+                    &response.model,
+                    response.usage.as_ref(),
+                    stored
+                        .entry
+                        .turn_id
+                        .as_ref()
+                        .and_then(|id| durations.get(id))
+                        .copied(),
+                ));
                 if let Some(error) = &response.error {
                     rows.push(Line::styled(
                         format!("  error: {}", model_error_code(error.code)),
@@ -132,6 +146,7 @@ pub(crate) fn project(
                         other => media_or_text(&mut rows, other, "  "),
                     }
                 }
+                gutter(&mut rows[start..], Role::Assistant);
                 rows.push(Line::default());
             }
             EntryPayload::ToolResult(result) => {
@@ -232,8 +247,7 @@ pub(crate) fn project(
         if last_in_commit {
             for (turn_id, finish) in &outcomes {
                 if finish.2 == stored.sequence && !emitted.contains(turn_id) {
-                    rows.push(outcome_row(finish.0, finish.1.as_deref()));
-                    rows.push(Line::default());
+                    push_outcome(&mut rows, finish.0, finish.1.as_deref());
                     emitted.insert(turn_id.clone());
                 }
             }
@@ -246,15 +260,16 @@ pub(crate) fn project(
     // failure before any response). Show those outcomes after the branch.
     for (turn_id, finish) in &outcomes {
         if emitted.insert(turn_id.clone()) {
-            rows.push(outcome_row(finish.0, finish.1.as_deref()));
-            rows.push(Line::default());
+            push_outcome(&mut rows, finish.0, finish.1.as_deref());
         }
     }
 
     if let Some(partial) = &view.partial {
-        rows.push(Line::styled(
-            format!("assistant (streaming · {})", model_name(&partial.model)),
-            label_style(),
+        let start = rows.len();
+        rows.push(assistant_label(
+            &partial.model,
+            partial.usage.as_ref(),
+            None,
         ));
         for block in partial.blocks.values() {
             match block {
@@ -285,6 +300,7 @@ pub(crate) fn project(
                 )),
             }
         }
+        gutter(&mut rows[start..], Role::Assistant);
         rows.push(Line::default());
     } else if view.phase == harness_core::runtime::Phase::AwaitingResolution
         && !view.awaiting.is_empty()
@@ -358,6 +374,48 @@ fn audit_rows(view: &RuntimeView, branch: &BTreeSet<EntryId>) -> (Outcomes, Appr
     (outcomes, approvals)
 }
 
+fn push_outcome(rows: &mut Vec<Line<'static>>, outcome: Option<TurnOutcome>, code: Option<&str>) {
+    if outcome.unwrap_or(TurnOutcome::Completed) == TurnOutcome::Completed {
+        return;
+    }
+    while rows.last().is_some_and(|row| row.width() == 0) {
+        rows.pop();
+    }
+    rows.push(outcome_row(outcome, code));
+    rows.push(Line::default());
+}
+
+fn assistant_label(
+    model: &ModelRef,
+    usage: Option<&harness_core::session::Usage>,
+    duration: Option<std::time::Duration>,
+) -> Line<'static> {
+    let mut meta = bounded(&model.model, 48);
+    if let Some(duration) = duration {
+        meta.push_str(&format!(" · {:.1}s", duration.as_secs_f64()));
+    }
+    if let Some(usage) = usage {
+        let count = |n: Option<u64>| n.map_or_else(|| "?".into(), |n| n.to_string());
+        meta.push_str(&format!(
+            " · {} in / {} out",
+            count(usage.input_tokens),
+            count(usage.output_tokens)
+        ));
+    }
+    Line::from(vec![
+        Span::styled("assistant", label_style()),
+        Span::styled(meta, dim_style()),
+    ])
+}
+
+/// Width-independent gutter spans; the renderer repeats them on wrapped rows.
+fn gutter(rows: &mut [Line<'static>], role: Role) {
+    for row in rows.iter_mut().filter(|row| row.width() > 0) {
+        row.spans
+            .insert(0, Span::styled("▌ ", Theme::default().style(role)));
+    }
+}
+
 fn outcome_row(outcome: Option<TurnOutcome>, code: Option<&str>) -> Line<'static> {
     let outcome = outcome.unwrap_or(TurnOutcome::Completed);
     let label = match outcome {
@@ -424,7 +482,10 @@ fn short_id(id: &str) -> String {
 }
 
 fn push_label(rows: &mut Vec<Line<'static>>, label: &str) {
-    rows.push(Line::styled(label.to_owned(), label_style()));
+    rows.push(Line::styled(
+        label.to_owned(),
+        Theme::default().style(Role::User),
+    ));
 }
 
 fn media_or_text(rows: &mut Vec<Line<'static>>, block: &ContentBlock, prefix: &str) {
@@ -545,27 +606,27 @@ fn turn_label(turn: &TurnId) -> String {
 }
 
 fn label_style() -> Style {
-    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    Theme::default().style(Role::Assistant)
 }
 
 fn dim_style() -> Style {
-    Style::new().add_modifier(Modifier::DIM)
+    Theme::default().style(Role::Dim)
 }
 
 fn tool_style() -> Style {
-    Style::new().fg(Color::Yellow)
+    Theme::default().style(Role::Tool)
 }
 
 fn error_style() -> Style {
-    Style::new().fg(Color::Red)
+    Theme::default().style(Role::Error)
 }
 
 fn accent_style() -> Style {
-    Style::new().fg(Color::Magenta)
+    Theme::default().style(Role::Accent)
 }
 
 fn code_style() -> Style {
-    Style::new().fg(Color::Green)
+    Theme::default().style(Role::Code)
 }
 
 /// Minimal Markdown: headings, emphasis, lists, quotes, inline code and fenced
@@ -742,18 +803,18 @@ impl MarkdownBuilder {
 
     fn style(&self) -> Style {
         let mut style = if self.heading {
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Theme::default().style(Role::Assistant)
         } else {
             Style::new()
         };
         if self.emphasis > 0 {
-            style = style.add_modifier(Modifier::ITALIC);
+            style = style.patch(Theme::default().style(Role::Emphasis));
         }
         if self.strong > 0 {
-            style = style.add_modifier(Modifier::BOLD);
+            style = style.patch(Theme::default().style(Role::Strong));
         }
         if self.link {
-            style = style.add_modifier(Modifier::UNDERLINED);
+            style = style.patch(Theme::default().style(Role::Link));
         }
         style
     }
@@ -782,5 +843,5 @@ impl MarkdownBuilder {
 }
 
 fn inline_code_style() -> Style {
-    Style::new().fg(Color::Yellow).add_modifier(Modifier::DIM)
+    Theme::default().style(Role::InlineCode)
 }

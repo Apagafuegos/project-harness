@@ -22,6 +22,7 @@ crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
 futures-util.workspace = true
 async-stream.workspace = true
 pulldown-cmark.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

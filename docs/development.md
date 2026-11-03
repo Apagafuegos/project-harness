@@ -111,7 +111,8 @@ milestone.
   n/Esc returns to editing.
 - Approval captures the keyboard: `a` allows once, `d` denies, `r` allows and
   remembers, and Esc dismisses **by denying**. There is no automatic approval.
-  Every other key is ignored, and a paste never answers a ticket.
+  F1 opens help and Up/Down or PgUp/PgDn scrolls the frame; no other key
+  answers a ticket, and a paste never answers one.
   Remembered mutation grants follow the existing continuation policy checks;
   a session with changed allowances may be refused on reopen.
 - On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
@@ -151,15 +152,58 @@ milestone.
   Navigation captures paste without sending it; approval and uncertainty dialogs
   retain input precedence. Ctrl-C/Ctrl-D retain their cancellation/quit rules.
 - PageUp/PageDown scroll; Ctrl-Up/Down scroll one line; Ctrl-R toggles expanded
-  reasoning summaries. Resize relays out immediately. The status line shows
-  phase, model, usage and the catalog's sourced context limit.
-- The prompt is a multi-line editor: Up/Down keep the column across logical
-  lines, Left/Right and Home/End move the cursor, and Backspace/Delete remove
-  the character before/at it. Ctrl-D never deletes.
+  reasoning summaries. End with an empty prompt or Ctrl-End follows output.
+  Scrolling up keeps the viewport fixed as output arrives and shows a new-lines
+  counter and position percentage. Resize relays out immediately.
+- The prompt is a multi-line editor with a real terminal cursor. Up/Down keep
+  the column across logical lines; on the first/last line they recall prompt
+  history (current branch plus this process's sends), then restore the draft.
+  Left/Right and Home/End move the cursor; Ctrl-Left/Right move by word,
+  Ctrl-W deletes the previous word and Ctrl-U deletes to the line start.
+  Backspace/Delete remove the character before/at the cursor. Ctrl-D never
+  deletes. A paste over 20 lines labels the prompt title, but stays editable.
 - Esc closes any open navigation or inspector dialog; the quit confirmation and
   the approval dialog have their own Esc behavior above. Keys are read only from
   the terminal event stream and the Ctrl-C signal; no timer or tick can type,
   send or approve.
+
+### UX and key reference
+
+F1, or `?` with an empty prompt, opens the generated key reference. It groups
+editing, turn, navigation, context and dialog keys from the same table that
+admits input. Up/Down scrolls, PgUp/PgDn pages, and Esc/F1 closes back to the
+underlying screen. `?` with text in the editor remains ordinary text.
+
+| Area | Keys |
+| --- | --- |
+| Editing | Enter send; Shift+Enter / Alt+Enter newline; arrows, Home/End; Backspace/Delete; Ctrl-Left/Right words; Ctrl-W previous word; Ctrl-U line start; Up/Down history at first/last line |
+| Turn | Esc cancel; Ctrl-C cancel then durable quit (idle confirmation); empty Ctrl-D quit |
+| Navigation | PgUp/PgDn page; Ctrl-Up/Down line; empty End / Ctrl-End follow; Ctrl-O sessions; Ctrl-T branches; Ctrl-L models |
+| Context | Ctrl-K inspector; Ctrl-R reasoning; tree `p` pin / `x` exclude |
+| Dialogs | F1 help; Up/Down selection/scroll; PgUp/PgDn scroll; Enter confirm; Esc close (approval **denies**, recovery stays open); recovery Left/Right or Tab/Shift-Tab choices |
+
+The chrome is intentionally minimal: a dim header, role-coloured gutters and
+bold labels, identical user/assistant indentation, a mode-titled prompt rule
+and `>` marker, state-specific key hints and a full-width reversed status row.
+Assistant labels carry dim right-aligned model, observed duration when known,
+and human-readable input/output token counts. Reopened turn durations are
+omitted because the exposed view has no record timestamps. Ordinary completion
+adds no noise row; failed/cancelled/interrupted outcomes retain their codes.
+The empty editor shows `Ask anything · F1 help`; an empty session welcomes you
+with its workspace/model and four useful keys. Header, hints and prompt rule
+collapse before content at small sizes (minimum 20×5).
+
+The status row shows workspace/provider/model, activity/elapsed time/streamed
+bytes, and estimated context with the catalog limit and percentage. It drops
+right-hand details at narrow widths. A 10 Hz injected tick drives active-turn
+activity; idle clients have no perpetual timer. Any **nonempty** `NO_COLOR`
+disables all colours while retaining meaningful modifiers; `TERM=dumb` uses
+an ASCII spinner and gutter. Theme detection is once in the shell, not during
+drawing. Dialogs size to their content within the viewport and show `more ↓`
+when scrollable. Errors wrap to three lines plus an ellipsis: Esc dismisses
+when idle and not in a dialog; active-turn Esc still cancels. Sending also
+clears the old banner. There is no mouse capture; terminal selection still works.
+Markdown/highlighting and tool/approval content refinements are a separate step.
 
 ### Context inspector and compaction
 

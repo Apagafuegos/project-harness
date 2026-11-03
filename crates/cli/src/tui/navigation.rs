@@ -3,12 +3,7 @@ use super::{Action, App, Modal};
 use crate::text::bounded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness_core::{runtime::Command, session::*};
-use ratatui::{
-    Frame,
-    layout::Rect,
-    text::Line,
-    widgets::{Block, Borders, Clear, Paragraph},
-};
+use ratatui::{Frame, text::Line};
 
 #[derive(Default)]
 pub(super) struct Navigation {
@@ -18,6 +13,9 @@ pub(super) struct Navigation {
     edit_parent: Option<Option<EntryId>>,
     report: Option<Box<harness_core::context::PreviewReport>>,
     waiting: bool,
+    scroll: usize,
+    page: usize,
+    focus: bool,
 }
 #[derive(Clone, Copy)]
 enum Screen {
@@ -127,6 +125,8 @@ impl App {
             if let Some(screen) = screen {
                 self.navigation.screen = Some(screen);
                 self.navigation.index = 0;
+                self.navigation.scroll = 0;
+                self.navigation.focus = true;
                 self.clear_error();
                 return Some(if matches!(screen, Screen::Sessions) {
                     vec![Action::ListSessions]
@@ -152,9 +152,25 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => self.navigation.screen = None,
-            KeyCode::Up => self.navigation.index = self.navigation.index.saturating_sub(1),
+            KeyCode::PageUp => {
+                self.navigation.scroll = self
+                    .navigation
+                    .scroll
+                    .saturating_sub(self.navigation.page.max(1))
+            }
+            KeyCode::PageDown => {
+                self.navigation.scroll = self
+                    .navigation
+                    .scroll
+                    .saturating_add(self.navigation.page.max(1))
+            }
+            KeyCode::Up => {
+                self.navigation.index = self.navigation.index.saturating_sub(1);
+                self.navigation.focus = true;
+            }
             KeyCode::Down => {
-                self.navigation.index = (self.navigation.index + 1).min(count.saturating_sub(1))
+                self.navigation.index = (self.navigation.index + 1).min(count.saturating_sub(1));
+                self.navigation.focus = true
             }
             KeyCode::Char('n') if matches!(screen, Screen::Sessions) && !control => {
                 self.navigation.waiting = true;
@@ -309,6 +325,9 @@ impl App {
     pub(super) fn navigation_reset(&mut self) {
         self.navigation = Navigation::default();
         self.prompt.clear();
+        self.process_history.clear();
+        self.history.clear();
+        self.history_index = None;
         self.cursor = 0;
         self.clear_error();
     }
@@ -385,7 +404,7 @@ impl App {
         rows
     }
 
-    pub(super) fn render_navigation(&self, frame: &mut Frame) {
+    pub(super) fn render_navigation(&mut self, frame: &mut Frame) {
         if !matches!(self.modal, Modal::None) {
             return;
         }
@@ -471,13 +490,52 @@ impl App {
                     .collect(),
             ),
         };
-        draw_navigation(
+        let (name, hints) = title.split_once(" · ").unwrap_or((title, "Esc close"));
+        let mut lines = Vec::new();
+        let mut selected_start = 0;
+        for (i, row) in rows.iter().enumerate() {
+            if i == self.navigation.index {
+                selected_start = lines.len();
+            }
+            for (n, text) in row.lines().enumerate() {
+                let prefix = if i == self.navigation.index && n == 0 {
+                    "> "
+                } else {
+                    "  "
+                };
+                lines.push(Line::styled(
+                    format!("{prefix}{text}"),
+                    if i == self.navigation.index {
+                        self.theme.style(super::theme::Role::Selection)
+                    } else {
+                        Default::default()
+                    },
+                ));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line::raw("(empty)"));
+        }
+        if let Some(error) = &self.last_error {
+            lines.push(Line::styled(
+                format!("error: {error}"),
+                self.theme.style(super::theme::Role::Error),
+            ));
+        }
+        // Selection movement exposes its row; paging can independently inspect
+        // long metadata between selection changes.
+        let focus = self.navigation.focus.then_some(selected_start);
+        self.navigation.focus = false;
+        let inner = super::render::draw_modal(
             frame,
-            title,
-            rows,
-            self.navigation.index,
-            self.last_error.as_deref(),
+            self.theme,
+            name,
+            hints,
+            lines,
+            focus,
+            &mut self.navigation.scroll,
         );
+        self.navigation.page = inner.height.max(1) as usize;
     }
 }
 
@@ -553,43 +611,4 @@ fn title_of(snapshot: &SessionSnapshot) -> String {
     } else {
         title
     }
-}
-
-fn draw_navigation(
-    frame: &mut Frame,
-    title: &str,
-    rows: Vec<String>,
-    selected: usize,
-    error: Option<&str>,
-) {
-    let a = frame.area();
-    let rect = Rect::new(a.x, a.y, a.width, a.height.saturating_sub(2));
-    let block = Block::default().borders(Borders::ALL).title(title);
-    let inner = block.inner(rect);
-    frame.render_widget(Clear, rect);
-    frame.render_widget(block, rect);
-    let mut lines = Vec::new();
-    if rows.is_empty() {
-        lines.push(Line::raw("(empty)"));
-    }
-    // Start at the selected row when necessary; wrap metadata rather than
-    // clipping owners, schemas or byte counts at the terminal edge.
-    let start = if selected < 3 { 0 } else { selected };
-    for (i, row) in rows.iter().enumerate().skip(start) {
-        for (n, text) in row.lines().enumerate() {
-            let prefix = if i == selected && n == 0 { "> " } else { "  " };
-            let text = format!("{prefix}{text}");
-            let width = usize::from(inner.width.max(1));
-            let chars: Vec<char> = text.chars().collect();
-            lines.extend(
-                chars
-                    .chunks(width)
-                    .map(|chunk| Line::raw(chunk.iter().collect::<String>())),
-            );
-        }
-    }
-    if let Some(error) = error {
-        lines.push(Line::raw(format!("error: {error}")));
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
 }

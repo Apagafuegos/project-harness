@@ -383,9 +383,9 @@ async fn streamed_answer_renders_markdown_and_status() {
     assert!(screen.contains("│ quoted"), "{screen}");
     assert!(screen.contains("┌─ code rust"), "{screen}");
     assert!(screen.contains("fn main() {}"), "{screen}");
-    assert!(screen.contains("turn: completed"), "{screen}");
+    assert!(!screen.contains("turn: completed"), "{screen}");
     assert!(!screen.contains("streaming"), "{screen}");
-    assert!(screen.contains("usage 10/20"), "{screen}");
+    assert!(screen.contains("10 in / 20 out"), "{screen}");
     recorded.shutdown().await;
 }
 
@@ -1037,5 +1037,479 @@ async fn opaque_provider_state_sentinel_never_renders() {
     let screen = text(&render(&mut app, 80, 24));
     assert!(!screen.contains(SENTINEL), "sentinel leaked: {screen}");
     assert!(screen.contains("visible answer"), "{screen}");
+    recorded.shutdown().await;
+}
+
+/// Explicit, offline evidence capture; never writes during the ordinary gate.
+#[tokio::test]
+#[ignore = "writes UX evidence only when explicitly requested"]
+async fn ux_render_evidence() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([
+            reply("Hello! What would you like to work on today?"),
+            Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::text(
+                    0,
+                    "Working through the UI foundations, one careful step at a time.",
+                ),
+                Step::AwaitCancel,
+                Step::cancelled(),
+            ]),
+            proposal(
+                "write",
+                json!({"path":"notes.txt", "text":"UX foundations"}),
+            ),
+            reply("done"),
+        ])
+        .await;
+    let mut output = String::new();
+    fn capture(output: &mut String, label: &str, app: &mut App) {
+        for (w, h) in [(80, 24), (120, 36), (20, 5)] {
+            if app.view().is_some_and(|v| v.active_turn.is_some()) {
+                app.on_action(harness::tui::UiAction::Tick(Duration::ZERO));
+                app.on_action(harness::tui::UiAction::Tick(Duration::from_millis(12_100)));
+            }
+            output.push_str(&format!("\n### {label} {w}×{h}\n```text\n"));
+            output.push_str(&text(&render(app, w, h)));
+            output.push_str("```\n");
+        }
+    }
+    let turn = recorded.start("Hello").await;
+    recorded.wait_finished(&turn).await;
+    capture(&mut output, "idle", &mut recorded.app());
+    let mut help = recorded.app();
+    help.on_key(key(KeyCode::F(1)));
+    capture(&mut output, "help", &mut help);
+    let turn = recorded.start("Improve the TUI.").await;
+    recorded
+        .pump(|v| {
+            v.partial.as_ref().is_some_and(|p| {
+                p.blocks
+                    .values()
+                    .any(|b| matches!(b, PartialBlock::Text(t) if !t.is_empty()))
+            })
+        })
+        .await;
+    capture(&mut output, "streaming", &mut recorded.app());
+    recorded
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn.clone(),
+        })
+        .await
+        .unwrap();
+    recorded.wait_finished(&turn).await;
+    let turn = recorded.start("Write a note.").await;
+    let ticket = recorded.wait_approval().await;
+    capture(&mut output, "approval", &mut recorded.app());
+    recorded.submit(&ticket, Decision::Deny, false).await;
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+    let path = std::env::var("HARNESS_UX_EVIDENCE").expect("explicit evidence output path");
+    fs::write(path, output).unwrap();
+}
+
+#[tokio::test]
+async fn no_color_covers_transcript_prompt_errors_status_and_all_dialog_frames() {
+    use harness::tui::theme::Theme;
+    use ratatui::style::Color;
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([
+            reply("# Header\n\n**bold** `code`\n\n```rust\nlet x = 1;\n```"),
+            proposal("write", json!({"path":"note","text":"x"})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("Hello").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = App::with_theme(recorded.info.clone(), Theme::new(true, false));
+    for item in &recorded.items {
+        app.on_subscription(item.clone());
+    }
+    fn check(app: &mut App) {
+        let buffer = render(app, 120, 36);
+        for cell in &buffer.content {
+            assert_eq!(cell.fg, Color::Reset, "{cell:?}");
+            assert_eq!(cell.bg, Color::Reset, "{cell:?}");
+        }
+    }
+    app.set_error("sample error");
+    check(&mut app);
+    for code in [
+        key(KeyCode::F(1)),
+        key(KeyCode::Esc),
+        modified(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        key(KeyCode::Esc),
+        modified(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        key(KeyCode::Esc),
+        modified(KeyCode::Char('l'), KeyModifiers::CONTROL),
+        key(KeyCode::Esc),
+        modified(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        key(KeyCode::Esc),
+        modified(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        key(KeyCode::Esc),
+    ] {
+        app.on_key(code);
+        check(&mut app);
+    }
+    let at = recorded.items.len();
+    let turn = recorded.start("tool").await;
+    let ticket = recorded.wait_approval().await;
+    for item in &recorded.items[at..] {
+        app.on_subscription(item.clone());
+    }
+    check(&mut app);
+    recorded.submit(&ticket, Decision::Deny, false).await;
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn activity_spinner_elapsed_and_stream_size_use_only_injected_clock() {
+    use harness::tui::{UiAction, theme::Theme};
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "partial answer"),
+            Step::AwaitCancel,
+            Step::cancelled(),
+        ])])
+        .await;
+    let turn = recorded.start("work").await;
+    recorded
+        .pump(|v| {
+            v.partial.as_ref().is_some_and(|p| {
+                p.blocks
+                    .values()
+                    .any(|b| matches!(b,PartialBlock::Text(t) if !t.is_empty()))
+            })
+        })
+        .await;
+    let mut app = recorded.app();
+    app.on_action(UiAction::Tick(Duration::from_secs(5)));
+    app.on_action(UiAction::Tick(Duration::from_millis(17_100)));
+    let screen = text(&render(&mut app, 200, 60));
+    assert!(
+        screen.contains("⠙ inferring 12s") && screen.contains("14 B"),
+        "{screen}"
+    );
+    let unchanged = text(&render(&mut app, 200, 60));
+    assert_eq!(screen, unchanged, "rendering cannot advance time");
+    let mut ascii = App::with_theme(recorded.info.clone(), Theme::new(false, true));
+    for item in &recorded.items {
+        ascii.on_subscription(item.clone());
+    }
+    ascii.on_action(UiAction::Tick(Duration::from_secs(5)));
+    ascii.on_action(UiAction::Tick(Duration::from_millis(17_100)));
+    assert!(text(&render(&mut ascii, 200, 60)).contains("\\ inferring 12s"));
+    recorded
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn.clone(),
+        })
+        .await
+        .unwrap();
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_history_seeds_current_branch_restores_draft_and_keeps_sent_prompts() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("one"), reply("two")]).await;
+    let first = recorded.start("first prompt").await;
+    recorded.wait_finished(&first).await;
+    let first_head = recorded.view.view().snapshot.head().cloned();
+    let second = recorded.start("second prompt").await;
+    recorded.wait_finished(&second).await;
+    let mut app = recorded.app();
+    type_text(&mut app, "draft");
+    app.on_key(key(KeyCode::Up));
+    assert!(text(&render(&mut app, 80, 24)).contains("> second prompt"));
+    app.on_key(key(KeyCode::Up));
+    assert!(text(&render(&mut app, 80, 24)).contains("> first prompt"));
+    app.on_key(key(KeyCode::Down));
+    app.on_key(key(KeyCode::Down));
+    assert!(text(&render(&mut app, 80, 24)).contains("> draft"));
+    app.on_key(key(KeyCode::Enter));
+    app.on_key(key(KeyCode::Up));
+    assert!(text(&render(&mut app, 80, 24)).contains("> draft"));
+    // Reopened/historical branch history excludes later sibling messages.
+    recorded
+        .handle
+        .command(Command::SelectHead { head: first_head })
+        .await
+        .unwrap();
+    recorded.record_reset().await;
+    let mut branch = App::new(recorded.info.clone());
+    branch.on_subscription(recorded.items.last().unwrap().clone());
+    branch.on_key(key(KeyCode::Up));
+    assert!(text(&render(&mut branch, 80, 24)).contains("> first prompt"));
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn word_editing_and_atomic_large_paste_remain_editable() {
+    let fixture = Fixture::new(false);
+    let recorded = fixture.create([]).await;
+    let mut app = recorded.app();
+    app.on_paste("one two 界 three");
+    app.on_key(modified(KeyCode::Left, KeyModifiers::CONTROL));
+    app.on_key(modified(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    app.on_key(modified(KeyCode::Right, KeyModifiers::CONTROL));
+    app.on_key(modified(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_text(&mut app, "kept");
+    let actions = app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(actions.as_slice(),[Action::Command(Command::StartTurn{content,..})] if content==&vec![ContentBlock::Text{text:"kept".into()}]),
+        "{actions:?}"
+    );
+    app.on_paste(&["line"; 21].join("\n"));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("[pasted 21 lines]"), "{screen}");
+    app.on_key(key(KeyCode::Backspace));
+    let actions = app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(actions.as_slice(),[Action::Command(Command::StartTurn{content,..})] if matches!(&content[0],ContentBlock::Text{text} if text.lines().count()==21 && text.ends_with("lin")))
+    );
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn help_scrolls_with_more_indicator_and_empty_question_mark_only() {
+    let fixture = Fixture::new(false);
+    let recorded = fixture.create([]).await;
+    let mut app = recorded.app();
+    app.on_key(key(KeyCode::Char('?')));
+    let before = text(&render(&mut app, 80, 24));
+    assert!(
+        before.contains("key reference") && before.contains("Editing") && before.contains("more ↓"),
+        "{before}"
+    );
+    app.on_key(key(KeyCode::PageDown));
+    let after = text(&render(&mut app, 80, 24));
+    assert_ne!(before, after);
+    for _ in 0..10 {
+        app.on_key(key(KeyCode::PageDown));
+        render(&mut app, 80, 24);
+    }
+    assert!(text(&render(&mut app, 80, 24)).contains("Dialogs"));
+    app.on_key(key(KeyCode::Esc));
+    type_text(&mut app, "why?");
+    let actions = app.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(actions.as_slice(),[Action::Command(Command::StartTurn{content,..})] if content==&vec![ContentBlock::Text{text:"why?".into()}])
+    );
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_error_is_wrapped_bounded_and_dismissed_welcome_disappears_after_send() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("welcome gone")]).await;
+    let mut app = recorded.app();
+    let welcome = text(&render(&mut app, 80, 24));
+    for expected in ["Welcome to harness", "Workspace:", "Model:", "F1 help"] {
+        assert!(welcome.contains(expected), "{welcome}");
+    }
+    app.set_error("error words ".repeat(40));
+    let banner = text(&render(&mut app, 40, 24));
+    assert!(
+        banner.contains("error: error words") && banner.contains('…'),
+        "{banner}"
+    );
+    app.on_key(key(KeyCode::Esc));
+    assert!(!text(&render(&mut app, 80, 24)).contains("error:"));
+    app.set_error("clear on send");
+    app.on_paste("hello");
+    app.on_key(key(KeyCode::Enter));
+    assert!(!text(&render(&mut app, 80, 24)).contains("clear on send"));
+    let turn = recorded.start("hello").await;
+    recorded.wait_finished(&turn).await;
+    let screen = text(&render(&mut recorded.app(), 200, 60));
+    assert!(!screen.contains("Welcome to harness"));
+    render(&mut recorded.app(), 20, 5);
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn hello_conversation_has_gutters_metadata_full_status_and_real_cursor() {
+    use harness::tui::UiAction;
+    use ratatui::{
+        backend::Backend,
+        style::{Color, Modifier},
+    };
+    let fixture = Fixture::new(false);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, "Hello! What would you like to work on today?"),
+            Step::Event(ProviderEvent::UsageUpdated {
+                usage: Usage {
+                    input_tokens: Some(569),
+                    output_tokens: Some(15),
+                    cached_input_tokens: None,
+                    reasoning_tokens: None,
+                },
+            }),
+            Step::Wait(gate),
+            Step::completed(FinishReason::Stop),
+        ])])
+        .await;
+    let turn = recorded.start("Hello").await;
+    recorded
+        .pump(|v| v.partial.as_ref().is_some_and(|p| p.usage.is_some()))
+        .await;
+    let mut app = recorded.app();
+    app.on_action(UiAction::Tick(Duration::ZERO));
+    app.on_action(UiAction::Tick(Duration::from_millis(1200)));
+    let consumed = recorded.items.len();
+    release.send(()).unwrap();
+    recorded.wait_finished(&turn).await;
+    for item in &recorded.items[consumed..] {
+        app.on_subscription(item.clone());
+    }
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen = text(buffer);
+    assert!(
+        !screen.contains("turn: completed") && !screen.contains('▏'),
+        "{screen}"
+    );
+    for row in [
+        "▌ you",
+        "▌ Hello",
+        "▌ assistant",
+        "▌ Hello! What would you like to work on today?",
+        "scripted · 1.2s · 569 in / 15 out",
+        "> Ask anything · F1 help",
+        " message ─",
+        "harness · workspace · session",
+        "idle · context",
+    ] {
+        assert!(screen.contains(row), "missing {row}: {screen}");
+    }
+    let user = screen.lines().position(|l| l.starts_with("▌ you")).unwrap() as u16;
+    let assistant = screen
+        .lines()
+        .position(|l| l.starts_with("▌ assistant"))
+        .unwrap() as u16;
+    assert_eq!(buffer[(0, user)].fg, Color::Cyan);
+    assert_eq!(buffer[(2, user)].fg, Color::Cyan);
+    assert_eq!(buffer[(0, assistant)].fg, Color::Green);
+    assert_eq!(buffer[(2, assistant)].fg, Color::Green);
+    assert!(buffer[(2, user)].modifier.contains(Modifier::BOLD));
+    assert!(buffer[(79, assistant)].modifier.contains(Modifier::DIM));
+    assert!(buffer[(0, 0)].modifier.contains(Modifier::DIM));
+    for x in 0..80 {
+        assert!(buffer[(x, 23)].modifier.contains(Modifier::REVERSED));
+    }
+    assert_eq!(
+        terminal.backend_mut().get_cursor_position().unwrap(),
+        (2, 21).into()
+    );
+    let tiny = text(&render(&mut app, 20, 5));
+    assert!(
+        tiny.contains("today?"),
+        "tail padding hid the message: {tiny}"
+    );
+    app.on_paste("界e\u{301}");
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        terminal.backend_mut().get_cursor_position().unwrap(),
+        (5, 21).into()
+    );
+    app.on_paste(&"x".repeat(78));
+    terminal.draw(|f| app.render(f)).unwrap();
+    let cursor = terminal.backend_mut().get_cursor_position().unwrap();
+    assert!(cursor.x < 80 && cursor.y < 24);
+    render(&mut app, 20, 5);
+    render(&mut app, 200, 60);
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn follow_mode_preserves_absolute_rows_and_counts_new_output_until_end() {
+    let fixture = Fixture::new(false);
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let body = (0..60)
+        .map(|n| format!("row {n:02} visible paragraph"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut recorded = fixture
+        .create([Script::new([
+            Step::Event(ProviderEvent::Started),
+            Step::text(0, &body),
+            Step::Wait(gate),
+            Step::text(0, "\n\nnew output arrives\n\nmore output arrives"),
+            Step::AwaitCancel,
+            Step::cancelled(),
+        ])])
+        .await;
+    let turn = recorded.start("scroll").await;
+    recorded
+        .pump(|v| {
+            v.partial.as_ref().is_some_and(|p| {
+                p.blocks
+                    .values()
+                    .any(|b| matches!(b,PartialBlock::Text(t) if t.contains("row 59")))
+            })
+        })
+        .await;
+    let mut app = recorded.app();
+    render(&mut app, 80, 24);
+    app.on_key(key(KeyCode::PageUp));
+    let before = text(&render(&mut app, 80, 24));
+    let consumed = recorded.items.len();
+    release.send(()).unwrap();
+    recorded
+        .pump(|v| {
+            v.partial.as_ref().is_some_and(|p| {
+                p.blocks
+                    .values()
+                    .any(|b| matches!(b,PartialBlock::Text(t) if t.contains("more output arrives")))
+            })
+        })
+        .await;
+    for item in &recorded.items[consumed..] {
+        app.on_subscription(item.clone());
+    }
+    let after = text(&render(&mut app, 80, 24));
+    assert_eq!(
+        before.lines().take(17).collect::<Vec<_>>(),
+        after.lines().take(17).collect::<Vec<_>>(),
+        "scrolled-up anchor moved"
+    );
+    assert!(after.contains("↓ 4 new lines · End to follow"), "{after}");
+    app.on_key(key(KeyCode::End));
+    let followed = text(&render(&mut app, 80, 24));
+    assert!(
+        followed.contains("more output arrives") && followed.contains("100% · following"),
+        "{followed}"
+    );
+    app.on_paste("draft");
+    app.on_key(key(KeyCode::PageUp));
+    render(&mut app, 80, 24);
+    app.on_key(modified(KeyCode::End, KeyModifiers::CONTROL));
+    assert!(text(&render(&mut app, 80, 24)).contains("100% · following"));
+    app.set_error("active error");
+    assert!(matches!(
+        app.on_key(key(KeyCode::Esc)).as_slice(),
+        [Action::Command(Command::Cancel { .. })]
+    ));
+    recorded
+        .handle
+        .command(Command::Cancel {
+            turn_id: turn.clone(),
+        })
+        .await
+        .unwrap();
+    recorded.wait_finished(&turn).await;
     recorded.shutdown().await;
 }

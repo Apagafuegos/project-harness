@@ -1,7 +1,8 @@
 # 0023: TUI architecture — the pure model and the `Action` boundary
 
 Status: Parts 1 and 2 implemented for Milestone 5 steps 02 and 03; Parts 3 to 5
-implemented for Milestone 5 steps 04 and 05 and Milestone 6 step 03.
+implemented for Milestone 5 steps 04 and 05 and Milestone 6 step 03; Part 6
+implemented for Milestone 7 step 05.
 
 Date: 2026-10-31
 
@@ -571,3 +572,118 @@ No engine, provider, persistence, dependency or toolchain change was made. The
 only files touched are `crates/cli/src/tui/{mod,navigation,transcript,inspector}.rs`,
 `crates/cli/tests/{tui_controls,tui_boundary}.rs`, and this ADR plus
 `docs/development.md`.
+
+## Part 6: UX foundations
+
+M7-05 keeps the model/shell boundary and width-independent projection. This
+part supersedes the earlier bare prompt, fixed dialog size, character wrapping,
+perpetual render timer and completed-turn status rows. Markdown parsing,
+highlighting, tool content and approval-preview content remain M7-06's scope.
+The user's review/addendum and subsequent style refinement choose **minimal
+chrome**: typography, role colours and spacing; no emoji or transcript box.
+The focused prompt has a single accent top rule with its mode and a `>` marker,
+not a rounded box. Streaming dims that rule. A dim header shows workspace,
+short session identity and sibling count on forked histories. Header, footer,
+then prompt rule disappear at small heights; the minimum stays 20×5.
+
+### Theme, rows and layout
+
+`theme.rs` owns all colours and modifier roles. The shell computes `Theme`
+once per app and injects it; neither the model constructor nor drawing reads
+the environment. Any nonempty `NO_COLOR` strips every foreground/background
+colour; bold, dim, underline and reversed still communicate meaning. Only ANSI
+colours are used. The full-width status row uses terminal-default colours plus
+`REVERSED`, with workspace/provider/model on the left and phase/context estimate
+and percentage on the right. Narrow layouts drop right-hand details first.
+Usage is labelled `N in / N out` on the assistant label, not an ambiguous pair
+on the status bar. User and assistant share a two-cell gutter (`▌`, or `|`
+in ASCII mode), role-coloured bold labels, and the same body indentation.
+Assistant metadata is dim and right-aligned by the width-dependent renderer.
+Normally completed outcomes are omitted; cancelled/interrupted/failed outcomes
+remain compact, stable-code-bearing lines with no blank gap before them.
+
+The exposed view does not carry journal record timestamps. Durations therefore
+come only from observed, injected ticks and are retained in memory per turn;
+unobserved/reopened durations are unknown and omitted, never guessed or read
+from storage. Session title is likewise not in this view, so the header uses
+the allowed short ID. No schema or core accessor is added.
+
+`unicode-segmentation` is the sole added dependency, already present transitively:
+wrapping uses grapheme clusters and Ratatui's display-cell measurements, keeps
+span/line styles, breaks at whitespace and hard-breaks overlong tokens. Leading
+indent/list markers establish hanging indentation. The projection's existing
+code-frame markers are a no-reflow hint: those rows hard-wrap with `↪`, never
+word-reflow. Gutter spans repeat on physical continuation rows. The prompt uses
+a separate hard-wrapped grapheme layout shared with `Frame::set_cursor_position`;
+there is no cursor glyph in its text. Empty prompts show the dim placeholder
+`Ask anything · F1 help`. Large bracketed pastes are atomic, fully editable,
+and label the mode rule with `[pasted N lines]` above 20 lines.
+
+### Injected time and follow mode
+
+`UiAction::Tick(Duration)` is a TUI-local **input**, not an engine command or an
+outgoing shell effect. The shell supplies monotonic elapsed time at about 10 Hz
+only during active turns. The pure model never consults a clock. Active phases
+show a spinner, elapsed seconds and streaming displayable-byte count;
+`TERM=dumb` selects an ASCII spinner/gutter. Dirty rendering is coalesced to
+16 ms; there is no perpetual idle timer. Pending command/navigation futures can
+still service render responsiveness counters while work is outstanding.
+
+At the bottom the viewport follows. While scrolled up, growth is added to the
+bottom offset so the exposed physical rows remain fixed, and a dim new-lines
+counter plus `End to follow` appears. Overflow has a percentage marker. Reset
+returns to following. End follows only with an empty draft; Ctrl-End follows
+without discarding a nonempty draft.
+
+### Key table, editor and dialogs
+
+`keys.rs` is both the input allowlist and the generated grouped help reference;
+handlers receive only documented chords (ordinary printable text is a documented
+family). An independent contract test covers the required table rows and control
+chords, so deleting a binding cannot silently remove both its help and behavior.
+State-specific hint footers retain the most useful keys. Every added key or
+changed existing meaning is listed here:
+
+| Key | Added meaning |
+| --- | --- |
+| F1 | Open help over the current screen; close help when open. |
+| `?` with empty prompt | Open help; otherwise ordinary prompt text. |
+| Up on first logical line | Recall previous prompt. |
+| Down on last logical line | Recall next prompt, then restore the saved draft. |
+| Ctrl-Left / Ctrl-Right | Move by whitespace-delimited word. |
+| Ctrl-W | Delete the previous word. |
+| Ctrl-U | Delete to the start of the logical line. |
+| End on empty prompt / Ctrl-End | Follow output (Ctrl-End preserves a draft). |
+| Esc idle, without a dialog | Dismiss the error banner; active-turn Esc still cancels. |
+| Up/Down and PgUp/PgDn in help/dialogs | Scroll content; selection dialogs keep Up/Down selection and expose it. |
+
+History is seeded from current-branch user messages plus prompts sent in this
+process; it is memory-only and reset on session replacement. Navigation,
+compaction, approval and uncertain-operation semantics remain unchanged. In an
+approval, `a`, `d`, `r` and Esc still emit precisely the original bound answer;
+paste and scrolling never answer. Help closes back to the underlying dialog.
+A shared content-sized modal frame clamps to area minus two cells, scrolls
+wrapped content, carries title/key hints and shows `more ↓`/`more ↑`. The
+inspector's existing rendered-preview commitment guard still uses the exposed
+content rectangle. Errors wrap to three rows plus an ellipsis and dismiss on
+idle Esc or send. The empty session has a workspace/model/four-key welcome.
+
+### Offline evidence
+
+Pure TestBackend coverage adds word/style/grapheme/code wrapping, modal overflow,
+NO_COLOR across transcript/chrome/dialogs, fake-clock activity, history including
+branch seeding, word edits/large paste, generated help and paging, follow anchors,
+error/welcome behavior, and the exact Hello conversation's gutters/metadata,
+full-width status, placeholder/real cursor at 80×24 plus 20×5 and 200×60. Loop
+coverage checks active-only ticks and idle quiescence. Existing approval,
+inspector commitment, cancellation, navigation, PTY and boundary tests retain
+their behavioral meaning. Handoff-only render captures are not shipped.
+
+Each mutation was applied alone, failed the named test (exit 101), and reverted:
+
+| Mutation | Test | Observed failure |
+| --- | --- | --- |
+| Character rather than word wrapping | `word_wrap_keeps_words_and_hanging_indent` | `gamma delt` / `a` instead of intact words |
+| `Color::Gray` in status drawing | `no_color_covers_transcript_prompt_errors_status_and_all_dialog_frames` | Gray cell instead of Reset |
+| Remove Ctrl-W binding | `help_table_covers_every_handled_key` | undocumented key: Ctrl-W |
+| Consult system time in model | `activity_spinner_elapsed_and_stream_size_use_only_injected_clock` | real epoch seconds instead of fake 12s |

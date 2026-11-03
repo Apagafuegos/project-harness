@@ -148,6 +148,8 @@ pub enum Signal {
 /// Observable loop counters, useful for deterministic nonblocking tests.
 #[derive(Default, Debug)]
 pub struct Stats {
+    /// Injected activity ticks, scheduled only while a turn is active.
+    pub activity_ticks: usize,
     /// Render ticks serviced (including clean ticks which draw nothing).
     pub ticks: usize,
     /// Ticks serviced while command replies were outstanding.
@@ -179,8 +181,9 @@ where
     let mut pending = FuturesUnordered::new();
     let mut navigation = super::runtime_nav::PendingNavigation::new();
     let mut inspections = inspector_shell::Inspections::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(16));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let origin = std::time::Instant::now();
+    let mut next_activity = tokio::time::Instant::now();
+    let mut next_render = tokio::time::Instant::now();
     let mut dirty = true;
     let mut quitting = false;
     let mut restored = false;
@@ -216,6 +219,11 @@ where
             })
         {
             return Ok(stats);
+        }
+        let active = app.view().is_some_and(|v| v.active_turn.is_some());
+        if active && app.turn_started.is_none() {
+            app.on_action(super::UiAction::Tick(origin.elapsed()));
+            next_activity = tokio::time::Instant::now() + Duration::from_millis(100);
         }
         tokio::select! {
             item = subscriptions.next() => {
@@ -297,7 +305,14 @@ where
                 }
                 dirty = true;
             }
-            _ = tick.tick() => {
+            _ = tokio::time::sleep_until(next_activity), if active => {
+                app.on_action(super::UiAction::Tick(origin.elapsed()));
+                stats.activity_ticks += 1;
+                dirty = true;
+                next_activity = tokio::time::Instant::now() + Duration::from_millis(100);
+            }
+            _ = tokio::time::sleep_until(next_render), if dirty || !pending.is_empty() || !navigation.is_empty() => {
+                next_render = tokio::time::Instant::now() + Duration::from_millis(16);
                 stats.ticks += 1;
                 if !pending.is_empty() || !navigation.is_empty() { stats.pending_ticks += 1; }
                 if dirty && !restored {

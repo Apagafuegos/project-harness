@@ -10,11 +10,7 @@ use harness_core::{
     runtime::{Accepted, EventKind, InspectError, Rejection},
     session::{ContentBlock, ContextMode, EntryId, EntryPayload, ModelRef, SessionId, TurnId},
 };
-use ratatui::{
-    Frame,
-    text::Line,
-    widgets::{Block, Borders, Clear, Paragraph},
-};
+use ratatui::{Frame, text::Line};
 
 type Identity = (SessionId, u64, Option<EntryId>, ModelRef);
 
@@ -280,6 +276,14 @@ impl App {
                 self.discard_compaction()
             }
             KeyCode::Esc => self.close_inspector(),
+            KeyCode::Up => {
+                self.inspector.scroll = self.inspector.scroll.saturating_sub(1);
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.inspector.scroll = self.inspector.scroll.saturating_add(1);
+                Vec::new()
+            }
             KeyCode::PageUp => {
                 self.inspector.scroll = self.inspector.scroll.saturating_sub(self.inspector.page);
                 Vec::new()
@@ -348,7 +352,6 @@ impl App {
         if !self.inspector_captures() {
             return;
         }
-        let area = frame.area();
         let mut rows = vec![Line::raw(
             "Ctrl-K close | m model preview | c compact | PgUp/PgDn | Esc cancel",
         )];
@@ -385,36 +388,24 @@ impl App {
         } else {
             rows.push(Line::raw("Inspecting context…"));
         }
-        let block = Block::default()
-            .title(" Context inspector (read-only) ")
-            .title_bottom(if self.inspector.preview.is_some() {
-                " Enter commit | Esc discard | PgUp/PgDn "
-            } else {
-                " PgUp/PgDn scroll "
-            })
-            .borders(Borders::ALL);
-        let inner = block.inner(area);
-        let physical = super::render::wrap_lines(rows, inner.width as usize);
-        self.inspector.page = (inner.height as usize).max(1);
         if let Some(index) = self.inspector.models {
             self.inspector.scroll = index.saturating_sub(self.inspector.page.saturating_sub(4));
         }
-        self.inspector.scroll = self
-            .inspector
-            .scroll
-            .min(physical.len().saturating_sub(inner.height as usize));
-        frame.render_widget(Clear, area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new(
-                physical
-                    .into_iter()
-                    .skip(self.inspector.scroll)
-                    .take(inner.height as usize)
-                    .collect::<Vec<_>>(),
-            ),
-            inner,
+        let hints = if self.inspector.preview.is_some() {
+            "Enter commit | Esc discard | ↑↓ / PgUp/PgDn scroll"
+        } else {
+            "Ctrl-K close | m model | c compact | ↑↓ / PgUp/PgDn scroll"
+        };
+        let inner = super::render::draw_modal(
+            frame,
+            self.theme,
+            "Context inspector (read-only)",
+            hints,
+            rows,
+            None,
+            &mut self.inspector.scroll,
         );
+        self.inspector.page = inner.height.max(1) as usize;
         // Arrival alone is not enough: a frame must actually expose the proposal
         // before Enter can authorize commitment.
         if inner.height >= 4 && inner.width >= 20 && self.inspector.preview.is_some() {

@@ -9,6 +9,7 @@ rust-version = "1.99"
 publish = false
 
 [workspace.dependencies]
+unicode-segmentation = "1.13.3"
 harness-core = { path = "crates/core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }

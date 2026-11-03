@@ -195,7 +195,7 @@ async fn streamed_answer_paste_resize_and_ctrl_d() {
     let (_, terminal, stats) = drive(f, events, &f.handle).await;
     assert!(stats.frames >= 3);
     assert!(text(&terminal).contains("streamed-one-two"));
-    assert!(text(&terminal).contains("128.0k"));
+    assert!(text(&terminal).contains("128k"));
     f.handle.shutdown().await;
     assert!(f.snapshot().entries().any(|(_, e)| matches!(&e.entry.payload, EntryPayload::UserMessage(m) if matches!(&m.content[0], ContentBlock::Text { text } if text == "hello\nworld"))));
 }
@@ -392,5 +392,32 @@ async fn plain_tui_new_session_records_the_shared_masking_default() {
     );
     assert!(configuration["compaction"]["summary_model"].is_null());
     assert_eq!(configuration["compaction"]["automatic"], false);
+    f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn activity_ticks_are_injected_only_during_active_turns_and_idle_has_no_timer() {
+    let idle = Fixture::new(vec![], 64).await;
+    let events = async_stream::stream! {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        yield Ok(ctrl('d'));
+    };
+    let (_, _, stats) = drive(&idle, events, &idle.handle).await;
+    assert_eq!(stats.activity_ticks, 0);
+    assert!(stats.ticks <= 2, "idle render timer kept waking: {stats:?}");
+    idle.handle.shutdown().await;
+    let busy = Fixture::new(vec![stalled()], 64).await;
+    let f = &busy;
+    let events = async_stream::stream! {
+        yield Ok(Event::Paste("work".into()));yield Ok(key(KeyCode::Enter));
+        wait(&f.handle,|v|v.partial.is_some()).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        yield Ok(key(KeyCode::Esc));
+        wait(&f.handle,|v|v.active_turn.is_none()).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        yield Ok(ctrl('d'));
+    };
+    let (_, _, stats) = drive(f, events, &f.handle).await;
+    assert!(stats.activity_ticks >= 3, "{stats:?}");
     f.handle.shutdown().await;
 }

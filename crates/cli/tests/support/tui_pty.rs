@@ -107,7 +107,7 @@ fn probe_inner(
             output.extend(bytes);
         }
         let screen = String::from_utf8_lossy(&output);
-        if !acted && screen.contains("ctx") {
+        if !acted && screen.contains("context") {
             match scenario {
                 Scenario::Quit => {
                     writer.write_all(b"\x04").map_err(|_| "quit key")?;
@@ -141,7 +141,11 @@ fn probe_inner(
                     acted = true;
                 }
                 Scenario::Live
-                    if screen.contains("completed") && screen.matches("pong").count() >= 2 =>
+                    if screen.matches("pong").count() >= 2
+                        && screen
+                            .rfind("idle")
+                            .zip(screen.rfind("pong"))
+                            .is_some_and(|(idle, answer)| idle > answer) =>
                 {
                     writer.write_all(b"\x04").map_err(|_| "quit key")?;
                     acted = true;

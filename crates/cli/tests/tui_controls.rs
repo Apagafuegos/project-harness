@@ -332,11 +332,11 @@ async fn tree_shows_each_turns_effective_mode_at_80x24_and_20x5() {
     println!("TREE 80x24\n{wide}");
     let pinned = wide
         .lines()
-        .find(|line| line.contains("first question"))
+        .find(|line| line.contains("first question") && line.contains("[pin]"))
         .expect("pinned row");
     let excluded = wide
         .lines()
-        .find(|line| line.contains("second question"))
+        .find(|line| line.contains("second question") && line.contains("[excl]"))
         .expect("excluded row");
     assert!(
         pinned.contains("[pin]") && !pinned.contains("[excl]"),

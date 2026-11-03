@@ -12,13 +12,15 @@
 
 mod inspector;
 mod inspector_shell;
+mod keys;
 mod navigation;
 mod render;
 pub mod runtime;
 pub mod runtime_nav;
+pub mod theme;
 mod transcript;
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use harness_core::{
@@ -35,6 +37,14 @@ use harness_core::{
 use ratatui::{Frame, text::Line};
 
 use self::transcript::Notice;
+use theme::Theme;
+
+/// TUI-local input, carrying a monotonic clock supplied by the shell.
+#[derive(Clone, Copy, Debug)]
+pub enum UiAction {
+    /// Monotonic time since shell startup, delivered only during active turns.
+    Tick(Duration),
+}
 use crate::text::{bounded, line};
 
 /// Static session facts the view does not carry.
@@ -143,6 +153,21 @@ impl ResolutionMode {
 
 /// The pure client model. One instance owns one session's screen.
 pub struct App {
+    theme: Theme,
+    help: bool,
+    modal_scroll: usize,
+    modal_page: usize,
+    history: Vec<String>,
+    process_history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: String,
+    pasted_lines: usize,
+    physical_lines: usize,
+    new_lines: usize,
+    now: Duration,
+    turn_started: Option<Duration>,
+    timed_turn: Option<TurnId>,
+    durations: BTreeMap<TurnId, Duration>,
     navigation: navigation::Navigation,
     inspector: inspector::Inspector,
     info: SessionInfo,
@@ -171,7 +196,27 @@ impl App {
     /// Create an app for a session. The first subscription item must be a
     /// `Reset`; until then the screen shows an empty, connecting state.
     pub fn new(info: SessionInfo) -> Self {
+        Self::with_theme(info, Theme::default())
+    }
+
+    /// Inject the shell-computed theme; construction never reads environment.
+    pub fn with_theme(info: SessionInfo, theme: Theme) -> Self {
         Self {
+            theme,
+            help: false,
+            modal_scroll: 0,
+            modal_page: 1,
+            history: Vec::new(),
+            process_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
+            pasted_lines: 0,
+            physical_lines: 0,
+            new_lines: 0,
+            now: Duration::ZERO,
+            turn_started: None,
+            timed_turn: None,
+            durations: BTreeMap::new(),
             navigation: Default::default(),
             inspector: Default::default(),
             info,
@@ -198,7 +243,7 @@ impl App {
 
     /// Insert bracketed paste atomically; modal input never becomes a command.
     pub fn on_paste(&mut self, text: &str) {
-        if self.navigation_captures_input() || self.inspector_captures() {
+        if self.help || self.navigation_captures_input() || self.inspector_captures() {
             return;
         }
         let text: String = text
@@ -207,6 +252,7 @@ impl App {
             .collect();
         match &mut self.modal {
             Modal::None => {
+                self.pasted_lines = text.split('\n').count();
                 let at = self.byte_index(self.cursor);
                 self.prompt.insert_str(at, &text);
                 self.cursor += text.chars().count();
@@ -247,11 +293,13 @@ impl App {
                     self.set_error("runtime fault");
                 }
                 self.view = Some(client);
+                self.seed_history();
                 self.reset_inspector();
                 self.notices.clear();
                 self.context = None;
                 self.scroll = 0;
-                self.rebuild();
+                self.physical_lines = 0;
+                self.new_lines = 0;
             }
             SubscriptionItem::Event(event) => {
                 let Some(client) = self.view.as_mut() else {
@@ -262,7 +310,6 @@ impl App {
                 }
                 self.observe_inspector(&event.kind);
                 self.observe(&event.kind);
-                self.rebuild();
             }
         }
         if self
@@ -272,14 +319,76 @@ impl App {
         {
             self.interrupt_armed = false;
         }
+        self.seed_history();
         self.sync_modal();
+        let active = self.active_turn();
+        if active != self.timed_turn {
+            if let (Some(id), Some(start)) = (&self.timed_turn, self.turn_started) {
+                self.durations
+                    .insert(id.clone(), self.now.saturating_sub(start));
+            }
+            self.timed_turn = active;
+            self.turn_started = None;
+        }
+        self.rebuild();
     }
 
     /// Turn one key press into state changes and shell actions. Never performs
     /// I/O, and never builds a provider request or decides an approval.
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Action> {
-        if key.kind == KeyEventKind::Release {
+        if key.kind == KeyEventKind::Release || !keys::documented(key) {
             return Vec::new();
+        }
+        if self.help {
+            match key.code {
+                KeyCode::Esc | KeyCode::F(1) => {
+                    self.help = false;
+                    self.modal_scroll = 0;
+                }
+                KeyCode::Up => self.modal_scroll = self.modal_scroll.saturating_sub(1),
+                KeyCode::Down => self.modal_scroll = self.modal_scroll.saturating_add(1),
+                KeyCode::PageUp => {
+                    self.modal_scroll = self.modal_scroll.saturating_sub(self.modal_page)
+                }
+                KeyCode::PageDown => {
+                    self.modal_scroll = self.modal_scroll.saturating_add(self.modal_page)
+                }
+                _ => {}
+            }
+            return Vec::new();
+        }
+        if key.code == KeyCode::F(1)
+            || (matches!(self.modal, Modal::None)
+                && key.code == KeyCode::Char('?')
+                && self.prompt.is_empty()
+                && !self.navigation_captures_input()
+                && !self.inspector_captures())
+        {
+            self.help = true;
+            self.modal_scroll = 0;
+            return Vec::new();
+        }
+        if !matches!(self.modal, Modal::None) {
+            let scroll = match key.code {
+                KeyCode::PageUp => Some(false),
+                KeyCode::PageDown => Some(true),
+                KeyCode::Up if !matches!(self.modal, Modal::Uncertain { .. }) => Some(false),
+                KeyCode::Down if !matches!(self.modal, Modal::Uncertain { .. }) => Some(true),
+                _ => None,
+            };
+            if let Some(down) = scroll {
+                let n = if matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) {
+                    self.modal_page
+                } else {
+                    1
+                };
+                self.modal_scroll = if down {
+                    self.modal_scroll.saturating_add(n)
+                } else {
+                    self.modal_scroll.saturating_sub(n)
+                };
+                return Vec::new();
+            }
         }
         if let Some(actions) = self.navigation_key(key) {
             return actions;
@@ -303,13 +412,32 @@ impl App {
         render::draw(self, frame);
         self.render_navigation(frame);
         self.render_inspector(frame);
+        if self.help {
+            let rows = keys::help(self.theme);
+            let viewport = render::draw_modal(
+                frame,
+                self.theme,
+                "key reference",
+                "↑↓ / PgUp / PgDn scroll · Esc / F1 close",
+                rows,
+                None,
+                &mut self.modal_scroll,
+            );
+            self.modal_page = viewport.height.max(1) as usize;
+        }
     }
 
     fn rebuild(&mut self) {
         self.transcript = match &self.view {
-            Some(client) => transcript::project(client.view(), self.reasoning, &self.notices),
+            Some(client) => transcript::project(
+                client.view(),
+                self.reasoning,
+                &self.notices,
+                &self.durations,
+            ),
             None => Vec::new(),
         };
+        self.theme.apply(&mut self.transcript);
     }
 
     /// Keep the modal in step with the view. Approval takes precedence over
@@ -418,7 +546,10 @@ impl App {
             }
             KeyCode::Esc => match self.active_turn() {
                 Some(turn_id) => vec![Action::Command(Command::Cancel { turn_id })],
-                None => Vec::new(),
+                None => {
+                    self.clear_error();
+                    Vec::new()
+                }
             },
             KeyCode::PageUp => {
                 self.scroll = self.scroll.saturating_add(self.page.max(1));
@@ -437,11 +568,41 @@ impl App {
                 Vec::new()
             }
             KeyCode::Up => {
-                self.move_vertical(false);
+                if self.row_start() == 0 {
+                    self.recall(false);
+                } else {
+                    self.move_vertical(false);
+                }
                 Vec::new()
             }
             KeyCode::Down => {
-                self.move_vertical(true);
+                if self.row_end() == self.prompt.chars().count() {
+                    self.recall(true);
+                } else {
+                    self.move_vertical(true);
+                }
+                Vec::new()
+            }
+            KeyCode::Left if control => {
+                self.cursor = self.previous_word();
+                Vec::new()
+            }
+            KeyCode::Right if control => {
+                let chars: Vec<_> = self.prompt.chars().collect();
+                while self.cursor < chars.len() && !chars[self.cursor].is_whitespace() {
+                    self.cursor += 1;
+                }
+                while self.cursor < chars.len() && chars[self.cursor].is_whitespace() {
+                    self.cursor += 1;
+                }
+                Vec::new()
+            }
+            KeyCode::Char('w') if control => {
+                self.erase_to(self.previous_word());
+                Vec::new()
+            }
+            KeyCode::Char('u') if control => {
+                self.erase_to(self.row_start());
                 Vec::new()
             }
             KeyCode::Left => {
@@ -454,6 +615,10 @@ impl App {
             }
             KeyCode::Home => {
                 self.cursor = self.row_start();
+                Vec::new()
+            }
+            KeyCode::End if control || self.prompt.is_empty() => {
+                self.follow();
                 Vec::new()
             }
             KeyCode::End => {
@@ -484,7 +649,12 @@ impl App {
         }
         let text = std::mem::take(&mut self.prompt);
         self.cursor = 0;
-        self.scroll = 0;
+        self.follow();
+        self.clear_error();
+        self.pasted_lines = 0;
+        self.history_index = None;
+        self.process_history.push(text.clone());
+        self.history.push(text.clone());
         let mut actions = self.navigation_send();
         actions.push(Action::Command(Command::StartTurn {
             command_id: CommandId::new(),
@@ -624,6 +794,99 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Reduce an injected tick. No clock, timer, key or engine action is created.
+    pub fn on_action(&mut self, action: UiAction) {
+        let UiAction::Tick(now) = action;
+        self.now = now;
+        if self.active_turn().is_some() && self.turn_started.is_none() {
+            self.turn_started = Some(now);
+        }
+    }
+
+    fn follow(&mut self) {
+        self.scroll = 0;
+        self.new_lines = 0;
+    }
+
+    fn seed_history(&mut self) {
+        let previous = self.history.clone();
+        self.history = self
+            .view()
+            .and_then(|v| v.snapshot.ancestry(v.snapshot.head()).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| {
+                if let EntryPayload::UserMessage(m) = &e.entry.payload {
+                    Some(
+                        m.content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Keep uncommitted/rejected prompts sent in this process without adding
+        // another copy of those already present in the authoritative ancestry.
+        for text in &self.process_history {
+            if !self.history.contains(text) {
+                self.history.push(text.clone());
+            }
+        }
+        if previous != self.history {
+            self.history_index = None;
+        }
+    }
+    fn recall(&mut self, down: bool) {
+        if self.history.is_empty() {
+            return;
+        }
+        let index = match (self.history_index, down) {
+            (None, true) => return,
+            (None, false) => {
+                self.history_draft = self.prompt.clone();
+                self.history.len() - 1
+            }
+            (Some(i), false) => i.saturating_sub(1),
+            (Some(i), true) if i + 1 >= self.history.len() => {
+                self.prompt = self.history_draft.clone();
+                self.cursor = self.prompt.chars().count();
+                self.history_index = None;
+                return;
+            }
+            (Some(i), true) => i + 1,
+        };
+        self.history_index = Some(index);
+        self.prompt = self.history[index].clone();
+        self.cursor = self.prompt.chars().count();
+    }
+    fn previous_word(&self) -> usize {
+        let chars: Vec<_> = self.prompt.chars().collect();
+        let mut at = self.cursor;
+        while at > 0 && chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        while at > 0 && !chars[at - 1].is_whitespace() {
+            at -= 1;
+        }
+        at
+    }
+    fn erase_to(&mut self, start: usize) {
+        let range = self.byte_index(start)..self.byte_index(self.cursor);
+        self.prompt.replace_range(range, "");
+        self.cursor = start;
     }
 
     fn byte_index(&self, char_index: usize) -> usize {

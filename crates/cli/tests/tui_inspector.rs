@@ -787,7 +787,9 @@ async fn slow_inspection_never_blocks_keys_resize_or_render_ticks() {
     };
     let (terminal, stats) = drive(&f, &mut app, events, &slow).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(stats.ticks >= 3 && stats.frames >= 3);
+    // Idle no longer wakes a perpetual render timer; dirty frames and resize
+    // still progress while inspection is outstanding.
+    assert!(stats.ticks >= 2 && stats.frames >= 3, "{stats:?}");
     assert!(screen(&terminal).contains("keys-still-work"));
     f.handle.shutdown().await;
 }

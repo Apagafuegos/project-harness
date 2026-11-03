@@ -164,11 +164,14 @@ impl SessionCommands {
     }
     /// Construct the initial pure client with the same merged catalog.
     pub fn app(&self) -> App {
-        let mut app = App::new(SessionInfo {
-            workspace: self.options.workspace.clone(),
-            model: self.options.model.clone(),
-            context_limit: None,
-        });
+        let mut app = App::with_theme(
+            SessionInfo {
+                workspace: self.options.workspace.clone(),
+                model: self.options.model.clone(),
+                context_limit: None,
+            },
+            super::theme::Theme::from_environment(),
+        );
         app.set_catalog(self.options.driver.runtime.context.catalog.clone());
         app
     }
