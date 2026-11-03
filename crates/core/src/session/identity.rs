@@ -113,6 +113,10 @@ impl Timestamp {
                 .expect("UTC date fits RFC 3339"),
         )
     }
+    /// Return its canonical RFC 3339 text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub(crate) fn instant(&self) -> OffsetDateTime {
         OffsetDateTime::parse(&self.0, &Rfc3339).expect("validated timestamp")
     }

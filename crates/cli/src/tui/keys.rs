@@ -114,9 +114,17 @@ const KEYS: &[Binding] = &[
     binding!(
         "Navigation",
         "Ctrl-O",
-        "sessions: Up/Down select, Enter open, n new",
+        "sessions: Up/Down select, Enter open, n new, d delete, e export",
         (Char('o'), M::CONTROL)
     ),
+    // The sessions screen's own letters. They are documented here as a family
+    // rather than as chords: outside that dialog they are ordinary prompt text.
+    Binding {
+        area: "Navigation",
+        label: "Sessions d / e",
+        description: "delete the selected session after y/N (journal only, permanent); export it as Markdown to a path, refusing to overwrite",
+        chords: &[],
+    },
     binding!(
         "Navigation",
         "Ctrl-T",
@@ -222,6 +230,7 @@ mod tests {
             "Ctrl-Up / Ctrl-Down",
             "Ctrl-End",
             "Ctrl-O",
+            "Sessions d / e",
             "Ctrl-T",
             "Ctrl-L",
             "Ctrl-R",

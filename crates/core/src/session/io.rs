@@ -16,6 +16,7 @@ pub(crate) enum Point {
     ArtifactWritten,
     ArtifactSynced,
     ArtifactRenamed,
+    ArtifactDeduped,
     ArtifactDirectorySynced,
     TailTruncated,
     TailSynced,

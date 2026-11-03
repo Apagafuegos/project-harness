@@ -125,9 +125,21 @@ milestone.
   selects a resolution, and Enter submits the user's statement. Observed
   success/failure needs text. Nothing reruns the uncertain operation.
 - Ctrl-O opens the session picker; Up/Down selects, Enter opens, `n` creates a
-  session with the current workspace and flags, and Esc closes. Rows show title,
-  model, activity, durable state and catalog status. Busy/unreadable sessions
-  cannot be opened; needs-repair rows direct you to `harness journal repair`.
+  session with the current workspace and flags, `d` deletes, `e` exports and Esc
+  closes. Rows show title, model, activity, durable state and catalog status.
+  Busy/unreadable sessions cannot be opened; needs-repair rows direct you to
+  `harness journal repair`.
+- In the picker, `d` asks for confirmation in the dialog frame, naming the
+  session's title and ID and stating that deletion is permanent and removes only
+  the journal; `y` or Enter deletes, `n` or Esc cancels. The session this client
+  owns cannot be deleted: the dialog says to switch first, and the shell refuses
+  the same action anyway. A session another engine holds shows `session_locked`
+  verbatim and is left alone. The list refreshes after a delete.
+- `e` opens a one-line path prompt prefilled with `./harness-<short id>.md`.
+  Enter writes Markdown for the selected session and shows the written path; an
+  existing file is refused with `export_exists` and nothing is overwritten. The
+  current session's export comes from the client's own durable snapshot, since
+  its writer lock excludes the shared read.
   Other workspaces are listed but refused, never silently authorized. Handover
   requires idle, durably shuts down the old handle and uses the same continuation
   checks. Listing and opening are sequential; a raced `session_locked` gets one
@@ -185,7 +197,7 @@ underlying screen. `?` with text in the editor remains ordinary text.
 | --- | --- |
 | Editing | Enter send; Shift+Enter / Alt+Enter newline; arrows, Home/End; Backspace/Delete; Ctrl-Left/Right words; Ctrl-W previous word; Ctrl-U line start; Up/Down history at first/last line |
 | Turn | Esc cancel; Ctrl-C cancel then durable quit (idle confirmation); empty Ctrl-D quit |
-| Navigation | PgUp/PgDn page; Ctrl-Up/Down line; empty End / Ctrl-End follow; Ctrl-O sessions; Ctrl-T branches; Ctrl-L models |
+| Navigation | PgUp/PgDn page; Ctrl-Up/Down line; empty End / Ctrl-End follow; Ctrl-O sessions (then `d` delete, `e` export); Ctrl-T branches; Ctrl-L models |
 | Context | Ctrl-K inspector; Ctrl-R reasoning; Ctrl-E full tool output; tree `p` pin / `x` exclude |
 | Dialogs | F1 help; Up/Down selection/scroll; PgUp/PgDn scroll; Enter confirm; Esc close (approval **denies**, recovery stays open); approval `v` raw arguments; recovery Left/Right or Tab/Shift-Tab choices |
 
@@ -622,7 +634,7 @@ new sessions only. See [ADR 0022](decisions/0022-recorded-model-instructions.md)
 ## Session catalog
 
 ```sh
-harness sessions [--data-root DIR]
+harness sessions [list] [--data-root DIR]
 ```
 
 Prints the [read-only catalog](session-storage.md#read-only-session-catalog) as
@@ -632,7 +644,32 @@ prints `[]`. Busy and broken sessions remain listed with status and a short
 reason, and unavailable metadata is null. Titles are first-user-message text,
 first line, at most 120 Unicode scalar values. This is a linear journal scan,
 not a persisted index. A live session remains available through its handle;
-listing does not wait for its writer lock.
+listing does not wait for its writer lock. The bare command and `list` print the
+same bytes.
+
+### Session export, deletion and collection
+
+```sh
+harness sessions export <ID> --format markdown|journal --output PATH [--all-branches]
+harness sessions delete <ID> [--yes]
+harness sessions gc [--dry-run] [--yes]
+```
+
+`export --format markdown` writes a deterministic readable transcript of the
+active branch, or of every branch with `--all-branches`; `--format journal`
+creates a directory that is itself a data root, with a byte copy of the journal
+and every artifact it references, verified while copying. Both are read-only
+under the shared catalog lock and refuse an existing output path
+(`export_exists`). `delete` takes the exclusive writer lock, removes only the
+journal and says that `harness sessions gc` reclaims artifact space; it is
+irreversible and needs `--yes` outside a terminal. `gc` removes artifacts that no
+readable journal references and that are more than 24 hours old, refuses the
+whole run if any journal cannot be validated (`gc_journal_unreadable`), and lists
+candidates with `--dry-run`. Exit status is 0 on success, 2 for a refusal or a
+missing confirmation, and 1 for a storage failure; refusals are stable codes on
+stderr. See
+[session storage](session-storage.md#export-deletion-and-artifact-collection)
+and [ADR 0030](decisions/0030-session-export-deletion-and-gc.md).
 
 ## Journal inspection and repair
 

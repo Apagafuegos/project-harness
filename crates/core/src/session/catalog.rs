@@ -48,6 +48,42 @@ pub struct SessionCatalogEntry {
     pub reason: Option<String>,
 }
 
+/// The catalog's title rule for one user entry: the concatenated text blocks,
+/// first line, at most [`SESSION_TITLE_CHARS`] Unicode scalar values without an
+/// added ellipsis. `None` for an entry that is not a user message.
+pub fn session_title_of(stored: &StoredEntry) -> Option<String> {
+    let EntryPayload::UserMessage(message) = &stored.entry.payload else {
+        return None;
+    };
+    let text: String = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    Some(
+        text.lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(SESSION_TITLE_CHARS)
+            .collect(),
+    )
+}
+
+/// The same title rule applied to a whole snapshot, across every branch: the
+/// first user message in journal order.
+pub fn session_title(snapshot: &SessionSnapshot) -> Option<String> {
+    snapshot
+        .entries()
+        .map(|(_, stored)| stored)
+        .filter(|stored| matches!(stored.entry.payload, EntryPayload::UserMessage(_)))
+        .min_by_key(|stored| (stored.sequence, stored.entry_index))
+        .and_then(session_title_of)
+}
+
 impl DataRoot {
     /// Enumerate valid session filenames without writing, repairing or taking an
     /// exclusive lock. Per-session failures become entries, not listing failures.
@@ -145,25 +181,7 @@ impl DataRoot {
                 .map(|(_, s)| s)
                 .filter(|s| matches!(s.entry.payload, EntryPayload::UserMessage(_)))
                 .min_by_key(|s| (s.sequence, s.entry_index));
-            entry.title = first.map(|s| {
-                let EntryPayload::UserMessage(message) = &s.entry.payload else {
-                    unreachable!()
-                };
-                let text: String = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                text.lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(SESSION_TITLE_CHARS)
-                    .collect()
-            });
+            entry.title = first.and_then(session_title_of);
             file.seek(SeekFrom::Start(0))?;
             let mut reader = BufReader::new((&mut file).take(inspection.valid_bytes));
             let mut line = Vec::new();

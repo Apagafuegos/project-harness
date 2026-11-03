@@ -76,6 +76,10 @@ impl SessionSnapshot {
     pub fn header(&self) -> &SessionHeader {
         &self.0.header
     }
+    /// Time the session header record was written, its creation time.
+    pub fn created_at(&self) -> &Timestamp {
+        &self.0.created_at
+    }
     /// Current session-wide configuration, unaffected by navigation.
     pub fn configuration(&self) -> &ArtifactRef {
         &self.0.configuration
@@ -220,6 +224,8 @@ struct Authorization {
 pub(crate) struct State {
     pub session_id: SessionId,
     pub header: SessionHeader,
+    /// Time of the header record, which is the session's creation time.
+    pub created_at: Timestamp,
     pub sequence: u64,
     pub checksum: Digest,
     /// Version of the last accepted record; versions never decrease.
@@ -274,6 +280,7 @@ impl State {
         let mut state = Self {
             session_id: record.session_id.clone(),
             header: header.clone(),
+            created_at: record.at.clone(),
             sequence: 0,
             checksum,
             version: record.version,

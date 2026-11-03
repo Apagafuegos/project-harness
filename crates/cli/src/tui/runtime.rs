@@ -345,7 +345,11 @@ fn dispatch(
     for action in actions {
         match action {
             Action::Command(command) => commands.push(command),
-            action @ (Action::ListSessions | Action::OpenSession(_) | Action::NewSession) => {
+            action @ (Action::ListSessions
+            | Action::OpenSession(_)
+            | Action::NewSession
+            | Action::DeleteSession { .. }
+            | Action::ExportSession { .. }) => {
                 super::runtime_nav::dispatch(action, handle, navigation)
             }
             action @ (Action::InspectContext { .. } | Action::InspectPreview(_)) => {

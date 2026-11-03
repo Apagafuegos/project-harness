@@ -73,6 +73,20 @@ pub enum Action {
     OpenSession(harness_core::session::SessionId),
     /// Create a session with the current workspace and flags.
     NewSession,
+    /// Delete one other session's journal from the shell. Artifacts are never
+    /// deleted: they are shared and content-addressed (decision 16).
+    DeleteSession {
+        /// Session whose journal is removed.
+        id: harness_core::session::SessionId,
+    },
+    /// Write a Markdown export of one session. The shell refuses an existing
+    /// path instead of overwriting it.
+    ExportSession {
+        /// Session to export, read-only.
+        id: harness_core::session::SessionId,
+        /// Destination file inside an existing directory.
+        path: PathBuf,
+    },
     /// Read-only projection request, executed asynchronously by the shell.
     InspectContext {
         /// Historical head, or the current head.
@@ -117,6 +131,27 @@ enum Modal {
     },
     /// The user asked to quit while idle; confirm before leaving.
     ConfirmQuit,
+    /// The user asked to delete a session; name it and state the consequences.
+    ConfirmDelete {
+        /// Session that would lose its journal.
+        id: harness_core::session::SessionId,
+        /// Display title, which the catalog may not know.
+        title: String,
+    },
+    /// The user asked to export a session as Markdown; edit the destination.
+    ExportPath {
+        /// Session that would be read.
+        id: harness_core::session::SessionId,
+        /// Editable destination path, prefilled from the session ID.
+        input: String,
+    },
+    /// A refusal with no choice to make, shown in the same dialog frame.
+    Notice {
+        /// Dialog title.
+        title: String,
+        /// Short explanation lines.
+        message: String,
+    },
 }
 
 /// The core's user-statement choices, restricted to what a terminal can offer.
@@ -269,6 +304,9 @@ impl App {
                 self.cursor += text.chars().count();
             }
             Modal::Uncertain { input, .. } => input.push_str(&text),
+            Modal::ExportPath { input, .. } => {
+                input.extend(text.chars().filter(|c| !c.is_control() || *c == '\n'));
+            }
             _ => {}
         }
     }
@@ -411,6 +449,9 @@ impl App {
             Modal::Approval { .. } => self.approval_key(key),
             Modal::Uncertain { .. } => self.uncertain_key(key),
             Modal::ConfirmQuit => self.confirm_quit_key(key),
+            Modal::ConfirmDelete { .. } => self.confirm_delete_key(key),
+            Modal::ExportPath { .. } => self.export_path_key(key),
+            Modal::Notice { .. } => self.notice_key(key),
             Modal::None => self.editor_key(key),
         }
     }
@@ -422,6 +463,7 @@ impl App {
     pub fn render(&mut self, frame: &mut Frame) {
         render::draw(self, frame);
         self.render_navigation(frame);
+        self.render_session_maintenance(frame);
         self.render_inspector(frame);
         if self.help {
             let mut rows = keys::help(self.theme);
@@ -496,9 +538,29 @@ impl App {
                     }
                 }
             }
-        } else if !matches!(self.modal, Modal::ConfirmQuit) {
+        } else if !self.modal_survives_sync() {
             self.modal = Modal::None;
         }
+    }
+
+    /// A confirmation or path dialog is the user's own question and outlives an
+    /// engine reset; an approval or resolution dialog belongs to the view.
+    fn modal_survives_sync(&self) -> bool {
+        matches!(
+            self.modal,
+            Modal::ConfirmQuit
+                | Modal::ConfirmDelete { .. }
+                | Modal::ExportPath { .. }
+                | Modal::Notice { .. }
+        )
+    }
+
+    /// An informational dialog only closes; it never sends anything.
+    fn notice_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n')) {
+            self.modal = Modal::None;
+        }
+        Vec::new()
     }
 
     fn observe(&mut self, kind: &harness_core::runtime::EventKind) {

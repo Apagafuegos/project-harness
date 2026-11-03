@@ -1,9 +1,10 @@
 //! Pure session and branch navigation. No storage or terminal access.
-use super::{Action, App, Modal};
+use super::{Action, App, Modal, theme::Role};
 use crate::text::bounded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use harness_core::{runtime::Command, session::*};
 use ratatui::{Frame, text::Line};
+use std::path::PathBuf;
 
 #[derive(Default)]
 pub(super) struct Navigation {
@@ -16,6 +17,8 @@ pub(super) struct Navigation {
     scroll: usize,
     page: usize,
     focus: bool,
+    /// One shell-reported outcome, such as the path a Markdown export wrote.
+    notice: Option<String>,
 }
 #[derive(Clone, Copy)]
 enum Screen {
@@ -127,6 +130,7 @@ impl App {
                 self.navigation.index = 0;
                 self.navigation.scroll = 0;
                 self.navigation.focus = true;
+                self.navigation.notice = None;
                 self.clear_error();
                 return Some(if matches!(screen, Screen::Sessions) {
                     vec![Action::ListSessions]
@@ -206,6 +210,49 @@ impl App {
                         })]);
                     }
                     self.set_error("required incompatibilities cannot be omitted");
+                }
+            }
+            // `d` and `e` act on the picked session and never start a turn.
+            // Deleting the current session is refused here, before any dialog:
+            // an engine cannot remove the journal it is writing.
+            KeyCode::Char('d') if matches!(screen, Screen::Sessions) && !control => {
+                let picked = self
+                    .navigation
+                    .sessions
+                    .get(self.navigation.index)
+                    .map(|entry| {
+                        (
+                            entry.session_id.clone(),
+                            entry.title.clone().unwrap_or_else(|| "(no message)".into()),
+                        )
+                    });
+                if let Some((id, title)) = picked {
+                    self.clear_error();
+                    self.modal = if self.is_current_session(&id) {
+                        Modal::Notice {
+                            title: "delete session".into(),
+                            message: format!(
+                                "The current session cannot be deleted.\n\nSwitch to another \
+                                 session first (n creates one), then delete {id}."
+                            ),
+                        }
+                    } else {
+                        Modal::ConfirmDelete { id, title }
+                    };
+                }
+            }
+            KeyCode::Char('e') if matches!(screen, Screen::Sessions) && !control => {
+                let picked = self
+                    .navigation
+                    .sessions
+                    .get(self.navigation.index)
+                    .map(|entry| entry.session_id.clone());
+                if let Some(id) = picked {
+                    self.clear_error();
+                    self.modal = Modal::ExportPath {
+                        input: format!("./harness-{}.md", short_id(&id)),
+                        id,
+                    };
                 }
             }
             KeyCode::Enter if matches!(screen, Screen::Sessions) => {
@@ -333,6 +380,119 @@ impl App {
         self.navigation.waiting = false;
     }
 
+    /// Record one shell-reported outcome beside the refreshed session list.
+    pub(super) fn navigation_maintained(&mut self, message: &str) {
+        self.navigation.waiting = false;
+        self.navigation.notice = Some(bounded(message, 200));
+    }
+
+    /// `y` or Enter deletes; `n` and Esc cancel. Nothing else answers the frame.
+    pub(super) fn confirm_delete_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Modal::ConfirmDelete { id, .. } = self.modal.clone() else {
+            return vec![];
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter if !control && !alt => {
+                self.modal = Modal::None;
+                vec![Action::DeleteSession { id }]
+            }
+            KeyCode::Char('n') if !control => {
+                self.modal = Modal::None;
+                vec![]
+            }
+            KeyCode::Esc => {
+                self.modal = Modal::None;
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The export prompt is a one-line path editor; Enter submits it unchanged.
+    pub(super) fn export_path_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Modal::ExportPath { id, input } = &mut self.modal else {
+            return vec![];
+        };
+        let id = id.clone();
+        match key.code {
+            KeyCode::Char(c) if !control && !alt && !c.is_control() => {
+                input.push(c);
+                vec![]
+            }
+            KeyCode::Backspace => {
+                input.pop();
+                vec![]
+            }
+            KeyCode::Enter => {
+                let path = input.trim().to_owned();
+                if path.is_empty() {
+                    return vec![];
+                }
+                self.modal = Modal::None;
+                vec![Action::ExportSession {
+                    id,
+                    path: PathBuf::from(path),
+                }]
+            }
+            KeyCode::Esc => {
+                self.modal = Modal::None;
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Draw the session screen's own dialogs: delete, export and its refusal.
+    pub(super) fn render_session_maintenance(&mut self, frame: &mut Frame) {
+        let (title, hints, lines): (String, &str, Vec<Line<'static>>) = match &self.modal {
+            Modal::ConfirmDelete { id, title } => (
+                "delete session".into(),
+                "y delete · n / Esc cancel",
+                vec![
+                    Line::raw(format!("Delete \"{title}\" ({id})?")),
+                    Line::raw(""),
+                    Line::styled("This is permanent.", self.theme.style(Role::Warning)),
+                    Line::raw("Only the journal is removed: deletion never removes"),
+                    Line::raw("artifacts, because they are shared across sessions."),
+                    Line::raw("Run 'harness sessions gc' in the shell to reclaim space."),
+                ],
+            ),
+            Modal::ExportPath { id, input } => (
+                "export session".into(),
+                "Enter write · Esc cancel",
+                vec![
+                    Line::raw(format!("Export session {id} as Markdown to:")),
+                    Line::raw(""),
+                    Line::styled(format!("> {input}"), self.theme.style(Role::Selection)),
+                    Line::raw(""),
+                    Line::raw("An existing file is refused; nothing is overwritten."),
+                ],
+            ),
+            Modal::Notice { title, message } => (
+                title.clone(),
+                "Esc close",
+                message
+                    .lines()
+                    .map(|line| Line::raw(line.to_owned()))
+                    .collect(),
+            ),
+            _ => return,
+        };
+        super::render::draw_modal(
+            frame,
+            self.theme,
+            &title,
+            hints,
+            lines,
+            None,
+            &mut self.modal_scroll,
+        );
+    }
+
     pub(super) fn navigation_reset(&mut self) {
         self.navigation = Navigation::default();
         self.prompt.clear();
@@ -424,7 +584,7 @@ impl App {
         };
         let (title, rows) = match screen {
             Screen::Sessions => (
-                "sessions · Enter open · n new · Esc close",
+                "sessions · Enter open · n new · d delete · e export · Esc close",
                 self.navigation
                     .sessions
                     .iter()
@@ -535,10 +695,13 @@ impl App {
         if lines.is_empty() {
             lines.push(Line::raw("(empty)"));
         }
+        if let Some(notice) = &self.navigation.notice {
+            lines.push(Line::styled(notice.clone(), self.theme.style(Role::Accent)));
+        }
         if let Some(error) = &self.last_error {
             lines.push(Line::styled(
                 format!("error: {error}"),
-                self.theme.style(super::theme::Role::Error),
+                self.theme.style(Role::Error),
             ));
         }
         // Selection movement exposes its row; paging can independently inspect
@@ -567,6 +730,11 @@ fn mode_marker(mode: ContextMode) -> &'static str {
         ContextMode::Excluded => "[excl] ",
         ContextMode::Default => "      ",
     }
+}
+
+/// First eight characters of a session UUIDv7, used in a default file name.
+fn short_id(id: &SessionId) -> String {
+    id.as_str().chars().take(8).collect()
 }
 
 fn model_name(m: &ModelRef) -> String {

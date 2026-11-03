@@ -116,6 +116,113 @@ The command prints a pretty JSON array. Its default root matches `ask`:
 nothing; a missing root prints `[]`, an unsafe root fails. Use the explicit
 journal commands below for repair; catalog discovery never initiates recovery.
 
+## Export, deletion and artifact collection
+
+```sh
+harness sessions [list] [--data-root DIR]
+harness sessions export <ID> --format markdown|journal --output PATH [--all-branches]
+harness sessions delete <ID> [--yes]
+harness sessions gc [--dry-run] [--yes]
+```
+
+The bare command and `list` print the read-only catalog above, byte for byte.
+Every subcommand takes the same `--data-root`, and falls back to the user
+config's `data_root` and then the `ask` default when the flag is absent. Exit
+status is 0 on success, 2 for a usage error, refusal or a confirmation that
+cannot be asked for, and 1 for a storage failure. A refusal prints one stable
+code on stderr: `session_not_found`, `session_locked`, `confirmation_required`,
+`export_exists`, `export_artifact_invalid: <sha256>`, `journal_invalid: <code>`,
+`gc_journal_unreadable: <session-id>` or `invalid_output_path`.
+
+### Markdown export
+
+`export --format markdown` is read-only: it holds the same non-blocking shared
+lock as the catalog for the whole read, refuses a session a running engine hold
+as `session_locked`, and never repairs or writes the journal. The output path
+must not exist (`export_exists`); the bytes are staged beside it and published
+by a no-replace rename, so a failed export leaves nothing behind.
+
+The default content is the active branch from the root to the head: a title with
+the session ID, workspace, creation time, initial model and the model at the
+head, then one section per entry in conversation order:
+
+| Entry | Rendering |
+| --- | --- |
+| user message | `## You`, then each text block verbatim |
+| assistant response | `## Assistant (<provider>/<model>)`, text verbatim, reasoning summaries as block quotes, tool calls as fenced `json` blocks naming the tool, a note when the outcome is not `completed` |
+| tool result | `## Tool result (<tool>)`, status and code, exit code, duration and truncation as bullets, referenced artifacts as digest lines, and the full content in fenced blocks (never truncated) |
+| compaction | one note naming the strategy and version, its covered-entry count and its model when it has one |
+| context control | one note naming the turn and the effective mode |
+| model change | one note naming the model and the portability policy |
+
+Media blocks become reference lines naming the kind, MIME type, byte count and
+the first twelve characters of the SHA-256; media is never embedded. Opaque
+provider state is omitted with a note naming its owner, schema and size, and its
+bytes are never printed. Fences grow past any run of backticks in the content,
+so a block can never close early. The same journal always produces the same
+bytes.
+
+`--all-branches` names every branch head instead of following one branch: the
+leaves of the entry tree plus the durable head when it is not a leaf, in ID
+order. The tree is walked in journal order and each entry appears exactly once.
+A `## Branch <head-entry-id>` heading introduces the run of entries only one
+head has, `## Shared history` introduces the run every head has in common, and
+`## Branches <id>, <id>` introduces a run several heads share, so a shared
+prefix is never repeated. A session with a single branch is one
+`## Branch <head-entry-id>` run. Entry sections then use `###` instead of `##`.
+
+### Journal export
+
+`export --format journal` is read-only too. It creates `<PATH>`, which must not
+exist (`export_exists`), containing `sessions/<id>.jsonl` as an exact copy and
+`artifacts/<sha256>` for every artifact the journal references. Each artifact is
+verified before and while it is copied, and an absent or altered artifact fails
+the export (`export_artifact_invalid`) after the partial directory is removed.
+References include configuration, command and manifest digests, media, provider
+state, plan artifacts and a quarantine artifact, exactly as storage validation
+sees them.
+
+The result is itself a data root: `DataRoot::open` accepts it and the journal
+replays to the same head. `--all-branches` applies to Markdown only.
+
+### Deletion
+
+`delete <ID>` takes the exclusive writer lock without waiting, so a session a
+running engine holds is refused as `session_locked`. Outside a terminal it
+requires `--yes` (`confirmation_required`); with a terminal it asks
+`Delete session <title> (<id>)? [y/N]`. It removes exactly one journal, and a
+lock file if one ever existed separately, and nothing else; a missing ID is
+`session_not_found`.
+
+**Deletion is irreversible, and it never removes an artifact.** Artifacts are
+shared and content-addressed across sessions, so a session's bytes may still be
+another session's bytes; the command prints
+`run 'harness sessions gc' to reclaim artifact space`.
+
+### Artifact collection
+
+`gc` removes artifact bytes that no readable journal references **and** whose
+modification time is older than a 24-hour grace window. It scans every journal
+under a non-blocking shared lock and refuses the whole run as
+`gc_journal_unreadable: <id>` if one cannot be locked or validated, because a
+damaged journal might reference anything. A journal deleted after discovery is
+skipped.
+
+The grace window is what makes this safe for shared storage: a writer stores an
+artifact *before* the journal commit that references it, so an artifact is
+unreferenced for a moment; and `DataRoot::put_artifact*` refreshes an existing
+artifact's modification time on a dedupe hit with `utimensat`, so an in-flight
+reuse is never old. Collection stats each candidate without following a
+symlink and deletes only private regular files it verified, then syncs the
+artifacts directory.
+
+`--dry-run` lists the candidates and their total size and changes nothing. A real
+run without a terminal needs `--yes`. Both print the artifact count, the total
+bytes and the number of journals scanned.
+
+See [ADR 0030](decisions/0030-session-export-deletion-and-gc.md) for the race
+analysis and the reasons deletion and reclamation are separate commands.
+
 ## Record versions
 
 Each record carries its own `version`. Readers accept versions 1, 2 and 3

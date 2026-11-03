@@ -10,6 +10,14 @@ use tokio::sync::{Semaphore, watch};
 pub enum NavigationReply {
     /// Completed catalog scan, after its shared locks have been released.
     Sessions(Vec<SessionCatalogEntry>),
+    /// A maintenance result: one line for the session screen, and the refreshed
+    /// catalog when a journal was deleted.
+    Maintenance {
+        /// What the shell did, in the user's terms.
+        message: String,
+        /// Refreshed catalog, absent when nothing changed.
+        sessions: Option<Vec<SessionCatalogEntry>>,
+    },
     /// A new handle is live and its subscription will begin with a reset.
     Opened {
         /// Nonfatal creation diagnostics.
@@ -49,6 +57,12 @@ pub(super) fn apply(
 ) -> Option<Option<Command>> {
     match result {
         Ok(NavigationReply::Sessions(entries)) => app.on_sessions(entries),
+        Ok(NavigationReply::Maintenance { message, sessions }) => {
+            if let Some(entries) = sessions {
+                app.on_sessions(entries);
+            }
+            app.navigation_maintained(&message);
+        }
         Ok(NavigationReply::Opened {
             warnings,
             startup,
@@ -253,6 +267,93 @@ impl Commands for SessionCommands {
                 .await
                 .map_err(|_| "session_catalog_unavailable".to_owned())??;
                 return Ok(NavigationReply::Sessions(entries));
+            }
+            // Maintenance is file-level work outside the journal, so it is done
+            // here in the shell under the same permit as commands and handover.
+            // It never runs inside the pure model, which only names the action.
+            match action {
+                Action::DeleteSession { id } => {
+                    let current = state
+                        .lock()
+                        .expect("session state not poisoned")
+                        .session
+                        .clone();
+                    if id == current {
+                        return Err(
+                            "cannot delete the current session: switch to another session first"
+                                .into(),
+                        );
+                    }
+                    let root_path = options.data_root.clone();
+                    let target = id.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        let root = DataRoot::open(&root_path, false)
+                            .map_err(|_| "session_maintenance_unavailable".to_owned())?;
+                        match root.delete_session(&target) {
+                            Ok(()) => (),
+                            Err(MaintenanceError::Locked) => {
+                                return Err("session_locked".to_owned());
+                            }
+                            Err(MaintenanceError::NotFound) => {
+                                return Err("session_not_found".to_owned());
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        }
+                        Ok(root.sessions().ok())
+                    })
+                    .await
+                    .map_err(|_| "session_maintenance_unavailable".to_owned())??;
+                    return Ok(NavigationReply::Maintenance {
+                        message: format!(
+                            "deleted session {id}; run 'harness sessions gc' to reclaim space"
+                        ),
+                        sessions: result,
+                    });
+                }
+                Action::ExportSession { id, path } => {
+                    let root_path = options.data_root.clone();
+                    let shown = path.display().to_string();
+                    // This client's own engine holds the exclusive journal lock,
+                    // so its live, durable snapshot is the read: the bytes are the
+                    // ones the journal would replay. Every other session is read
+                    // from its journal under the shared catalog lock.
+                    let live = if state.lock().expect("session state not poisoned").session == id {
+                        Some(
+                            current
+                                .view()
+                                .await
+                                .map_err(|_| "runtime fault".to_owned())?
+                                .snapshot,
+                        )
+                    } else {
+                        None
+                    };
+                    tokio::task::spawn_blocking(move || {
+                        let text = match live {
+                            Some(snapshot) => markdown_export(&snapshot, false),
+                            None => {
+                                let root = DataRoot::open(&root_path, false)
+                                    .map_err(|_| "session_maintenance_unavailable".to_owned())?;
+                                root.export_markdown(&id, false)
+                                    .map_err(|error| match error {
+                                        MaintenanceError::Exists => "export_exists".to_owned(),
+                                        other => other.to_string(),
+                                    })?
+                            }
+                        };
+                        write_markdown_export(&path, &text).map_err(|error| match error {
+                            MaintenanceError::Exists => "export_exists".to_owned(),
+                            other => other.to_string(),
+                        })
+                    })
+                    .await
+                    .map_err(|_| "session_maintenance_unavailable".to_owned())??;
+                    return Ok(NavigationReply::Maintenance {
+                        message: format!("wrote Markdown export to {shown}"),
+                        sessions: None,
+                    });
+                }
+                _ => {}
             }
             let view = current.view().await.map_err(|_| "runtime fault")?;
             // Check the authoritative view under the same permit as pending starts.

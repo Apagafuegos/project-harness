@@ -3,6 +3,8 @@
 mod ask_cli;
 mod config;
 mod doctor;
+mod export;
+mod sessions_cli;
 mod tui_cli;
 
 use std::{io, path::PathBuf, process::ExitCode, sync::Arc};
@@ -37,8 +39,7 @@ fn command() -> Command {
         .args(config::globals())
         .subcommand(config::command())
         .subcommand(ask_cli::command())
-        .subcommand(Command::new("sessions").about("List durable sessions as JSON without changing them")
-            .arg(Arg::new("data-root").long("data-root").value_name("DIR").value_parser(value_parser!(PathBuf)).help("Private storage [default: $XDG_DATA_HOME/harness or ~/.local/share/harness]")))
+        .subcommand(sessions_cli::command())
         .subcommand(
             Command::new("context")
                 .about("Print the context report of a stored session as JSON")
@@ -215,7 +216,7 @@ fn main() -> ExitCode {
     match matches.subcommand() {
         Some(("ask", arguments)) => ask_cli::run(arguments),
         Some(("config", arguments)) => config::run(arguments),
-        Some(("sessions", arguments)) => print("harness sessions", sessions(arguments)),
+        Some(("sessions", arguments)) => sessions_cli::run(arguments),
         Some(("context", arguments)) => print("harness context", context(arguments)),
         Some(("doctor", arguments)) => print("harness doctor", run_doctor(arguments)),
         Some(("journal", journal)) => match journal.subcommand() {
@@ -473,23 +474,4 @@ fn context(arguments: &ArgMatches) -> Result<String, String> {
         .build(&snapshot, head.as_ref(), preview)
         .map_err(|error| format!("cannot build context: {error}"))?;
     serde_json::to_string_pretty(&built.report).map_err(|error| error.to_string())
-}
-
-fn sessions(arguments: &ArgMatches) -> Result<String, String> {
-    let path = arguments
-        .get_one::<PathBuf>("data-root")
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(harness::wiring::default_data_root)
-        .map_err(str::to_owned)?;
-    // A missing default is an empty catalog, not permission to create storage.
-    let root = match DataRoot::open(&path, false) {
-        Ok(root) => root,
-        Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok("[]".into());
-        }
-        Err(error) => return Err(format!("cannot open data root: {error}")),
-    };
-    serde_json::to_string_pretty(&root.sessions().map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())
 }

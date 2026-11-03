@@ -476,6 +476,8 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             ));
             Some(("uncertain invocation".into(), lines))
         }
+        // The session screen owns these dialogs and draws them itself.
+        Modal::ConfirmDelete { .. } | Modal::ExportPath { .. } | Modal::Notice { .. } => None,
         Modal::ConfirmQuit => Some((
             "quit?".into(),
             vec![

@@ -6,7 +6,7 @@ use super::{
     error::Result,
     io::{Io, Point},
 };
-use rustix::fs::{self, Mode, OFlags, RenameFlags};
+use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags, Timespec, Timestamps, UTIME_NOW};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -60,6 +60,25 @@ pub(crate) fn verify_private(file: &File, directory: bool) -> Result<()> {
     {
         return Err(StoreError::UnsafePath);
     }
+    Ok(())
+}
+
+/// Restate an artifact's modification time as now, without following a symlink
+/// and without changing the bytes. Used only for a dedupe hit.
+pub(crate) fn refresh_mtime(directory: &File, name: &str) -> Result<()> {
+    let now = Timespec {
+        tv_sec: 0,
+        tv_nsec: UTIME_NOW,
+    };
+    fs::utimensat(
+        directory,
+        name,
+        &Timestamps {
+            last_access: now,
+            last_modification: now,
+        },
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?;
     Ok(())
 }
 
@@ -135,7 +154,7 @@ impl DataRoot {
         Ok(file)
     }
 
-    fn artifact_file(&self, digest: &Digest) -> Result<File> {
+    pub(crate) fn artifact_file(&self, digest: &Digest) -> Result<File> {
         let file: File = fs::openat(
             &self.artifacts,
             digest.as_str(),
@@ -197,7 +216,13 @@ impl DataRoot {
                 RenameFlags::NOREPLACE,
             ) {
                 Ok(()) => (),
-                Err(rustix::io::Errno::EXIST) => self.verify_artifact(&reference)?,
+                Err(rustix::io::Errno::EXIST) => {
+                    self.verify_artifact(&reference)?;
+                    // A dedupe hit is a reuse: refresh the modification time so
+                    // an in-flight reuse is never "old" to artifact gc.
+                    refresh_mtime(&self.artifacts, reference.sha256.as_str())?;
+                    self.io.check(Point::ArtifactDeduped)?;
+                }
                 Err(error) => return Err(error.into()),
             }
             self.io.check(Point::ArtifactRenamed)?;
