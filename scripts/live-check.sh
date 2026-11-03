@@ -5,6 +5,7 @@
 #   scripts/live-check.sh anthropic
 #   scripts/live-check.sh deepseek
 #   scripts/live-check.sh ask
+#   scripts/live-check.sh tui [--provider openai|deepseek]
 #   scripts/live-check.sh switch [--auth codex|api-key]
 #
 # For OpenAI, default auth is `codex`, the user's ChatGPT subscription through
@@ -36,12 +37,16 @@ set -euo pipefail
 
 provider="${1:-}"
 if [ "$provider" = "tui" ]; then
-  [ "$#" -eq 1 ] || { echo "usage: scripts/live-check.sh tui" >&2; exit 2; }
+  shift
+  if [ "$#" -ne 0 ] && { [ "$#" -ne 2 ] || [ "$1" != "--provider" ] || { [ "$2" != "openai" ] && [ "$2" != "deepseek" ]; }; }; then
+    echo "usage: scripts/live-check.sh tui [--provider openai|deepseek]" >&2
+    exit 2
+  fi
   cd "$(dirname "$0")/.."
   cargo build --locked --quiet -p harness --bin harness
   bin="${CARGO_TARGET_DIR:-target}/debug/harness"
   case "$bin" in /*) ;; *) bin="$(pwd)/$bin" ;; esac
-  exec cargo run --locked --quiet -p harness --example tui_smoke -- "$bin"
+  exec cargo run --locked --quiet -p harness --example tui_smoke -- "$bin" "$@"
 fi
 if [ "$provider" = "switch" ]; then
   shift
@@ -108,7 +113,7 @@ if [ "$provider" != "openai" ] && [ "$provider" != "anthropic" ] && [ "$provider
   echo "       scripts/live-check.sh anthropic" >&2
   echo "       scripts/live-check.sh deepseek" >&2
   echo "       scripts/live-check.sh ask" >&2
-  echo "       scripts/live-check.sh tui" >&2
+  echo "       scripts/live-check.sh tui [--provider openai|deepseek]" >&2
   echo "       scripts/live-check.sh switch [--auth codex|api-key]" >&2
   exit 2
 fi

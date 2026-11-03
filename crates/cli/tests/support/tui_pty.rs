@@ -20,7 +20,21 @@ pub enum Scenario {
     Live,
 }
 
+#[allow(dead_code, reason = "used only by offline PTY tests")]
 pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
+    probe_inner(binary, scenario, None)
+}
+
+#[allow(dead_code, reason = "used only by the opt-in live executable")]
+pub fn probe_live(binary: &Path, provider: &str, model: &str) -> Result<String, String> {
+    probe_inner(binary, Scenario::Live, Some((provider, model)))
+}
+
+fn probe_inner(
+    binary: &Path,
+    scenario: Scenario,
+    live: Option<(&str, &str)>,
+) -> Result<String, String> {
     let temp = tempfile::tempdir().map_err(|_| "tempdir")?;
     let work = temp.path().join("work");
     std::fs::create_dir(&work).map_err(|_| "workspace")?;
@@ -37,6 +51,12 @@ pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
     command.cwd(&work);
     command.arg("--data-root");
     command.arg(temp.path().join("state"));
+    if let Some((provider, model)) = live {
+        command.args(["--provider", provider, "--model", model]);
+        if provider == "openai" {
+            command.args(["--auth", "codex"]);
+        }
+    }
     command.env_remove("HARNESS_TUI_TEST_PROVIDER");
     command.env_remove("HARNESS_TUI_TEST_PANIC");
     command.env_remove("HARNESS_TUI_TEST_ERROR");
@@ -216,8 +236,17 @@ pub fn probe(binary: &Path, scenario: Scenario) -> Result<String, String> {
             return Err("SIGTERM turn not durably cancelled".into());
         }
     }
-    if matches!(scenario, Scenario::Live) && screen.contains("rate_limit") {
-        return Err("rate_limit (not retried; terminal restored; exit=0)".into());
+    if matches!(scenario, Scenario::Live) {
+        if screen.contains("rate_limit") {
+            return Err("rate_limit (not retried; terminal restored; exit=0)".into());
+        }
+        if !prompted
+            || !acted
+            || !screen.contains("completed")
+            || screen.matches("pong").count() < 2
+        {
+            return Err("live answer missing (terminal restored)".into());
+        }
     }
     Ok(format!(
         "termios before={before:?}\ntermios after={after:?}\nsequences: enter alternate, enable paste, disable paste, leave alternate, show cursor; exit={}{}",

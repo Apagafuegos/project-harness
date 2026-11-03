@@ -253,11 +253,14 @@ not a security sandbox, and it self-tests that each mutation fails. The shell
 `scripts/eval.sh` wraps the opt-in compaction evaluation in `crates/eval`
 (live mode spends money; offline mode is in `scripts/check.sh`).
 
-`scripts/live-check.sh tui` is a separate, opt-in Codex subscription smoke. It
-starts the real binary under a PTY, types the fixed pong request, observes the
-completed answer, sends Ctrl-D, and verifies exit zero and terminal restoration.
-It spends quota once, never prints credentials, and does not retry rate limits
-(the acceptance run recorded `rate_limit` once and stopped).
+`scripts/live-check.sh tui [--provider openai|deepseek]` is a separate, opt-in
+live smoke. The default `openai` uses the read-only Codex subscription login;
+`deepseek` reads `DEEPSEEK_API_KEY` and skips with exit 0 when it is absent.
+Both start the real binary under a PTY, type the fixed pong request, observe the
+completed answer, send Ctrl-D, and verify exit zero and terminal restoration.
+The smoke prints the selected provider and model plus sanitized evidence only.
+It spends quota once, never prints credentials, and does not retry rate limits.
+Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
 
 #### TUI known limits
 

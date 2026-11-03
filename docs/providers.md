@@ -275,6 +275,20 @@ provider branch in the request or event mapping.
 ADR 0024 holds the control list, the signature behavior, the catalog sources and
 the date read.
 
+## Opt-in live TUI smoke
+
+`scripts/live-check.sh tui [--provider openai|deepseek]` builds the ordinary
+binary and runs `tui_smoke BINARY [--provider openai|deepseek]` through the shared
+PTY verifier. The default `openai` uses the read-only Codex login and
+`gpt-6.1-sol`; `deepseek` uses `DEEPSEEK_API_KEY` and `deepseek-flash`. The smoke
+passes the model explicitly and prints it. Both variants submit the same fixed
+pong prompt, require a completed answer, quit with Ctrl-D, and check terminal
+restoration and exit zero. Without the DeepSeek key it prints
+`live tui: provider=deepseek` and `skipped (no DEEPSEEK_API_KEY)`, exiting **0**
+without starting the TUI. Unknown providers print usage and exit **2**.
+It spends real quota, never retries rate limits, and is absent from `check.sh`
+and CI. Sanitized live results are in [M5 acceptance](milestone-5-acceptance.md).
+
 ## Offline tests
 
 `cargo test -p harness-providers --locked` runs only local fixture reads and
