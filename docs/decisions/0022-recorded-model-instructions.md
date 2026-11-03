@@ -56,4 +56,42 @@ exact cap acceptance, disabled sandbox, nested-file omission and edited-file
 continuation. CLI context tests check included instruction count/token estimates.
 The existing sentinel-secret check additionally scans the compiled base prose;
 its ordinary data-root scan includes any configuration artifacts. No dependency
-or core instruction changes were added.
+or core instruction changes were added in M5.
+
+## M7 step 03 amendment: user and nested instructions
+
+The earlier root-only scope is superseded. At creation, record the base system
+instruction, then the optional user file at developer level, then the root
+project file and nested project files, also at developer level. The user file
+is `$XDG_CONFIG_HOME/harness/AGENTS.md`, falling back to
+`$HOME/.config/harness/AGENTS.md`, independent of `--config`/`--no-config`.
+It uses std fs with a 64 KiB UTF-8/regular-file bound (nonblocking open), framed
+`User instructions from <path>:` with a HOME prefix abbreviated to `~`.
+Failures produce one content-free warning; absence is normal.
+
+Project reads still use `FsWorkspace::read_text`. The small read-only
+`FsWorkspace::list_directories` primitive enumerates immediate real directory
+entries through a strict descriptor-rooted reopen, verifies pinned identities
+and ancestors, rejects symlinks, and retains a caller-bounded lexicographic set.
+No ambient workspace path is reopened. The CLI owns discovery policy: skip dot
+directories and `target`, `node_modules`, `dist`, `build`, `vendor`; visit at most
+4,000 directories **including the root**, at depths 0 through 8. Files at depth
+8 are included; deeper directories are not entered. Each reached bound warns
+once, naming its limit. Unsafe directory enumeration produces one content-free
+warning. Discovered relative paths are sorted before reading files.
+
+The root framing is unchanged. Nested files use
+`Project instructions from <rel>/AGENTS.md (apply to files under <rel>/):`.
+Each file remains capped at 64 KiB, and user plus project **content bytes**
+(excluding generated framing and base prose) are capped at 256 KiB. A file that
+would exceed the total is skipped whole, never truncated. One warning names
+the total cap; later smaller files can still fit. No instruction discovery,
+preflight, configuration rewrite or warning happens on continuation.
+`tool_availability_changed` and the two-host assembly guard are unchanged.
+
+Evidence: `wiring::instruction_tests` covers order/framing, symlinked files and
+directories, excluded names, both walk bounds, user read errors, exact per-file
+cap, and whole-file total-cap skipping. Ask tests assert nested first-request
+instructions and edited nested continuation immutability. The sessions/context
+process test isolates HOME, asserts user/root/nested ordering, and verifies the
+context report counts all four recorded instructions.

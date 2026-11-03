@@ -45,10 +45,34 @@ fn sessions_help_empty_missing_and_relative_root() {
 }
 #[test]
 fn catalog_json_and_context_include_new_session_instructions_without_modification() {
+    if std::env::var_os("HARNESS_INSTRUCTION_ENV_CASE").is_none() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".config/harness")).unwrap();
+        fs::write(home.path().join(".config/harness/AGENTS.md"), "user rules").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "catalog_json_and_context_include_new_session_instructions_without_modification",
+                "--nocapture",
+            ])
+            .env("HARNESS_INSTRUCTION_ENV_CASE", "1")
+            .env("HOME", home.path())
+            .env_remove("XDG_CONFIG_HOME")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace).unwrap();
     fs::write(workspace.join("AGENTS.md"), "project rules").unwrap();
+    fs::create_dir(workspace.join("nested")).unwrap();
+    fs::write(workspace.join("nested/AGENTS.md"), "nested rules").unwrap();
     let path = temp.path().join("state");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -103,7 +127,36 @@ fn catalog_json_and_context_include_new_session_instructions_without_modificatio
     assert!(output.status.success(), "{output:?}");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["instructions"]["status"], "included");
-    assert_eq!(report["instructions"]["count"], 2);
+    assert_eq!(report["instructions"]["count"], 4);
+    let root = DataRoot::open(&path, false).unwrap();
+    let snapshot = JournalStore::inspect(&root, &opened.session)
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let configuration: Value = serde_json::from_slice(
+        &root
+            .read_artifact(snapshot.configuration(), 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        configuration["instructions"][1]["text"],
+        "User instructions from ~/.config/harness/AGENTS.md:\nuser rules"
+    );
+    assert!(
+        configuration["instructions"][2]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Project instructions from AGENTS.md:")
+    );
+    assert!(
+        configuration["instructions"][3]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with(
+                "Project instructions from nested/AGENTS.md (apply to files under nested/):"
+            )
+    );
     assert!(report["instructions"]["estimated_tokens"].as_u64().unwrap() > 0);
     assert_eq!(
         report["instructions"]["estimated_tokens"],

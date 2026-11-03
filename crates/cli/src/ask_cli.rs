@@ -1,8 +1,7 @@
 //! Real adapter and process I/O wiring for the injected headless client.
-use clap::{Arg, ArgAction, ArgMatches, Command, parser::ValueSource, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use harness::ask::{self, ControllingTerminal, Options};
 use harness_core::{
-    context::StrategyId,
     session::{ModelRef, Portability, SessionId},
     tools::SandboxConfig,
 };
@@ -10,8 +9,9 @@ use std::{
     io::{self, IsTerminal},
     path::PathBuf,
     process::ExitCode,
-    str::FromStr,
 };
+#[cfg(test)]
+use {clap::parser::ValueSource, harness_core::context::StrategyId, std::str::FromStr};
 
 pub fn command() -> Command {
     Command::new("ask")
@@ -36,6 +36,7 @@ pub fn command() -> Command {
 /// their value from `wiring::creation_compaction_strategy`, so a new session
 /// records `observation_masking` by default while an omitted flag on a
 /// continuation stays an omission, never an override.
+#[cfg(test)]
 pub(crate) fn strategy_selection(args: &ArgMatches) -> (StrategyId, bool) {
     let explicit = args.value_source("compaction-strategy") == Some(ValueSource::CommandLine);
     let strategy = args
@@ -81,41 +82,25 @@ pub fn run(args: &ArgMatches) -> ExitCode {
 }
 
 async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiver<()>) -> u8 {
-    let provider_name = args
-        .get_one::<String>("provider")
-        .map(String::as_str)
-        .unwrap_or("openai");
-    let explicit_provider = matches!(
-        args.value_source("provider"),
-        Some(ValueSource::CommandLine)
-    );
-    let explicit_auth = matches!(args.value_source("auth"), Some(ValueSource::CommandLine));
+    let settings = match crate::config::resolve(args) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return 2;
+        }
+    };
+    let provider_name = settings.text("provider").expect("resolved");
+    let explicit_auth = settings.given("auth");
     if !harness::wiring::openai_auth_applies(provider_name) && explicit_auth {
         eprintln!("error: auth_not_applicable");
         return 2;
     }
-    let codex = args
-        .get_one::<String>("auth")
-        .map(String::as_str)
-        .unwrap_or("codex")
-        == "codex";
+    let codex = settings.text("auth") == Some("codex");
     // The Codex hint belongs to the OpenAI subscription path only.
     let codex_hint = codex && provider_name == "openai";
     // Authentication profiles have separate state owners even though their wire
     // provider is the same. Never replay subscription state to the platform.
     let selected = harness::wiring::provider_instance(provider_name, codex);
-    let data_root = match args
-        .get_one::<PathBuf>("data-root")
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(ask::default_data_root)
-    {
-        Ok(p) => p,
-        Err(code) => {
-            eprintln!("error: {code}");
-            return 2;
-        }
-    };
     let wired = match harness::wiring::providers(selected, codex_hint) {
         Ok(wired) => wired,
         Err(error) => {
@@ -126,47 +111,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
             return error.code;
         }
     };
-    let model = args
-        .get_one::<String>("model")
-        .cloned()
-        .unwrap_or_else(|| harness::wiring::default_model(provider_name, codex).into());
-    let switch_policy = match args
-        .get_one::<String>("switch-policy")
-        .map(String::as_str)
-        .unwrap_or("reject")
-    {
-        "omit-optional" => Portability::OmitOptional,
-        "convert-supported" => Portability::ConvertSupported,
-        _ => Portability::Reject,
-    };
-    let (compaction_strategy, explicit_strategy) = strategy_selection(args);
-    let options = Options {
-        data_root,
-        workspace: args
-            .get_one::<PathBuf>("workspace")
-            .expect("required")
-            .clone(),
-        session: args.get_one::<SessionId>("session").cloned(),
-        model: ModelRef {
-            provider_instance: selected.into(),
-            model,
-        },
-        explicit_model: args.contains_id("model"),
-        explicit_provider,
-        switch_policy,
-        known_instances: wired.instances,
-        summary_model: args.get_one::<String>("summary-model").map(|m| ModelRef {
-            provider_instance: selected.into(),
-            model: m.clone(),
-        }),
-        compaction_strategy,
-        explicit_strategy,
-        prompt: args.get_one::<String>("prompt").expect("required").clone(),
-        approve_read_only: args.get_flag("approve-read-only"),
-        driver: wired.driver,
-        sandbox: Some(SandboxConfig::default()),
-        codex: codex_hint,
-    };
+    let options = options(args, &settings, wired.instances, wired.driver);
     let mut terminal = ControllingTerminal::open();
     ask::run(
         options,
@@ -181,6 +126,52 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
         },
     )
     .await
+}
+
+pub(crate) fn options(
+    args: &ArgMatches,
+    settings: &crate::config::Settings,
+    instances: Vec<String>,
+    driver: harness_core::runtime::DriverConfig,
+) -> Options {
+    let provider_name = settings.text("provider").expect("resolved");
+    let codex = settings.text("auth") == Some("codex");
+    let selected = harness::wiring::provider_instance(provider_name, codex);
+    let model = settings.text("model").expect("resolved").to_owned();
+    let switch_policy = match settings.text("switch_policy").expect("resolved") {
+        "omit-optional" => Portability::OmitOptional,
+        "convert-supported" => Portability::ConvertSupported,
+        _ => Portability::Reject,
+    };
+    let (compaction_strategy, explicit_strategy) =
+        (settings.strategy(), settings.given("compaction_strategy"));
+    Options {
+        data_root: settings.data_root(),
+        workspace: args
+            .get_one::<PathBuf>("workspace")
+            .expect("required")
+            .clone(),
+        session: args.get_one::<SessionId>("session").cloned(),
+        model: ModelRef {
+            provider_instance: selected.into(),
+            model,
+        },
+        explicit_model: settings.given("model"),
+        explicit_provider: settings.given("provider"),
+        switch_policy,
+        known_instances: instances,
+        summary_model: settings.text("summary_model").map(|m| ModelRef {
+            provider_instance: selected.into(),
+            model: m.to_owned(),
+        }),
+        compaction_strategy,
+        explicit_strategy,
+        prompt: args.get_one::<String>("prompt").expect("required").clone(),
+        approve_read_only: settings.approve_read_only(),
+        driver,
+        sandbox: Some(SandboxConfig::default()),
+        codex: codex && provider_name == "openai",
+    }
 }
 
 /// Both client parsers must resolve the same new-session creation default, and

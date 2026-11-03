@@ -82,10 +82,11 @@ harness --session SESSION_ID
 The workspace is the canonical current directory and must be authorized and
 outside the private storage root. The seven options `--data-root`, `--provider`,
 `--auth`, `--model`, `--summary-model`, `--compaction-strategy`, and `--session`
-have ask's defaults.
+have ask's defaults, including the user-level config file described below.
+Global `--config PATH` and `--no-config` control config loading.
 Without `--data-root`, storage is `$XDG_DATA_HOME/harness`, otherwise
-`$HOME/.local/share/harness`. New sessions record the built-in instructions and
-root `AGENTS.md`; edits affect new sessions only. Continuations keep their saved
+`$HOME/.local/share/harness`. New sessions record the built-in, user and
+root/nested project instructions; edits affect new sessions only. Continuations keep their saved
 instructions and model unless explicitly overridden, and enforce the shared
 policy/credential checks. An explicit switch uses the loss-rejecting policy;
 refusal is visible in the banner and retains the saved model. Repeat the saved
@@ -278,7 +279,7 @@ immutable siblings, busy commands, reject-first switching, explicit optional
 omission and required incompatibilities. The separate
 `tui_recovery` target kills a child after a durable write intent, then resolves
 it through the running app without replay. The separate `tui_pty` target tests
-non-TTY refusal, the seven-flag/no-config-file CLI surface, and restored the
+non-TTY refusal, the shared flags plus global config CLI surface, and restores the
 terminal after a returned loop error; enabling the default-off `test-provider`
 feature also runs the real binary under its own PTY for quit, panic, SIGTERM and
 that returned error, checking termios and restoration sequences. `check.sh` runs
@@ -308,13 +309,15 @@ Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
 
 #### TUI known limits
 
-- Flags only: seven options, no config file (decision 3).
+- User-only config defaults (ADR 0028); no workspace/project config. Ask-only
+  approval and startup-switch settings never automate TUI approval or change its
+  existing model-dialog policy.
 - The new-session strategy default is `observation_masking`. It is lossy for tool
   observations, does not guarantee a smaller projection, and provides no
   workspace rollback. Old and continued sessions keep their recorded strategy;
   the clients expose no mid-session strategy command in this milestone.
-- Only the workspace root `AGENTS.md` is read, at creation, capped at 64 KiB;
-  nested files are ignored and edits affect new sessions only.
+- User and root/nested project `AGENTS.md` are read only at creation, under
+  the per-file, aggregate and discovery bounds described below.
 - Minimal Markdown without syntax highlighting; raw HTML is inert text.
 - One workspace per process: the picker lists other workspaces and refuses to
   open them. There is no session delete/retention/export UI and no credential UI.
@@ -498,13 +501,79 @@ Offline tests inject `ScriptedProvider` and fake I/O into the client module.
 workspace; it checks exit 0 and stdout containing `pong`, printing only a sanitized
 summary. It is never part of `check.sh` or CI.
 
-New sessions record a factual built-in system instruction (workspace and available
-tools) and, when present, the workspace root `AGENTS.md` at developer level.
-Project text is read through descriptor-rooted resolution, capped at 64 KiB,
-and must be UTF-8. Unsafe/symlinked, oversized or unreadable files are skipped
-with one stderr warning. Nested `AGENTS.md` files are not read in v0.1. Edits
-affect new sessions only; continuations keep their recorded instructions.
-See [instructions](decisions/0022-recorded-model-instructions.md).
+New sessions record the instructions described below. Edits affect new
+sessions only; continuations keep their recorded instructions.
+
+## User configuration
+
+M7 supersedes M5's flags-only decision ([ADR 0028](decisions/0028-user-config.md)).
+Both clients load `$XDG_CONFIG_HOME/harness/config.toml`, falling back to
+`$HOME/.config/harness/config.toml`. There is no workspace/project config.
+Precedence is **flag > config > built-in default**; clap's displayed defaults
+never mask a config entry. `--config PATH` selects another user file, and
+`--no-config` ignores it. They are mutually exclusive global flags.
+
+```toml
+provider = "openai"
+auth = "codex"
+model = "gpt-6.1-sol"
+# summary_model = "gpt-6.1-sol" # enables automatic compaction
+compaction_strategy = "observation_masking"
+data_root = "/absolute/private/harness-state"
+# Ask only; the TUI retains explicit approval keys and its existing switch policy:
+switch_policy = "reject"
+approve_read_only = false
+```
+
+The six common keys apply to both clients; `switch_policy` and
+`approve_read_only` apply to **ask only**, and may coexist harmlessly in a shared
+file used by the TUI. Values use the same parsers as their flags. No environment
+interpolation or tilde expansion occurs. Config selections count like flags in
+all existing continuation checks (including `auth_not_applicable`, model
+switching and `session_policy_mismatch`); no persisted field or policy rule is
+added. To keep a saved model/strategy without an explicit override, leave the
+corresponding config key and flag absent. Summary policy must still match.
+
+```sh
+harness config path
+harness config show
+harness --config /path/to/user.toml config show --model override-model
+harness --no-config ask --workspace "$PWD" "Explain this project"
+```
+
+`path` prints the resolved path and whether it exists. `show` prints every
+key's effective value and source (`flag`, `config`, `default`); ask-only keys
+are labelled. It does not load credentials or open storage. A missing default
+file is normal; missing explicit, unreadable, over-64-KiB, non-UTF-8, malformed,
+unknown-key and wrong-type files exit 2 with content-free `config_invalid`
+diagnostics. Credential-like keys (`api_key`, `*_key`, `token`, `secret`,
+`password`) are refused with `config_credential_refused`; put credentials only
+in the existing environment variables or Codex login, never in TOML.
+
+## Recorded instructions
+
+At creation both clients record, in order:
+
+1. Built-in factual system prose naming the workspace and available tools.
+2. Optional user `$XDG_CONFIG_HOME/harness/AGENTS.md` (or
+   `$HOME/.config/harness/AGENTS.md`) at developer level, framed
+   `User instructions from ~/.config/harness/AGENTS.md:` (real path, HOME
+   abbreviated). This path is independent of `--config` and `--no-config`.
+3. Root `AGENTS.md`, framed `Project instructions from AGENTS.md:`.
+4. Nested files, sorted lexicographically, framed for example
+   `Project instructions from crates/cli/AGENTS.md (apply to files under crates/cli/):`.
+
+User text uses std fs; project text and directory discovery are descriptor-rooted
+with strict openat2 resolution and no symlink following. Dot directories,
+`target`, `node_modules`, `dist`, `build`, `vendor` are skipped. The walk visits
+at most 4,000 directories including the root, down to depth 8 (files at that
+depth are included), warning once per reached limit. Files must be UTF-8 and no
+larger than 64 KiB. Unsafe/unreadable/oversized files are skipped with
+content-free warnings. User plus project content is capped at 256 KiB; files
+that would overflow it are skipped whole, never truncated, with one total-cap
+warning. Later smaller files can still fit. The built-in prose/framing do not
+count against that content cap. No file is re-read on continuation; edits affect
+new sessions only. See [ADR 0022](decisions/0022-recorded-model-instructions.md).
 
 ## Session catalog
 

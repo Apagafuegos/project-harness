@@ -12,6 +12,7 @@ test-provider = []
 
 [dependencies]
 clap.workspace = true
+toml = "0.8.23"
 harness-core = { path = "../core" }
 harness-providers = { path = "../providers" }
 tokio = { workspace = true, features = ["signal"] }

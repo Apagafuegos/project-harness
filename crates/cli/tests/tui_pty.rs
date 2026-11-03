@@ -3,10 +3,10 @@
 #[path = "support/tui_pty.rs"]
 mod support;
 
-/// Decisions 1 and 3: plain `harness` is the terminal client, it has no `tui`
-/// alias, and its only options are the seven shared with `ask` (no config file).
+/// M7 supersedes M5 decision 3: seven shared session flags plus global config
+/// selection. Ask-only approval/startup switching do not widen the TUI surface.
 #[test]
-fn plain_harness_is_the_tui_with_seven_flags_and_no_config_file() {
+fn plain_harness_is_the_tui_with_shared_flags_and_user_config() {
     let binary = env!("CARGO_BIN_EXE_harness");
     let help = std::process::Command::new(binary)
         .arg("--help")
@@ -22,15 +22,18 @@ fn plain_harness_is_the_tui_with_seven_flags_and_no_config_file() {
         "--summary-model",
         "--compaction-strategy",
         "--session",
+        "--config",
+        "--no-config",
     ] {
         assert!(text.contains(flag), "missing {flag} in {text}");
     }
-    assert!(!text.contains("--config"), "no config file is read in M5");
+    assert!(!text.contains("--approve-read-only"));
+    assert!(!text.contains("--switch-policy"));
     let options = text
         .lines()
         .filter(|line| line.trim_start().starts_with("--"))
         .count();
-    assert_eq!(options, 7, "unexpected top-level option:\n{text}");
+    assert_eq!(options, 9, "unexpected top-level option:\n{text}");
     for args in [&["tui"][..], &["--config", "harness.toml"][..]] {
         let out = std::process::Command::new(binary)
             .args(args)

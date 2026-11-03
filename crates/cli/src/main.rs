@@ -1,6 +1,7 @@
 //! Command-line entry point for the future Ratatui client.
 
 mod ask_cli;
+mod config;
 mod doctor;
 mod tui_cli;
 
@@ -33,6 +34,8 @@ fn command() -> Command {
              Start with README.md and docs/README.md in the repository.",
         )
         .args(tui_cli::args())
+        .args(config::globals())
+        .subcommand(config::command())
         .subcommand(ask_cli::command())
         .subcommand(Command::new("sessions").about("List durable sessions as JSON without changing them")
             .arg(Arg::new("data-root").long("data-root").value_name("DIR").value_parser(value_parser!(PathBuf)).help("Private storage [default: $XDG_DATA_HOME/harness or ~/.local/share/harness]")))
@@ -211,6 +214,7 @@ fn main() -> ExitCode {
     let matches = command.get_matches_mut();
     match matches.subcommand() {
         Some(("ask", arguments)) => ask_cli::run(arguments),
+        Some(("config", arguments)) => config::run(arguments),
         Some(("sessions", arguments)) => print("harness sessions", sessions(arguments)),
         Some(("context", arguments)) => print("harness context", context(arguments)),
         Some(("doctor", arguments)) => print("harness doctor", run_doctor(arguments)),

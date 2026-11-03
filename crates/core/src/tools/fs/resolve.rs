@@ -99,6 +99,113 @@ pub(super) fn open_relative(
 }
 
 impl FsWorkspace {
+    /// Enumerate immediate real directories beneath the pinned root, retaining
+    /// at most `limit` lexicographically first paths. Symlinks are never returned.
+    /// `keep` filters names before the bound; `None` selects the root itself.
+    /// Reopens and ancestor checks use the same strict resolution as file reads.
+    pub fn list_directories(
+        &self,
+        path: Option<&WorkspacePath>,
+        limit: usize,
+        keep: impl Fn(&str) -> bool,
+    ) -> Result<(Vec<WorkspacePath>, bool), Refusal> {
+        let mut noop = |_| Ok(());
+        let mut control = Control::planning(&mut noop);
+        let resolved = path.map(|p| self.resolve(p, &mut control)).transpose()?;
+        if let Some(r) = &resolved {
+            refuse_protection(r.protection, false)?;
+        }
+        let directory = open_relative(
+            self.root.as_fd(),
+            path.map_or(".", WorkspacePath::as_str),
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+            &mut control,
+            Step::OpenFile,
+        )?;
+        let stat = fs::fstat(&directory).map_err(errno)?;
+        if let Some(r) = &resolved {
+            let pinned = r
+                .object
+                .as_ref()
+                .ok_or_else(|| Refusal::new(ResultCode::NotFound, "directory absent"))?;
+            if ObjectId::of(&stat) != ObjectId::of(&fs::fstat(pinned).map_err(errno)?) {
+                return Err(stale());
+            }
+            self.verify_ancestors(&r.ancestors, &mut control)?;
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        let mut limited = false;
+        for entry in fs::Dir::read_from(&directory).map_err(errno)? {
+            let entry = entry.map_err(errno)?;
+            if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+                continue;
+            }
+            let Ok(name) = entry.file_name().to_str() else {
+                continue;
+            };
+            if name == "." || name == ".." || !keep(name) {
+                continue;
+            }
+            let relative =
+                path.map_or_else(|| name.to_owned(), |p| format!("{}/{name}", p.as_str()));
+            // Some filesystems do not report d_type. Resolve unknown entries
+            // strictly instead of silently omitting their real directories.
+            if entry.file_type() == FileType::Unknown {
+                match open_relative(
+                    self.root.as_fd(),
+                    &relative,
+                    OFlags::PATH | OFlags::DIRECTORY,
+                    Mode::empty(),
+                    &mut control,
+                    Step::Resolve,
+                ) {
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            ResultCode::NotRegularFile
+                                | ResultCode::SymlinkRejected
+                                | ResultCode::NotFound
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if let Ok(path) = WorkspacePath::new(&relative) {
+                paths.insert(path.as_str().to_owned());
+                if paths.len() > limit {
+                    paths.pop_last();
+                    limited = true;
+                }
+            }
+        }
+        // A retained descriptor is not authority to read a moved-out ancestor.
+        if let Some(r) = &resolved {
+            self.verify_ancestors(&r.ancestors, &mut control)?;
+        }
+        let current = open_relative(
+            self.root.as_fd(),
+            path.map_or(".", WorkspacePath::as_str),
+            OFlags::PATH | OFlags::DIRECTORY,
+            Mode::empty(),
+            &mut control,
+            Step::Resolve,
+        )?;
+        if ObjectId::of(&stat) != ObjectId::of(&fs::fstat(&current).map_err(errno)?) {
+            return Err(stale());
+        }
+        Ok((
+            paths
+                .into_iter()
+                .map(|p| WorkspacePath::new(&p).expect("validated path"))
+                .collect(),
+            limited,
+        ))
+    }
+
     fn protection(&self, stat: &Stat) -> Protection {
         self.protected
             .get(&ObjectId::of(stat))

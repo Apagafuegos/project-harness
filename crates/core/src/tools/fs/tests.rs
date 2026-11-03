@@ -81,6 +81,62 @@ fn assert_no_temp(root: &TempDir) {
 }
 
 #[test]
+fn fs_directory_listing_is_bounded_no_symlinks_and_pinned_to_root() {
+    let container = TempDir::new().unwrap();
+    let root = container.path().join("root");
+    fs::create_dir(&root).unwrap();
+    for name in ["a", "b", "c", ".hidden"] {
+        fs::create_dir(root.join(name)).unwrap();
+    }
+    fs::create_dir(root.join("a/nested")).unwrap();
+    fs::write(root.join("file"), "not a directory").unwrap();
+    symlink("a", root.join("alias")).unwrap();
+    let view = FsWorkspace::open(&root, &FsProtectedPaths::default()).unwrap();
+    let (directories, limited) = view
+        .list_directories(None, 2, |n| !n.starts_with('.'))
+        .unwrap();
+    assert_eq!(directories, [path("a"), path("b")]);
+    assert!(limited);
+    let (directories, limited) = view
+        .list_directories(None, 3, |n| !n.starts_with('.'))
+        .unwrap();
+    assert_eq!(directories, [path("a"), path("b"), path("c")]);
+    assert!(!limited);
+    assert_eq!(
+        view.list_directories(Some(&path("alias")), 10, |_| true)
+            .unwrap_err()
+            .code,
+        ResultCode::SymlinkRejected
+    );
+    fs::rename(&root, container.path().join("saved")).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("unrelated")).unwrap();
+    assert_eq!(
+        view.list_directories(Some(&path("a")), 10, |_| true)
+            .unwrap()
+            .0,
+        [path("a/nested")]
+    );
+    assert_eq!(
+        view.list_directories(None, 10, |n| !n.starts_with('.'))
+            .unwrap()
+            .0,
+        [path("a"), path("b"), path("c")]
+    );
+    fs::rename(
+        container.path().join("saved/a"),
+        container.path().join("outside"),
+    )
+    .unwrap();
+    assert_eq!(
+        view.list_directories(Some(&path("a")), 10, |_| true)
+            .unwrap_err()
+            .code,
+        ResultCode::NotFound
+    );
+}
+
+#[test]
 fn s01_invalid_paths_never_reach_openat2() {
     let registry = Registry::builtin();
     let policy = policy();

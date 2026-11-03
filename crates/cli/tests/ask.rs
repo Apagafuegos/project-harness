@@ -1090,7 +1090,7 @@ async fn new_session_records_base_and_root_agents_and_sends_instructions_first()
     fs::create_dir(f.options.workspace.join("nested")).unwrap();
     fs::write(
         f.options.workspace.join("nested/AGENTS.md"),
-        "NESTED-MUST-NOT-BE-READ",
+        "Nested conventions.",
     )
     .unwrap();
     let provider = Arc::new(ScriptedProvider::new([reply("done")]));
@@ -1098,7 +1098,7 @@ async fn new_session_records_base_and_root_agents_and_sends_instructions_first()
     assert_eq!(code, 0, "{err}");
     let configuration = recorded_configuration(&f, &err);
     let instructions = configuration["instructions"].as_array().unwrap();
-    assert_eq!(instructions.len(), 2);
+    assert_eq!(instructions.len(), 3);
     assert_eq!(instructions[0]["level"], "system");
     let base = instructions[0]["text"].as_str().unwrap();
     assert!(base.contains(f.options.workspace.to_str().unwrap()));
@@ -1129,10 +1129,9 @@ async fn new_session_records_base_and_root_agents_and_sends_instructions_first()
         configuration["instructions"]
     );
     assert!(matches!(request.input.items[1], ContextItem::User { .. }));
-    assert!(
-        !configuration
-            .to_string()
-            .contains("NESTED-MUST-NOT-BE-READ")
+    assert_eq!(
+        instructions[2],
+        json!({"level":"developer", "text":"Project instructions from nested/AGENTS.md (apply to files under nested/):\nNested conventions."})
     );
     assert!(!err.contains("warning:"));
 }
@@ -1235,6 +1234,12 @@ async fn edited_agents_continuation_keeps_recorded_instructions_and_opens_fine()
         "original instructions",
     )
     .unwrap();
+    fs::create_dir(f.options.workspace.join("nested")).unwrap();
+    fs::write(
+        f.options.workspace.join("nested/AGENTS.md"),
+        "original nested",
+    )
+    .unwrap();
     let (code, _, err) = f
         .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
         .await;
@@ -1242,6 +1247,17 @@ async fn edited_agents_continuation_keeps_recorded_instructions_and_opens_fine()
     let configuration = recorded_configuration(&f, &err);
     f.options.session = Some(f.snapshot(&err).session_id().clone());
     fs::write(f.options.workspace.join("AGENTS.md"), "edited instructions").unwrap();
+    fs::write(
+        f.options.workspace.join("nested/AGENTS.md"),
+        "edited nested",
+    )
+    .unwrap();
+    fs::create_dir_all(f.options.workspace.join("new/deep")).unwrap();
+    fs::write(
+        f.options.workspace.join("new/deep/AGENTS.md"),
+        "new instructions",
+    )
+    .unwrap();
     let provider = Arc::new(ScriptedProvider::new([reply("second")]));
     let (code, _, err) = f.run(provider.clone(), None).await;
     assert_eq!(code, 0, "{err}");
@@ -1252,6 +1268,8 @@ async fn edited_agents_continuation_keeps_recorded_instructions_and_opens_fine()
     };
     assert!(instructions[1].text.contains("original instructions"));
     assert!(!instructions[1].text.contains("edited instructions"));
+    assert_eq!(instructions.len(), 3);
+    assert!(instructions[2].text.ends_with("original nested"));
     assert!(!err.contains("warning:"));
 }
 

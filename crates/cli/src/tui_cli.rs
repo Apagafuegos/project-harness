@@ -1,5 +1,5 @@
 //! Process wiring for plain `harness`; all session assembly stays in wiring.
-use clap::{Arg, ArgMatches, parser::ValueSource};
+use clap::{Arg, ArgMatches};
 use harness::{
     tui::{
         runtime::{self, Signal, TerminalGuard},
@@ -14,7 +14,6 @@ use harness_core::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
-    path::PathBuf,
     process::ExitCode,
 };
 
@@ -38,6 +37,13 @@ pub fn args() -> Vec<Arg> {
 }
 
 pub fn run(args: &ArgMatches) -> ExitCode {
+    let settings = match crate::config::resolve(args) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         eprintln!("error: TUI requires a terminal; use harness ask");
         return ExitCode::from(2);
@@ -46,7 +52,7 @@ pub fn run(args: &ArgMatches) -> ExitCode {
         .enable_all()
         .build()
         .map_err(|_| (2, "runtime_setup_failed".into()))
-        .and_then(|runtime| runtime.block_on(wired(args)));
+        .and_then(|runtime| runtime.block_on(wired(args, &settings)));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
@@ -56,7 +62,10 @@ pub fn run(args: &ArgMatches) -> ExitCode {
     }
 }
 
-async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
+async fn wired(
+    args: &ArgMatches,
+    settings: &crate::config::Settings,
+) -> Result<(), wiring::Failure> {
     // Install before opening storage/entering raw mode. Signals remain queued
     // during setup and restore the terminal before durable shutdown in drive.
     use tokio::signal::unix::{SignalKind, signal};
@@ -75,52 +84,23 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
             yield value;
         }
     };
-    let provider_name = args
-        .get_one::<String>("provider")
-        .expect("default")
-        .as_str();
-    let codex = args.get_one::<String>("auth").expect("default") == "codex";
-    if !wiring::openai_auth_applies(provider_name)
-        && args.value_source("auth") == Some(ValueSource::CommandLine)
-    {
+    let provider_name = settings.text("provider").expect("resolved");
+    let codex = settings.text("auth") == Some("codex");
+    if !wiring::openai_auth_applies(provider_name) && settings.given("auth") {
         return Err((2, "auth_not_applicable".into()));
     }
     let selected = wiring::provider_instance(provider_name, codex);
     let providers = providers(selected, codex && provider_name == "openai")?;
-    let model = ModelRef {
-        provider_instance: selected.into(),
-        model: args
-            .get_one::<String>("model")
-            .cloned()
-            .unwrap_or_else(|| wiring::default_model(provider_name, codex).into()),
-    };
-    let (compaction_strategy, explicit_strategy) = super::ask_cli::strategy_selection(args);
-    let options = SessionOptions {
-        data_root: args
-            .get_one::<PathBuf>("data-root")
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| wiring::default_data_root().map_err(|code| (2, code.into())))?,
-        workspace: std::env::current_dir()
-            .and_then(std::fs::canonicalize)
-            .map_err(|_| (2, "invalid_workspace".into()))?,
-        session: args.get_one::<SessionId>("session").cloned(),
-        summary_model: args
-            .get_one::<String>("summary-model")
-            .map(|model| ModelRef {
-                provider_instance: selected.into(),
-                model: model.clone(),
-            }),
-        compaction_strategy,
-        explicit_strategy,
-        model: model.clone(),
-        explicit_model: args.value_source("model") == Some(ValueSource::CommandLine),
-        explicit_provider: args.value_source("provider") == Some(ValueSource::CommandLine),
-        switch_policy: Portability::Reject,
-        known_instances: providers.instances,
-        driver: providers.driver,
-        sandbox: Some(SandboxConfig::default()),
-    };
+    let workspace = std::env::current_dir()
+        .and_then(std::fs::canonicalize)
+        .map_err(|_| (2, "invalid_workspace".into()))?;
+    let options = options(
+        args,
+        settings,
+        workspace,
+        providers.instances,
+        providers.driver,
+    );
     let opened = wiring::open_session(&options, providers.provider.clone()).await?;
     let warnings = opened.warnings.clone();
     let commands = SessionCommands::new(opened, options, providers.provider);
@@ -166,6 +146,41 @@ async fn wired(args: &ArgMatches) -> Result<(), wiring::Failure> {
     // tool/storage workers; no process exit can race journal publication.
     commands.shutdown().await;
     result
+}
+
+pub(crate) fn options(
+    args: &ArgMatches,
+    settings: &crate::config::Settings,
+    workspace: std::path::PathBuf,
+    instances: Vec<String>,
+    driver: harness_core::runtime::DriverConfig,
+) -> SessionOptions {
+    let selected = wiring::provider_instance(
+        settings.text("provider").expect("resolved"),
+        settings.text("auth") == Some("codex"),
+    );
+    SessionOptions {
+        data_root: settings.data_root(),
+        workspace,
+        session: args.get_one::<SessionId>("session").cloned(),
+        summary_model: settings.text("summary_model").map(|model| ModelRef {
+            provider_instance: selected.into(),
+            model: model.into(),
+        }),
+        compaction_strategy: settings.strategy(),
+        explicit_strategy: settings.given("compaction_strategy"),
+        model: ModelRef {
+            provider_instance: selected.into(),
+            model: settings.text("model").expect("resolved").into(),
+        },
+        explicit_model: settings.given("model"),
+        explicit_provider: settings.given("provider"),
+        // Config's ask-only startup policy never changes the TUI's existing policy.
+        switch_policy: Portability::Reject,
+        known_instances: instances,
+        driver,
+        sandbox: Some(SandboxConfig::default()),
+    }
 }
 
 fn providers(selected: &str, codex_hint: bool) -> Result<wiring::Providers, wiring::Failure> {

@@ -1,4 +1,7 @@
 //! Shared provider, model and durable session assembly for headless and terminal clients.
+#[cfg(test)]
+#[path = "wiring_instructions_tests.rs"]
+mod instruction_tests;
 use harness_core::{
     context::{CompactionConfig, ModelCatalog, PreviewReport, StrategyId},
     model::ModelProvider,
@@ -96,7 +99,7 @@ pub struct WiredSession {
     pub handle: SessionHandle,
     /// New or continued durable identity.
     pub session: SessionId,
-    /// Root AGENTS.md warnings, absent on continuation.
+    /// User/project instruction warnings, absent on continuation.
     pub warnings: Vec<String>,
 }
 
@@ -348,20 +351,181 @@ fn session_configuration(
                 .ok_or_else(|| configuration("workspace_not_utf8"))?,
         );
     let mut instructions = vec![json!({"level":"system", "text":base})];
-    let mut warnings = Vec::new();
-    match project_instructions(&o.workspace) {
-        Ok(Some(text)) => instructions.push(json!({"level":"developer", "text":format!("Project instructions from AGENTS.md:\n{text}")})),
-        Ok(None) => {},
-        Err(reason) => warnings.push(format!("AGENTS.md skipped: {reason}")),
-    }
+    let (files, warnings) = instruction_files(
+        &o.workspace,
+        user_config_directory()
+            .ok()
+            .map(|p| p.join("AGENTS.md"))
+            .as_deref(),
+    );
+    instructions.extend(files);
     value["instructions"] = Value::Array(instructions);
     Ok((value, warnings))
 }
 
-fn project_instructions(workspace: &std::path::Path) -> Result<Option<String>, String> {
-    let workspace = FsWorkspace::open(workspace, &FsProtectedPaths::default())
-        .map_err(|_| "descriptor-rooted workspace unavailable".to_owned())?;
-    let path = WorkspacePath::new("AGENTS.md").expect("fixed workspace-relative path");
+/// User-owned configuration directory, never selected by a workspace file.
+pub fn user_config_directory() -> Result<PathBuf, &'static str> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
+        .ok_or("config_path_unconfigured")?;
+    if !base.is_absolute() {
+        return Err("config_path_not_absolute");
+    }
+    Ok(base.join("harness"))
+}
+
+fn user_instructions(path: &std::path::Path) -> Result<Option<String>, String> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("unavailable".into()),
+    };
+    if !file.metadata().map_err(|_| "unavailable")?.is_file() {
+        return Err("not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(AGENTS_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "unavailable")?;
+    if bytes.len() as u64 > AGENTS_CAP {
+        return Err("exceeds 64 KiB cap".into());
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "not valid UTF-8".into())
+}
+
+fn instruction_files(
+    workspace: &std::path::Path,
+    user: Option<&std::path::Path>,
+) -> (Vec<Value>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    let mut total = 0;
+    let mut total_warned = false;
+    let mut append =
+        |result: Result<Option<String>, String>, label: &str, frame: String| match result {
+            Ok(Some(text)) => {
+                if total + text.len() > 256 * 1024 {
+                    if !total_warned {
+                        warnings.push("instructions skipped: exceeds 256 KiB total cap".into());
+                        total_warned = true;
+                    }
+                } else {
+                    total += text.len();
+                    files.push(json!({"level":"developer", "text":format!("{frame}:\n{text}")}));
+                }
+            }
+            Ok(None) => {}
+            Err(reason) => warnings.push(format!("{label} skipped: {reason}")),
+        };
+    if let Some(user) = user {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let display = home
+            .as_ref()
+            .and_then(|home| user.strip_prefix(home).ok())
+            .map_or_else(
+                || user.display().to_string(),
+                |p| format!("~/{}", p.display()),
+            );
+        append(
+            user_instructions(user),
+            "User AGENTS.md",
+            format!("User instructions from {display}"),
+        );
+    }
+    let workspace = match FsWorkspace::open(workspace, &FsProtectedPaths::default()) {
+        Ok(workspace) => workspace,
+        Err(_) => {
+            warnings.push("AGENTS.md skipped: descriptor-rooted workspace unavailable".into());
+            return (files, warnings);
+        }
+    };
+    append(
+        project_instructions(&workspace, "AGENTS.md"),
+        "AGENTS.md",
+        "Project instructions from AGENTS.md".into(),
+    );
+    let (paths, notices) = nested_directories(&workspace);
+    for relative in paths {
+        let name = format!("{relative}/AGENTS.md");
+        append(
+            project_instructions(&workspace, &name),
+            &name,
+            format!("Project instructions from {name} (apply to files under {relative}/)"),
+        );
+    }
+    warnings.extend(notices);
+    (files, warnings)
+}
+
+fn nested_directories(workspace: &FsWorkspace) -> (Vec<String>, Vec<String>) {
+    use std::collections::BTreeSet;
+    let mut pending = BTreeSet::from([String::new()]);
+    let mut visited = Vec::new();
+    let mut depth_limited = false;
+    let mut directory_limited = false;
+    let mut unsafe_read = false;
+    while let Some(relative) = pending.pop_first() {
+        let depth = if relative.is_empty() {
+            0
+        } else {
+            relative.split('/').count()
+        };
+        let path = (!relative.is_empty())
+            .then(|| WorkspacePath::new(&relative).expect("validated directory"));
+        let remaining = 4000usize.saturating_sub(visited.len() + pending.len() + 1);
+        match workspace.list_directories(
+            path.as_ref(),
+            if depth == 8 { 0 } else { remaining },
+            |name| {
+                !name.starts_with('.')
+                    && !matches!(
+                        name,
+                        "target" | "node_modules" | "dist" | "build" | "vendor"
+                    )
+            },
+        ) {
+            Ok((children, limited)) => {
+                if limited {
+                    if depth == 8 {
+                        depth_limited = true;
+                    } else {
+                        directory_limited = true;
+                    }
+                }
+                pending.extend(children.into_iter().map(|p| p.as_str().to_owned()));
+            }
+            Err(_) => unsafe_read = true,
+        }
+        visited.push(relative);
+    }
+    visited.retain(|p| !p.is_empty());
+    // Sort complete instruction paths, not just directory prefixes: e.g.
+    // a-b/AGENTS.md sorts before a/AGENTS.md, despite "a" preceding "a-b".
+    visited.sort_by_cached_key(|relative| format!("{relative}/AGENTS.md"));
+    let mut warnings = Vec::new();
+    if depth_limited {
+        warnings.push("AGENTS.md discovery stopped: depth 8 limit".into());
+    }
+    if directory_limited {
+        warnings.push("AGENTS.md discovery stopped: 4,000 directories limit".into());
+    }
+    if unsafe_read {
+        warnings
+            .push("AGENTS.md discovery skipped: descriptor-rooted directory read refused".into());
+    }
+    (visited, warnings)
+}
+
+fn project_instructions(workspace: &FsWorkspace, name: &str) -> Result<Option<String>, String> {
+    let path = WorkspacePath::new(name).expect("discovered workspace-relative path");
     // read_text is bounded before allocation, refuses symlinks and validates UTF-8.
     match workspace.read_text(&path, AGENTS_CAP) {
         Ok(text) => Ok(Some(text)),
