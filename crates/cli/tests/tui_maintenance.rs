@@ -17,7 +17,7 @@ use harness_core::{
     session::*,
 };
 use ratatui::{Terminal, backend::TestBackend};
-use std::{fs, io, path::PathBuf, sync::Arc, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 /// The sessions screen's maintenance tests share one process with a Tokio
 /// runtime that blocks on real journals; take turns so lock timing is exact.
@@ -143,17 +143,28 @@ fn entry(id: &SessionId, title: &str, status: CatalogStatus) -> SessionCatalogEn
         reason: None,
     }
 }
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(60)).await;
-}
-async fn drive(
+/// One bound for every stage, well inside the loop's own deadline: a stage
+/// that cannot reach its state is a defect, not a slow machine.
+const STAGE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Drive one stage of keys through the production loop and return the app.
+///
+/// The catalog, the confirmation dialog and the deletion are all reached by
+/// work the shell does between key presses. `runtime::drive` returns only once
+/// every navigation future a stage dispatched has been applied to the app, so
+/// the frames asserted after a stage are observed, never guessed from elapsed
+/// time: each key is fed only when the state it acts on already exists.
+/// `waiting_for` names that state, so a timeout says what never happened.
+async fn stage(
     host: &SessionCommands,
     mut app: App,
-    events: impl futures_util::Stream<Item = io::Result<Event>>,
+    keys: impl IntoIterator<Item = KeyEvent>,
+    waiting_for: &str,
 ) -> App {
+    let events = futures_util::stream::iter(keys.into_iter().map(|key| Ok(Event::Key(key))));
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     tokio::time::timeout(
-        Duration::from_secs(10),
+        STAGE_DEADLINE,
         runtime::drive(
             &mut terminal,
             &mut app,
@@ -165,9 +176,26 @@ async fn drive(
         ),
     )
     .await
-    .expect("loop deadline")
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!(
+            "the loop did not reach {waiting_for} within {} s",
+            STAGE_DEADLINE.as_secs()
+        )
+    })
+    .unwrap_or_else(|error| panic!("the loop failed before {waiting_for}: {error}"));
     app
+}
+
+/// The picker only acts on rows it already holds, so a stage may not feed a
+/// selection key before the listing has been applied. Titles are not unique,
+/// so the wait is on the catalog's own shape: every entry is listed and the
+/// empty-state marker is gone.
+fn assert_catalog_loaded(app: &mut App, sessions: usize) {
+    let screen = render(app, 80, 24);
+    assert!(
+        !screen.contains("(empty)") && screen.matches("(no message)").count() == sessions,
+        "the session catalog did not list all {sessions} sessions:\n{screen}"
+    );
 }
 
 #[tokio::test]
@@ -217,17 +245,26 @@ async fn delete_with_confirm_removes_the_other_journal_and_refreshes_the_list() 
     let before = f.root().sessions().unwrap().len();
     assert_eq!(before, 2);
     let down = row_index(&f, &other_id);
-    let events = async_stream::stream! {
-        yield Ok(Event::Key(ctrl('o')));
-        settle().await;
-        for _ in 0..down { yield Ok(Event::Key(key(KeyCode::Down))); }
-        yield Ok(Event::Key(key(KeyCode::Char('d'))));
-        settle().await;
-        yield Ok(Event::Key(key(KeyCode::Char('y'))));
-        settle().await;
-        yield Ok(Event::Key(ctrl('d')));
-    };
-    let mut app = drive(&host, host.app(), events).await;
+    // `d` only reaches a row once the catalog listing has been applied, so the
+    // list is waited for before the selection keys are fed.
+    let mut app = stage(&host, host.app(), [ctrl('o')], "the session catalog").await;
+    assert_catalog_loaded(&mut app, before);
+    let keys = (0..down)
+        .map(|_| key(KeyCode::Down))
+        .chain([key(KeyCode::Char('d'))]);
+    let mut app = stage(&host, app, keys, "the delete confirmation").await;
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        screen.contains("delete session") && screen.contains(other_id.as_str()),
+        "the delete confirmation did not name {other_id}:\n{screen}"
+    );
+    let mut app = stage(
+        &host,
+        app,
+        [key(KeyCode::Char('y')), ctrl('d')],
+        "the deletion result",
+    )
+    .await;
     let screen = render(&mut app, 80, 24);
     assert!(screen.contains("deleted session"), "{screen}");
     // The frame wraps its lines, so match the phrase, not the full command.
@@ -287,18 +324,27 @@ async fn a_locked_session_shows_the_refusal_code_verbatim() {
     other.handle.shutdown().await;
     // Another engine holds the writer lock on that journal.
     let writer = JournalStore::open(Arc::new(f.root()), &id).unwrap();
+    let before = f.root().sessions().unwrap().len();
+    assert_eq!(before, 2);
     let down = row_index(&f, &id);
-    let events = async_stream::stream! {
-        yield Ok(Event::Key(ctrl('o')));
-        settle().await;
-        for _ in 0..down { yield Ok(Event::Key(key(KeyCode::Down))); }
-        yield Ok(Event::Key(key(KeyCode::Char('d'))));
-        settle().await;
-        yield Ok(Event::Key(key(KeyCode::Char('y'))));
-        settle().await;
-        yield Ok(Event::Key(ctrl('d')));
-    };
-    let mut app = drive(&host, host.app(), events).await;
+    let mut app = stage(&host, host.app(), [ctrl('o')], "the session catalog").await;
+    assert_catalog_loaded(&mut app, before);
+    let keys = (0..down)
+        .map(|_| key(KeyCode::Down))
+        .chain([key(KeyCode::Char('d'))]);
+    let mut app = stage(&host, app, keys, "the delete confirmation").await;
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        screen.contains("delete session") && screen.contains(id.as_str()),
+        "the delete confirmation did not name {id}:\n{screen}"
+    );
+    let mut app = stage(
+        &host,
+        app,
+        [key(KeyCode::Char('y')), ctrl('d')],
+        "the deletion result",
+    )
+    .await;
     let screen = render(&mut app, 80, 24);
     // `session_locked` appears either as the shell's refusal or on the row.
     assert!(screen.contains("session_locked"), "{screen}");

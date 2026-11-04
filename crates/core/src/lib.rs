@@ -10,3 +10,6 @@ pub mod model;
 pub mod runtime;
 pub mod session;
 pub mod tools;
+
+#[cfg(test)]
+mod spawn_gate;

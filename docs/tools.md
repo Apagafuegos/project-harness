@@ -213,3 +213,6 @@ a concurrent sandbox/probe spawn can briefly retain another thread's journal
 lock after that writer closes, so immediate reopen may report `session_locked`.
 This transient refusal does not justify bypassing the lock or retrying effects.
 Tests that spawn run in separate integration targets, not the core unit binary.
+The single probe unit test that spawns takes the test-only spawn gate that also
+guards every journal lock acquisition, so a child cannot hold an inherited
+journal lock across another test's reopen (ADR 0012).

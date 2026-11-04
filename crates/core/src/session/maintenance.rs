@@ -127,6 +127,9 @@ fn open_error(error: StoreError) -> MaintenanceError {
 }
 
 fn lock(file: &File, exclusive: bool) -> Result<()> {
+    // See `crate::spawn_gate`: a forked child keeps an inherited lock alive.
+    #[cfg(test)]
+    let _spawn_gate = crate::spawn_gate::hold();
     let operation = if exclusive {
         FlockOperation::NonBlockingLockExclusive
     } else {

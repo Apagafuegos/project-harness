@@ -139,6 +139,51 @@ pub(super) fn known() -> RuntimeConfig {
     config
 }
 
+/// Every descriptor in this process that still resolves to the journal, so
+/// a refusal names its holder instead of only its code.
+///
+/// `drop(self.store.take())` releases the writer's descriptor, so a lock
+/// failure here means somebody else holds one: a descriptor this harness
+/// leaked, or - by ADR 0012 - a forked child that inherited a copy through
+/// a concurrent spawn and has not exec'd yet. A list without an entry for
+/// the journal proves it is the latter, because the child's copy lives in
+/// the child.
+fn who_holds(root: &DataRoot, id: &SessionId) -> String {
+    let path = root.path().join("sessions").join(format!("{id}.jsonl"));
+    let mut report = format!("journal: {}\n", path.display());
+    let entries = match std::fs::read_dir("/proc/self/fd") {
+        Ok(entries) => entries,
+        Err(error) => return report + &format!("  /proc/self/fd: {error}\n"),
+    };
+    let mut held = 0;
+    for entry in entries.flatten() {
+        let fd = entry.file_name();
+        if std::fs::read_link(entry.path()).ok().as_deref() != Some(path.as_path()) {
+            continue;
+        }
+        held += 1;
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", fd.to_string_lossy()))
+            .unwrap_or_default();
+        let flags = info
+            .lines()
+            .find_map(|line| line.strip_prefix("flags:\t"))
+            .unwrap_or("unknown");
+        report.push_str(&format!(
+            "  fd {} flags {}\n",
+            fd.to_string_lossy(),
+            flags.trim()
+        ));
+    }
+    if held == 0 {
+        report.push_str(concat!(
+            "  no descriptor in this process resolves to it: the holder is another\n",
+            "  process, such as a child that still holds an inherited copy\n",
+            "  (ADR 0012, known in-process lock/spawn gap)\n",
+        ));
+    }
+    report
+}
+
 impl Driver {
     fn new() -> Self {
         Self::with_config(known())
@@ -604,7 +649,12 @@ impl Driver {
 
     /// Repair a torn tail with the fingerprint and size just inspected.
     fn repair_if_torn(&mut self) {
-        let inspection = JournalStore::inspect(&self.root, &self.session).unwrap();
+        let inspection = JournalStore::inspect(&self.root, &self.session).unwrap_or_else(|error| {
+            panic!(
+                "journal inspection failed: {error}\n{}",
+                who_holds(&self.root, &self.session)
+            )
+        });
         match &inspection.diagnostic {
             None => {}
             Some(diagnostic) if diagnostic.kind == DiagnosticKind::TornTail => {
@@ -636,7 +686,12 @@ impl Driver {
     /// Open the journal under a new runtime with the next identity stream.
     fn attach(&mut self) {
         let stream = self.segment.stream + 1;
-        let store = JournalStore::open(self.root.clone(), &self.session).unwrap();
+        let store = JournalStore::open(self.root.clone(), &self.session).unwrap_or_else(|error| {
+            panic!(
+                "reopen failed: {error}\n{}",
+                who_holds(&self.root, &self.session)
+            )
+        });
         let snapshot = store.snapshot();
         self.store = Some(store);
         let config = self.segment.config.clone();
@@ -681,7 +736,10 @@ impl Driver {
                     .snapshot
                     .unwrap()
             }
-            Err(error) => panic!("reopen failed: {error}"),
+            Err(error) => panic!(
+                "reopen failed: {error}\n{}",
+                who_holds(&self.root, &self.session)
+            ),
         };
         if !same(&reopened, &published) {
             // Only an I/O failure after a complete write leaves one more record:

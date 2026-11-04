@@ -248,8 +248,21 @@ reopens such a journal during that window, the open can report `session_locked`
 until the child execs. This is a transient refusal, not permission to bypass the
 lock or silently retry an uncertain effect. Step 7b does not change the lock or
 spawn implementation. Probe regressions run in the separate S02/CLI integration
-binaries; core unit tests use a disabled shell so subprocesses cannot interfere
-with unrelated immediate-release/reopen assertions. Failed file startup with a
+binaries; core unit tests use a disabled shell so tool subprocesses cannot
+interfere with unrelated immediate-release/reopen assertions.
+
+The M7 release gate showed the window is reachable from the core unit binary
+itself: its probe environment test spawns `/usr/bin/env` while the randomized
+reopen fuzz runs. Test builds therefore serialize journal lock acquisition
+(`session/store.rs`, `session/catalog.rs`, `session/maintenance.rs`) with
+subprocess spawning (`tools/sandbox/probe.rs`) through one process-wide gate,
+`crates/core/src/spawn_gate.rs`, held for the whole life of a child. The lock,
+the spawn and the refusal are unchanged; the two simply cannot overlap inside a
+test process, so a `session_locked` there is a real defect. A reopen or
+inspection refused that way names the journal and every descriptor in the
+process that still resolves to it, which distinguishes a leaked harness
+descriptor from an inherited copy in a child. The gate is `#[cfg(test)]` only:
+no shipped behaviour changes. Failed file startup with a
 failed probe is retained in the CLI tools-report tests; failed file startup
 with a working probe and broken-bwrap refusal remain in `tests/tool_host.rs`.
 

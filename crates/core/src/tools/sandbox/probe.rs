@@ -833,7 +833,14 @@ mod tests {
         command.env("OPENAI_API_KEY", "SENTINEL-CREDENTIAL-PROBE");
         command.env("LD_PRELOAD", "SENTINEL-LOADER-PROBE");
         scope_environment(&mut command, &bus);
-        let output = command.output().unwrap();
+        // A forked child inherits this process's descriptors, including another
+        // test's journal, until it execs. Hold the gate across the child's whole
+        // life so the spawn cannot overlap a journal lock acquisition
+        // (ADR 0012, known in-process lock/spawn gap).
+        let output = {
+            let _spawn_gate = crate::spawn_gate::hold();
+            command.output().unwrap()
+        };
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
         let text = String::from_utf8(output.stdout).unwrap();

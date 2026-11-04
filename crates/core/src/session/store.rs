@@ -51,6 +51,11 @@ pub struct JournalStore {
 }
 
 fn lock(file: &File, exclusive: bool) -> Result<()> {
+    // A forked child can still hold this journal through an inherited
+    // descriptor; test builds take the gate so the two never overlap
+    // (ADR 0012, known in-process lock/spawn gap).
+    #[cfg(test)]
+    let _spawn_gate = crate::spawn_gate::hold();
     match flock(
         file,
         if exclusive {

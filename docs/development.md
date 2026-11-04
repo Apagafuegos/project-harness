@@ -452,6 +452,14 @@ RUNTIME_SEED=123 cargo test -p harness-core --locked randomized -- --nocapture
 RUNTIME_SEEDS=5000 cargo test --release -p harness-core --locked randomized
 ```
 
+Storage refusals are the one outcome the harness must never see. A reopen or an
+inspection that reports `session_locked` after the writer closed fails with the
+journal path and every descriptor in the process that still resolves to it, so
+the log distinguishes a leaked descriptor from a forked child that still holds
+an inherited copy (ADR 0012). Journal lock acquisition and subprocess spawning
+take one test-only gate, `crates/core/src/spawn_gate.rs`, so the two cannot
+overlap and such a refusal is always a real defect.
+
 ### Async driver tests
 
 `runtime/driver/tests.rs` drives `SessionHandle` through the public

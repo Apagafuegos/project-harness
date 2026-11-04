@@ -154,6 +154,9 @@ impl DataRoot {
         )?
         .into();
         verify_private(&file, false)?;
+        // See `crate::spawn_gate`: a forked child keeps an inherited lock alive.
+        #[cfg(test)]
+        let _spawn_gate = crate::spawn_gate::hold();
         fs::flock(&file, FlockOperation::NonBlockingLockShared).map_err(|error| {
             if error == rustix::io::Errno::WOULDBLOCK {
                 StoreError::Locked
