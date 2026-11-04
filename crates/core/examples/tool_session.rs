@@ -236,7 +236,9 @@ fn main() -> Result<()> {
             resolution: UserResolution::Observed {
                 status: ToolStatus::Succeeded,
                 text: "Checked new: written".into(),
-                file_effect: None,
+                // The write is a captured mutation, so only the user's own
+                // statement may classify whether its rename committed.
+                file_effect: Some(harness_core::session::FileEffect::Applied),
             },
         })
         .await
