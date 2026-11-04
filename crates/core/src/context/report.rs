@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{config::ModelLimits, estimate::EstimatorInfo};
 use crate::session::{
-    ContextMode, Digest, EntryId, ModelRef, Provenance, ResponseId, SessionId, TurnId, Usage,
+    ContextMode, Digest, EntryId, ModelRef, Provenance, ResponseId, SessionId, TurnId, UndoId,
+    UndoOutcome, Usage,
 };
 
 /// Accounts for every entry on one branch for one projection.
@@ -33,6 +34,11 @@ pub struct ContextReport {
     /// when no control applies, so a history without controls keeps its bytes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<ControlReport>,
+    /// Recorded undo notes on the branch, in ancestral order. Omitted when the
+    /// history has none. Controls stay about pins and exclusions: a filesystem
+    /// undo is reported here instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undos: Vec<UndoReport>,
     /// Estimated tokens by category, and opaque bytes.
     pub totals: Totals,
     /// The budget under the projection model's limits.
@@ -221,6 +227,22 @@ pub struct ControlReport {
     /// The control entry that sets it, the last one for this turn before the
     /// head.
     pub control_entry_id: EntryId,
+}
+
+/// One recorded undo note on the branch, as the report lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoReport {
+    /// The undo identity.
+    pub undo_id: UndoId,
+    /// The turn whose trusted file edits were reverted, or not.
+    pub target_turn_id: TurnId,
+    /// The `undo_note` entry the projection includes.
+    pub note_entry_id: EntryId,
+    /// How the undo ended.
+    pub outcome: UndoOutcome,
+    /// Canonical paths in the note's own order.
+    pub paths: Vec<String>,
 }
 
 /// One excluded entry, block or continuation.

@@ -866,6 +866,7 @@ fn render_projection(snapshot: &SessionSnapshot, report: &ContextReport) -> Stri
         };
         match &stored.entry.payload {
             EntryPayload::Compaction(compaction) => parts.push(compaction.summary.clone()),
+            EntryPayload::UndoNote(note) => parts.push(note.text.clone()),
             EntryPayload::UserMessage(message) => {
                 parts.extend(text_blocks(&message.content));
             }
@@ -1058,6 +1059,9 @@ fn kind_name(accepted: &Accepted) -> &'static str {
         Accepted::ModelSwitched { .. } => "model_switched",
         Accepted::ContextControlSet { .. } => "context_control_set",
         Accepted::CompactionStrategySet { .. } => "compaction_strategy_set",
+        Accepted::UndoPreviewed { .. } => "undo_previewed",
+        Accepted::UndoCompleted { .. } => "undo_completed",
+        Accepted::UndoResolved { .. } => "undo_resolved",
     }
 }
 
@@ -1080,6 +1084,7 @@ pub fn rejection_code(rejection: &Rejection) -> String {
         Rejection::StaleCommand => "stale_command".into(),
         Rejection::Invalid(code) => (*code).to_owned(),
         Rejection::PortabilityLoss(_) => "portability_loss".into(),
+        Rejection::Undo { code, .. } => (*code).to_owned(),
     }
 }
 

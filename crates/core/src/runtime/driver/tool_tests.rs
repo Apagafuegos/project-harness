@@ -85,6 +85,14 @@ impl WorkspaceView for Workspace {
     fn read_text(&self, path: &WorkspacePath, max: u64) -> Result<String, Refusal> {
         self.fake.lock().unwrap().read_text(path, max)
     }
+    fn capture(
+        &self,
+        plan: &crate::tools::Plan,
+        artifacts: &crate::session::DataRoot,
+    ) -> Result<crate::session::FileImage, Refusal> {
+        assert_eq!(std::thread::current().name(), Some("harness-tools"));
+        self.fake.lock().unwrap().capture(plan, artifacts)
+    }
 }
 struct Stub {
     backend: ExecutionBackend,
@@ -128,7 +136,20 @@ impl Executor for Stub {
             "execution panic requested"
         );
         let cancelled = cancel.is_cancelled() && self.cancel_releases;
-        if cancelled { outcome(true) } else { success }
+        let mut result = if cancelled { outcome(true) } else { success };
+        if result.file_effect.is_none()
+            && operation
+                .plan()
+                .effects()
+                .contains(crate::session::EffectClass::FilesystemMutation)
+        {
+            result.file_effect = Some(if result.status == ToolStatus::Succeeded {
+                crate::session::FileEffect::Applied
+            } else {
+                crate::session::FileEffect::NotApplied
+            });
+        }
+        result
     }
 }
 fn outcome(cancelled: bool) -> ExecutionOutcome {
@@ -145,6 +166,7 @@ fn host(workspace: Workspace, executors: Vec<Arc<dyn Executor>>) -> ToolHost {
     ToolHost {
         workspace: Arc::new(workspace),
         executors,
+        files: None,
     }
 }
 async fn fixture(

@@ -102,6 +102,7 @@ pub(super) fn unavailable(start: Instant, reason: &str, cap: usize) -> Execution
         duration_ms: Some(start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         output_truncated,
         artifacts: Vec::new(),
+        file_effect: None,
     }
 }
 
@@ -227,6 +228,7 @@ impl Sandbox {
                 duration_ms: Some(0),
                 output_truncated: false,
                 artifacts: Vec::new(),
+                file_effect: None,
             };
         }
         let spec = match args::build(&self.config, plan, workspace_root) {
@@ -295,6 +297,7 @@ mod tests {
                 plan,
                 "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
                 "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+                None,
             );
             let cancel = CancelToken::new();
             cancel.clone().cancel();

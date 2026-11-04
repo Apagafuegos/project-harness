@@ -134,9 +134,21 @@ pub(super) fn authorize(
 ) -> Commit {
     let turn = snapshot.active_turn().unwrap().clone();
     let call = snapshot.0.pending(snapshot.head()).unwrap()[0].clone();
-    let plan = root
-        .put_artifact(br#"{"tool":"read","path":"f0"}"#)
-        .unwrap();
+    // A v4 mutation intent binds a captured image, and its plan must agree.
+    let pre = root.put_artifact(b"before").unwrap();
+    let post = crate::session::Digest::of(b"after");
+    let plan_bytes = serde_json::to_vec(&serde_json::json!({
+        "version": 2,
+        "name": "write",
+        "workspace": "/workspace",
+        "target": {
+            "path": "f0",
+            "pre_image": pre.sha256,
+            "content_sha256": post,
+        },
+    }))
+    .unwrap();
+    let plan = root.put_artifact(&plan_bytes).unwrap();
     let decision_id: DecisionId = env.entry_id().to_string().parse().unwrap();
     let mut events = vec![
         state(&turn, RuntimeState::Processing, RuntimeState::Authorizing),
@@ -161,8 +173,14 @@ pub(super) fn authorize(
             plan_digest: plan.sha256,
             backend: ExecutionBackend::TrustedFs,
             timeout_ms: 1_000,
-            // These legacy recovery scenarios exercise uncertain side effects.
+            // These recovery scenarios exercise uncertain side effects.
             effects: EffectSet::new([EffectClass::FilesystemMutation]),
+            file_image: Some(crate::session::FileImage {
+                path: "f0".into(),
+                pre_image: Some(pre),
+                pre_mode: Some(0o644),
+                post_image: post,
+            }),
         }));
         events.push(state(
             &turn,
@@ -195,6 +213,17 @@ fn observed(status: ToolStatus, text: &str) -> UserResolution {
     UserResolution::Observed {
         status,
         text: text.into(),
+        file_effect: None,
+    }
+}
+
+/// A user statement about a captured write or edit: the rename outcome is the
+/// user's, and only they may classify it.
+fn observed_mutation(status: ToolStatus, text: &str) -> UserResolution {
+    UserResolution::Observed {
+        status,
+        text: text.into(),
+        file_effect: Some(crate::session::FileEffect::Applied),
     }
 }
 
@@ -331,14 +360,14 @@ fn versions(d: &Driver) -> Vec<u64> {
 }
 
 #[test]
-fn recovery_over_a_v1_turn_answers_its_calls_as_v3() {
+fn recovery_over_a_v1_turn_answers_its_calls_as_v4() {
     // The v1 prefix ends in `processing`: the proposal, and no intent.
     scenario_from(
         || fixture_prefix(4),
         |d| {
             d.settle();
             assert!(idle(d));
-            assert_eq!(versions(d), [1, 1, 1, 1, 3]);
+            assert_eq!(versions(d), [1, 1, 1, 1, 4]);
             let snapshot = d.runtime.snapshot();
             let ancestry = snapshot.ancestry(snapshot.head()).unwrap();
             let [.., proposal, answer] = &ancestry[..] else {
@@ -361,10 +390,10 @@ fn recovery_over_a_v1_turn_answers_its_calls_as_v3() {
 }
 
 #[test]
-fn recovery_over_a_v1_intent_records_v3_and_unknown_effects() {
+fn recovery_over_a_v1_intent_records_v4_and_unknown_effects() {
     scenario_from(fixture, |d| {
         d.settle();
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 3], "execution_uncertain is v3");
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 4], "execution_uncertain is v4");
         let [invocation] = &d.runtime.snapshot().unresolved_invocations()[..] else {
             panic!("one invocation waits")
         };
@@ -372,7 +401,7 @@ fn recovery_over_a_v1_intent_records_v3_and_unknown_effects() {
         let request = resolve(d, observed(ToolStatus::Succeeded, "read"));
         d.accepted(request);
         assert!(idle(d));
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 3, 3]);
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 4, 4]);
         let [result] = &results(d)[..] else {
             panic!("one result")
         };
@@ -556,6 +585,7 @@ pub mod bodies {
                                 provenance: Provenance::Runtime,
                                 artifacts: Vec::new(),
                                 code: Some("policy_denied".into()),
+                                file_effect: None,
                             },
                         },
                     }),
@@ -663,7 +693,10 @@ pub mod bodies {
     pub fn uncertain_call_alone_is_resolved_as_observed(d: &mut Driver) {
         proposed(d, 1);
         crash_after_intent(d);
-        let request = resolve(d, observed(ToolStatus::Failed, "f0 does not exist"));
+        let request = resolve(
+            d,
+            observed_mutation(ToolStatus::Failed, "f0 does not exist"),
+        );
         d.accepted(request);
         assert!(idle(d));
         let result = results(d).pop().unwrap();
@@ -685,7 +718,7 @@ pub mod bodies {
         assert_eq!(d.active_turn(), Some(turn.clone()), "the turn stays open");
         assert!(recovered(d).is_empty());
         refuses_all_but_resolution(d, &turn);
-        let request = resolve(d, observed(ToolStatus::Succeeded, "f0 was read"));
+        let request = resolve(d, observed_mutation(ToolStatus::Succeeded, "f0 was read"));
         d.accepted(request);
         assert!(idle(d));
         assert_eq!(
@@ -776,7 +809,7 @@ pub mod bodies {
         let invocation_id = d.runtime.view().awaiting[0].invocation_id.clone();
         d.command(Command::ResolveUncertain {
             invocation_id: invocation_id.clone(),
-            resolution: observed(ToolStatus::Succeeded, "done"),
+            resolution: observed_mutation(ToolStatus::Succeeded, "done"),
         });
         d.crash(Crash::Durable);
         assert!(idle(d), "the durable resolution needs nothing more");
@@ -797,7 +830,10 @@ pub mod bodies {
     pub fn resolved_result_is_shown_to_the_model_with_its_provenance(d: &mut Driver) {
         proposed(d, 1);
         crash_after_intent(d);
-        resolve(d, observed(ToolStatus::Succeeded, "the user saw f0"));
+        resolve(
+            d,
+            observed_mutation(ToolStatus::Succeeded, "the user saw f0"),
+        );
         let entry = d.runtime.snapshot().head().cloned().unwrap();
         let report = d.runtime.inspect_context(None, None).unwrap();
         let record = report

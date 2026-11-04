@@ -115,6 +115,7 @@ struct Driver {
     injector: DeterministicEnv,
     workspace: FakeWorkspace,
     planning: Option<(PlanToken, CallRef, String, ValidatedOperation)>,
+    capturing: Option<(CaptureToken, crate::tools::Plan)>,
     executing: Option<(ExecutionToken, AuthorizedOperation, CancelToken)>,
     executor: StubExecutor,
     compaction: Option<(CompactionToken, crate::context::compaction::CompactionInput)>,
@@ -249,6 +250,7 @@ impl Driver {
             injector: DeterministicEnv::new(INJECTOR_STREAM),
             workspace: fake_workspace(),
             planning: None,
+            capturing: None,
             executing: None,
             executor: StubExecutor::default(),
             compaction: None,
@@ -301,6 +303,7 @@ impl Driver {
             injector: DeterministicEnv::new(INJECTOR_STREAM),
             workspace: fake_workspace(),
             planning: None,
+            capturing: None,
             executing: None,
             executor: StubExecutor::default(),
             compaction: None,
@@ -334,7 +337,13 @@ impl Driver {
 
     fn observe(&mut self, effect: &Effect) {
         match effect {
-            Effect::InspectUncertain { .. } => {}
+            Effect::InspectUncertain { .. }
+            | Effect::UndoRestore { .. }
+            | Effect::InspectUndo { .. } => {}
+            Effect::CaptureImage { token, plan } => {
+                assert!(self.capturing.is_none(), "overlapping capture");
+                self.capturing = Some((*token, plan.clone()));
+            }
             Effect::ProposeCompaction { token, input } => {
                 assert!(self.compaction.is_none(), "overlapping compaction");
                 assert_eq!(self.runtime.snapshot().state(), RuntimeState::Idle);
@@ -1125,6 +1134,15 @@ fn normalized(finished: &Finished) -> Vec<String> {
                     Accepted::CompactionStrategySet { ack: a, strategy } => {
                         format!("CompactionStrategySet({strategy}, {})", ack(a))
                     }
+                    Accepted::UndoPreviewed { .. } | Accepted::UndoResolved { .. } => {
+                        format!("{accepted:?}")
+                    }
+                    Accepted::UndoCompleted {
+                        undo_id,
+                        outcome,
+                        ack: a,
+                        ..
+                    } => format!("UndoCompleted({undo_id}, {outcome:?}, {})", ack(a)),
                     Accepted::ApprovalSubmitted {
                         approval_id,
                         ack: a,
@@ -1191,6 +1209,7 @@ fn shape(commit: &Commit) -> String {
             EntryPayload::ModelChanged(_) => "model_changed".into(),
             EntryPayload::Compaction(_) => "compaction".into(),
             EntryPayload::ContextControl(_) => "context_control".into(),
+            EntryPayload::UndoNote(note) => format!("undo_note({:?})", note.outcome).to_lowercase(),
         })
         .collect();
     if commit.head.reason == HeadReason::Navigate {

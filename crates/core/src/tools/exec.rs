@@ -7,7 +7,8 @@ use std::sync::{
 
 use super::{Plan, PolicySnapshot, Registry, ToolDefinition};
 use crate::session::{
-    CallRef, ContentBlock, DecisionId, ExecutionBackend, InvocationId, ResultCode, ToolStatus,
+    CallRef, ContentBlock, DecisionId, ExecutionBackend, FileEffect, FileImage, InvocationId,
+    ResultCode, ToolStatus, UndoConflict, UndoFileOutcome,
 };
 
 /// A plan whose write-ahead intent the core has committed before dispatch.
@@ -19,17 +20,28 @@ pub struct AuthorizedOperation {
     call: CallRef,
     decision_id: DecisionId,
     policy_revision: String,
+    image: Option<FileImage>,
 }
 
 impl AuthorizedOperation {
-    pub(crate) fn new(plan: Plan, invocation_id: InvocationId, decision_id: DecisionId) -> Self {
+    pub(crate) fn new(
+        plan: Plan,
+        invocation_id: InvocationId,
+        decision_id: DecisionId,
+        image: Option<FileImage>,
+    ) -> Self {
         Self {
             call: plan.call().clone(),
             policy_revision: plan.policy_revision().into(),
             plan,
             invocation_id,
             decision_id,
+            image,
         }
+    }
+    /// The captured pre-image and post-image binding, for a trusted write/edit.
+    pub fn image(&self) -> Option<&FileImage> {
+        self.image.as_ref()
     }
     /// The exact immutable approved plan.
     pub fn plan(&self) -> &Plan {
@@ -90,6 +102,25 @@ pub struct ExecutionOutcome {
     pub output_truncated: bool,
     /// Full bounded captures, published through the existing artifact store.
     pub artifacts: Vec<Vec<u8>>,
+    /// For a trusted write/edit, what the executor observed about the rename
+    /// commit point. `None` for every other call. Never inferred from `status`.
+    pub file_effect: Option<FileEffect>,
+}
+
+/// What one undo restoration did. A `Refused` outcome changed no target; a
+/// `Done` outcome that is not `complete` may have changed some.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UndoExecution {
+    /// The whole-set preflight refused with every conflicting path and reason.
+    Refused(Vec<UndoConflict>),
+    /// Restoration ran; `complete` is false when a later target failed and the
+    /// remaining ones were not attempted.
+    Done {
+        /// One row per attempted target, in target order.
+        files: Vec<UndoFileOutcome>,
+        /// Whether every target reached its desired state.
+        complete: bool,
+    },
 }
 
 /// Synchronous because the production driver will use a dedicated executor

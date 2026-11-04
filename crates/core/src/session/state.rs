@@ -2,7 +2,10 @@
 
 use super::{error::Result, *};
 use imbl::{OrdMap, OrdSet, Vector};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// An immutable tree entry and its exact journal provenance.
 #[derive(Clone, Debug)]
@@ -35,6 +38,17 @@ pub struct TurnInfo {
     pub user_entry_id: EntryId,
     /// None while unfinished; terminal outcomes are retained across navigation.
     pub outcome: Option<TurnOutcome>,
+}
+
+/// A durable undo whose terminal result (or resolution) is not committed yet.
+#[derive(Clone, Debug)]
+pub struct UndoInProgress {
+    /// The exact intent, including every target and the anchor head.
+    pub intent: UndoIntent,
+    /// Whether an interrupted undo has been recorded as uncertain.
+    pub uncertain: bool,
+    /// Journal sequence of the intent.
+    pub sequence: u64,
 }
 
 /// An execution intent that has no durable result; opening never retries it.
@@ -166,6 +180,20 @@ impl SessionSnapshot {
     pub fn requires_recovery(&self) -> bool {
         self.0.active_turn.is_some() || self.0.has_unresolved()
     }
+    /// The pending undo, if one has been recorded and not resolved.
+    pub fn unresolved_undo(&self) -> Option<UndoInProgress> {
+        self.0.undo.as_ref().map(|undo| UndoInProgress {
+            intent: undo.intent.clone(),
+            uncertain: undo.uncertain,
+            sequence: undo.sequence,
+        })
+    }
+    /// Which turn an undo on this head would select, and what it would restore.
+    /// Read-only: nothing is recorded, and the selection is recomputed from
+    /// durable facts every time.
+    pub fn select_undo(&self) -> Result<UndoSelection> {
+        self.0.undo_selection(self.0.head.as_ref())
+    }
     /// Why a `context_control` for `turn` with `mode` at `head` would be
     /// invalid, as its stable code. Storage and the runtime share this check,
     /// so a command and a hand-written record never disagree.
@@ -188,7 +216,27 @@ pub(crate) struct Invocation {
     result: Option<EntryId>,
     recovery_resolved: bool,
 }
+
+/// One durably recorded undo, from its intent to its terminal note.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingUndo {
+    pub(crate) intent: UndoIntent,
+    pub(crate) sequence: u64,
+    pub(crate) uncertain: bool,
+}
 impl Invocation {
+    /// The captured pre-image binding, if this is a trusted write/edit.
+    pub(crate) fn image(&self) -> Option<&FileImage> {
+        self.intent.file_image.as_ref()
+    }
+    /// The turn that authorized it.
+    pub(crate) fn turn(&self) -> &TurnId {
+        &self.intent.turn_id
+    }
+    /// Whether a result for it is durably recorded.
+    pub(crate) fn has_result(&self) -> bool {
+        self.result.is_some()
+    }
     /// Lacks a result, or is uncertain without an explicit recovery resolution.
     fn unresolved(&self) -> bool {
         self.result.is_none() || (self.uncertain && !self.recovery_resolved)
@@ -204,6 +252,8 @@ pub(crate) struct BranchFacts {
     model: ModelRef,
     /// Effective non-default mode of each controlled turn after this entry.
     controls: OrdMap<TurnId, ContextMode>,
+    /// Turns an ancestral undo note already consumed.
+    consumed: Arc<BTreeSet<TurnId>>,
 }
 /// Internal ordered key for a call; the public `CallRef` is not `Ord`.
 type CallKey = (EntryId, CallId);
@@ -240,6 +290,8 @@ pub(crate) struct State {
     pub events: Vector<Arc<(u64, usize, JournalEvent)>>,
     pub commands: OrdMap<CommandId, Arc<CommandReceipt>>,
     pub invocations: OrdMap<InvocationId, Invocation>,
+    /// The one undo that has an intent but no terminal result.
+    pub(crate) undo: Option<PendingUndo>,
     ids: OrdSet<String>,
     approvals: OrdMap<ApprovalId, Approval>,
     decisions: OrdMap<DecisionId, Authorization>,
@@ -294,6 +346,7 @@ impl State {
             events: Vector::new(),
             commands: OrdMap::new(),
             invocations: OrdMap::new(),
+            undo: None,
             ids: OrdSet::new(),
             approvals: OrdMap::new(),
             decisions: OrdMap::new(),
@@ -303,6 +356,7 @@ impl State {
                 pending: Arc::from([]),
                 model: header.initial_model.clone(),
                 controls: OrdMap::new(),
+                consumed: Arc::new(BTreeSet::new()),
             }),
             unresolved: OrdSet::new(),
             invocation_by_call: OrdMap::new(),
@@ -317,7 +371,7 @@ impl State {
         require(self.ids.insert(id.to_owned()).is_none(), "duplicate_id")
     }
     fn has_unresolved(&self) -> bool {
-        !self.unresolved.is_empty()
+        !self.unresolved.is_empty() || self.undo.is_some()
     }
     /// Recompute one invocation's membership of `unresolved` from its record.
     /// Call after every change to that record.
@@ -455,6 +509,9 @@ impl State {
                 "invalid_retained_head",
             )?,
         }
+        // Undo records have exact commit shapes and a terminal pairing that
+        // must be validated from the whole commit before any entry is inserted.
+        self.undo_shape(commit, record.seq)?;
         let starts: Vec<_> = commit
             .events
             .iter()
@@ -682,6 +739,33 @@ impl State {
                         },
                         "uncertain_result_requires_recovery",
                     )?;
+                    if record.version >= 4 {
+                        let captured = invocation.intent.file_image.is_some();
+                        require(
+                            result.metadata.file_effect.is_some() == captured,
+                            "undo_image_binding",
+                        )?;
+                        // Only a user's explicit statement classifies a
+                        // captured mutation, and never as `unknown` while the
+                        // user claims to have observed the outcome.
+                        if result.metadata.provenance == Provenance::UserObserved && captured {
+                            require(
+                                matches!(
+                                    result.metadata.file_effect,
+                                    Some(FileEffect::Applied | FileEffect::NotApplied)
+                                ),
+                                "undo_image_binding",
+                            )?;
+                        }
+                        if result.metadata.provenance == Provenance::UserAcknowledgedUnknown
+                            && captured
+                        {
+                            require(
+                                result.metadata.file_effect == Some(FileEffect::Unknown),
+                                "undo_image_binding",
+                            )?;
+                        }
+                    }
                     require(
                         if result.status == ToolStatus::Uncertain {
                             result.metadata.provenance == Provenance::UserAcknowledgedUnknown
@@ -714,6 +798,9 @@ impl State {
                     invocation.result = Some(entry.id.clone());
                     self.track(id);
                 } else {
+                    if record.version >= 4 {
+                        require(result.metadata.file_effect.is_none(), "undo_image_binding")?;
+                    }
                     require(
                         result.metadata.provenance == Provenance::Runtime
                             && matches!(
@@ -761,6 +848,27 @@ impl State {
                 {
                     return Err(StoreError::Invalid(code));
                 }
+            }
+            EntryPayload::UndoNote(note) => {
+                // A note is never dialogue: it has no turn, and it is the only
+                // entry of its commit, appended at the intent's anchor head.
+                let pending = self
+                    .undo
+                    .as_ref()
+                    .ok_or(StoreError::Invalid("undo_result_binding"))?;
+                require(
+                    entry.turn_id.is_none() && starts.is_empty(),
+                    "undo_commit_shape",
+                )?;
+                require(
+                    entry.parent_id.as_ref() == pending.intent.anchor_head.as_ref()
+                        && pending.intent.undo_id == note.undo_id,
+                    "undo_binding",
+                )?;
+                require(
+                    self.pending(entry.parent_id.as_ref())?.is_empty(),
+                    "head_inside_tool_exchange",
+                )?;
             }
         }
         Ok(())
@@ -918,6 +1026,18 @@ impl State {
                 if let Some(effects) = &intent.effects {
                     valid_effects(intent.backend, effects)?;
                 }
+                // v4 binds a pre-image capture exactly for trusted write/edit
+                // intents, and for nothing else. Earlier versions have none.
+                if record.version >= 4 {
+                    let mutation = intent.backend == ExecutionBackend::TrustedFs
+                        && intent.effects.as_ref().is_some_and(|effects| {
+                            effects.contains(EffectClass::FilesystemMutation)
+                        });
+                    require(
+                        intent.file_image.is_some() == mutation,
+                        "undo_image_binding",
+                    )?;
+                }
                 self.active(&intent.turn_id)?;
                 require(
                     self.runtime_state == RuntimeState::Authorizing && !self.has_unresolved(),
@@ -1074,6 +1194,9 @@ impl State {
                 }
             }
             JournalEvent::ConfigurationChanged(configuration) => {
+                // An undo is never the non-idle grant exception: nothing may
+                // change the configuration, or its revision, while one waits.
+                require(self.undo.is_none(), "configuration_inside_turn")?;
                 if self.runtime_state != RuntimeState::Idle {
                     // Decision 16: a remembered grant is atomic with, and
                     // ordered after, the validated allow consuming a ticket.
@@ -1103,8 +1226,529 @@ impl State {
                     "invalid_tail_repair",
                 )?;
             }
+            JournalEvent::UndoIntent(intent) => {
+                // Idle covers no active turn, no unresolved invocation and no
+                // other undo; an undo never fabricates a turn to borrow the
+                // ordinary executing states.
+                self.idle()?;
+                self.unique(intent.undo_id.as_str())?;
+                require(
+                    intent.anchor_head.as_ref() == self.head.as_ref()
+                        && intent.configuration == self.configuration
+                        && intent.policy_revision == self.policy_revision,
+                    "undo_binding",
+                )?;
+                self.unique_undo_targets(&intent.targets)?;
+                // The intent must be exactly the selection storage derives.
+                let selection = self.undo_selection(self.head.as_ref())?;
+                let UndoSelection::Candidate {
+                    turn_id,
+                    targets,
+                    omitted_calls,
+                } = selection
+                else {
+                    return Err(StoreError::Invalid("undo_binding"));
+                };
+                require(
+                    turn_id == intent.target_turn_id
+                        && targets == intent.targets
+                        && omitted_calls == intent.omitted_calls,
+                    "undo_binding",
+                )?;
+                for target in &intent.targets {
+                    require(
+                        target.pre_image.is_some() == target.pre_mode.is_some(),
+                        "undo_image_binding",
+                    )?;
+                    require(
+                        target.pre_mode.is_none_or(|mode| mode <= 0o777),
+                        "undo_image_binding",
+                    )?;
+                }
+                self.undo = Some(PendingUndo {
+                    intent: intent.clone(),
+                    sequence: record.seq,
+                    uncertain: false,
+                });
+            }
+            JournalEvent::UndoUncertain(uncertain) => {
+                let pending = self
+                    .undo
+                    .as_mut()
+                    .ok_or(StoreError::Invalid("undo_recovery_state"))?;
+                require(
+                    pending.intent.undo_id == uncertain.undo_id && !pending.uncertain,
+                    "undo_recovery_state",
+                )?;
+                require(
+                    !uncertain.reason.is_empty() && uncertain.reason.len() <= 1024,
+                    "undo_recovery_state",
+                )?;
+                pending.uncertain = true;
+                self.runtime_state = RuntimeState::Recovering;
+            }
+            JournalEvent::UndoResult(result) => {
+                let phase = self
+                    .undo
+                    .as_ref()
+                    .map(|undo| undo.uncertain)
+                    .ok_or(StoreError::Invalid("undo_recovery_state"))?;
+                match result.outcome {
+                    UndoOutcome::Succeeded | UndoOutcome::NotApplied => require(
+                        !phase && self.runtime_state == RuntimeState::Idle,
+                        "undo_recovery_state",
+                    )?,
+                    UndoOutcome::Observed | UndoOutcome::AcknowledgedUnknown => require(
+                        phase && self.runtime_state == RuntimeState::Recovering,
+                        "undo_recovery_state",
+                    )?,
+                }
+                require(
+                    self.active_turn.is_none()
+                        && self.pending(self.head.as_ref())?.is_empty()
+                        && self.unresolved.is_empty(),
+                    "undo_commit_shape",
+                )?;
+                // The shape check already proved the note is this commit's
+                // single entry and that it is now the head.
+                let note = self
+                    .entries
+                    .get(&result.note_entry_id)
+                    .ok_or(StoreError::Invalid("undo_result_binding"))?;
+                require(
+                    self.head.as_ref() == Some(&result.note_entry_id)
+                        && matches!(note.entry.payload, EntryPayload::UndoNote(_)),
+                    "undo_result_binding",
+                )?;
+                if let Some(undo) = self.undo.take() {
+                    require(undo.intent.undo_id == result.undo_id, "undo_result_binding")?;
+                }
+                self.runtime_state = RuntimeState::Idle;
+            }
         }
         Ok(())
+    }
+
+    // ----- undo -----------------------------------------------------------
+
+    /// The exact commit shape of an undo record, checked before any entry is
+    /// inserted so a terminal note is validated against the intent it resolves.
+    fn undo_shape(&self, commit: &Commit, sequence: u64) -> Result<()> {
+        let kinds: Vec<&JournalEvent> = commit
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    JournalEvent::UndoIntent(_)
+                        | JournalEvent::UndoUncertain(_)
+                        | JournalEvent::UndoResult(_)
+                )
+            })
+            .collect();
+        let notes: Vec<(&Entry, &UndoNote)> = commit
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                EntryPayload::UndoNote(note) => Some((entry, note)),
+                _ => None,
+            })
+            .collect();
+        if kinds.is_empty() {
+            // A note is terminal evidence; it is never committed alone, and no
+            // other entry may ride along with an undo record.
+            require(notes.is_empty(), "undo_commit_shape")?;
+            return Ok(());
+        }
+        require(
+            commit.events.len() == 1
+                && commit.head.reason != HeadReason::Navigate
+                && notes.len() <= 1,
+            "undo_commit_shape",
+        )?;
+        match &commit.events[0] {
+            JournalEvent::UndoIntent(_) | JournalEvent::UndoUncertain(_) => require(
+                commit.entries.is_empty() && commit.head.reason == HeadReason::Retain,
+                "undo_commit_shape",
+            ),
+            JournalEvent::UndoResult(result) => {
+                require(
+                    commit.entries.len() == 1
+                        && commit.head.reason == HeadReason::Advance
+                        && commit.head.from == self.head,
+                    "undo_commit_shape",
+                )?;
+                let (entry, note) = notes[0];
+                self.undo_terminal(entry, note, result, sequence)?;
+                Ok(())
+            }
+            _ => Err(StoreError::Invalid("undo_commit_shape")),
+        }
+    }
+
+    /// The exact text and payload binding of a terminal note/result pair.
+    fn undo_terminal(
+        &self,
+        entry: &Entry,
+        note: &UndoNote,
+        result: &UndoResult,
+        sequence: u64,
+    ) -> Result<()> {
+        let pending = self
+            .undo
+            .as_ref()
+            .ok_or(StoreError::Invalid("undo_result_binding"))?;
+        let intent = &pending.intent;
+        require(pending.sequence < sequence, "undo_result_binding")?;
+        require(
+            intent.undo_id == result.undo_id && note.undo_id == result.undo_id,
+            "undo_result_binding",
+        )?;
+        require(
+            note.outcome == result.outcome && note.target_turn_id == intent.target_turn_id,
+            "undo_result_binding",
+        )?;
+        require(
+            entry.turn_id.is_none() && entry.parent_id.as_ref() == intent.anchor_head.as_ref(),
+            "undo_binding",
+        )?;
+        require(result.note_entry_id == entry.id, "undo_result_binding")?;
+        require(
+            result.file_outcomes.len() == intent.targets.len()
+                && result
+                    .file_outcomes
+                    .iter()
+                    .zip(&intent.targets)
+                    .all(|(row, target)| row.path == target.path),
+            "undo_result_binding",
+        )?;
+        require(
+            crate::session::undo::consistent(result.outcome, &result.file_outcomes),
+            "undo_result_binding",
+        )?;
+        match result.outcome {
+            UndoOutcome::Succeeded | UndoOutcome::NotApplied => {
+                require(!pending.uncertain, "undo_recovery_state")?
+            }
+            UndoOutcome::Observed | UndoOutcome::AcknowledgedUnknown => {
+                require(pending.uncertain, "undo_recovery_state")?;
+                let note = result
+                    .resolution_note
+                    .as_deref()
+                    .ok_or(StoreError::Invalid("undo_result_binding"))?;
+                require(
+                    !note.is_empty() && note.len() <= 64 * 1024,
+                    "undo_result_binding",
+                )?;
+            }
+        }
+        require(
+            matches!(
+                result.outcome,
+                UndoOutcome::Observed | UndoOutcome::AcknowledgedUnknown
+            ) == result.resolution_note.is_some(),
+            "undo_result_binding",
+        )?;
+        let omitted = self
+            .omitted_names(&intent.omitted_calls)
+            .ok_or(StoreError::Invalid("undo_result_binding"))?;
+        require(
+            note.text
+                == crate::session::undo::note_text(
+                    &intent.target_turn_id,
+                    &intent.undo_id,
+                    result.outcome,
+                    &intent.targets,
+                    &result.file_outcomes,
+                    &omitted,
+                    result.resolution_note.as_deref(),
+                ),
+            "undo_result_binding",
+        )
+    }
+
+    /// The tool name of every omitted call, in intent order, from its proposal.
+    fn omitted_names(&self, calls: &[CallRef]) -> Option<Vec<(CallRef, String)>> {
+        calls
+            .iter()
+            .map(|call| {
+                let stored = self.entries.get(&call.response_entry_id)?;
+                let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                    return None;
+                };
+                response.content.iter().find_map(|block| match block {
+                    ContentBlock::ToolCall { call_id, name, .. } if call_id == &call.call_id => {
+                        Some((call.clone(), name.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// Targets are unique by path and sorted bytewise.
+    fn unique_undo_targets(&self, targets: &[UndoTarget]) -> Result<()> {
+        require(
+            targets
+                .windows(2)
+                .all(|pair| pair[0].path.as_str() < pair[1].path.as_str())
+                && targets
+                    .iter()
+                    .all(|target| !target.invocation_ids.is_empty()),
+            "undo_binding",
+        )
+    }
+
+    /// The newest finished, unconsumed turn with trusted file mutations, and
+    /// what undoing it would restore. Storage validates intents against this
+    /// same function, so a candidate and its intent cannot diverge.
+    pub(crate) fn undo_selection(&self, head: Option<&EntryId>) -> Result<UndoSelection> {
+        let ancestry = self.ancestry(head)?;
+        let consumed = self.facts(head)?.consumed.clone();
+        // Turn order of first appearance on the branch, and the branch
+        // position of every entry.
+        let mut turns: Vec<TurnId> = Vec::new();
+        for stored in &ancestry {
+            if let Some(turn) = &stored.entry.turn_id
+                && !turns.contains(turn)
+            {
+                turns.push(turn.clone());
+            }
+        }
+        // Every proposal on the branch, in ancestral proposal/block order.
+        let mut proposals: Vec<(CallRef, String, Option<TurnId>)> = Vec::new();
+        for stored in &ancestry {
+            let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                continue;
+            };
+            for block in &response.content {
+                if let ContentBlock::ToolCall { call_id, name, .. } = block {
+                    proposals.push((
+                        CallRef {
+                            response_entry_id: stored.entry.id.clone(),
+                            call_id: call_id.clone(),
+                        },
+                        name.clone(),
+                        stored.entry.turn_id.clone(),
+                    ));
+                }
+            }
+        }
+        let mut skipped: Vec<TurnId> = Vec::new();
+        let selected = turns.iter().rev().find_map(|turn| {
+            if consumed.contains(turn) {
+                return None;
+            }
+            // Finished turns only; an unfinished one is not undoable evidence.
+            if !self
+                .turns
+                .get(turn)
+                .is_some_and(|info| info.outcome.is_some())
+            {
+                return Some(Ok(UndoSelection::Incomplete(turn.clone())));
+            }
+            let invocations = self.invocations_of(turn);
+            let mutations: Vec<&Invocation> = invocations
+                .iter()
+                .copied()
+                .filter(|invocation| is_write_edit(invocation))
+                .collect();
+            if mutations.is_empty() {
+                // An intent whose effects were never recorded might have been
+                // a mutation, so its turn is refused rather than skipped.
+                if invocations
+                    .iter()
+                    .any(|invocation| invocation.intent.effects.is_none())
+                {
+                    return Some(Ok(UndoSelection::Legacy(turn.clone())));
+                }
+                skipped.push(turn.clone());
+                return None;
+            }
+            Some(self.undo_candidate(turn, &ancestry, &invocations, &mutations))
+        });
+        match selected {
+            Some(selected) => selected,
+            None => {
+                // Nothing can be undone; still report the bash calls of every
+                // turn that was skipped without being consumed.
+                let omitted: Vec<CallRef> = proposals
+                    .iter()
+                    .filter(|(_, name, at)| {
+                        name == "bash"
+                            && at.as_ref().is_some_and(|turn| {
+                                skipped.contains(turn) && !consumed.contains(turn)
+                            })
+                    })
+                    .map(|(call, _, _)| call.clone())
+                    .collect();
+                Ok(UndoSelection::Nothing {
+                    omitted_calls: omitted,
+                })
+            }
+        }
+    }
+
+    /// Intents of one turn, in execution order (at most one per commit).
+    fn invocations_of(&self, turn: &TurnId) -> Vec<&Invocation> {
+        let mut invocations: Vec<&Invocation> = self
+            .invocations
+            .values()
+            .filter(|invocation| invocation.intent.turn_id == *turn)
+            .collect();
+        invocations.sort_by_key(|invocation| invocation.sequence);
+        invocations
+    }
+
+    /// Classify one candidate turn and build its canonical targets.
+    fn undo_candidate(
+        &self,
+        turn: &TurnId,
+        ancestry: &[&StoredEntry],
+        invocations: &[&Invocation],
+        mutations: &[&Invocation],
+    ) -> Result<UndoSelection> {
+        // The head must contain every recorded entry of the turn: a head
+        // navigated into a turn is not the whole turn.
+        let branch: BTreeSet<&EntryId> = ancestry.iter().map(|s| &s.entry.id).collect();
+        for (id, stored) in self.entries.iter() {
+            if stored.entry.turn_id.as_ref() == Some(turn) && !branch.contains(id) {
+                return Ok(UndoSelection::Incomplete(turn.clone()));
+            }
+        }
+        // A trusted mutation recorded before capture existed has no image.
+        if mutations
+            .iter()
+            .any(|invocation| invocation.intent.file_image.is_none())
+        {
+            return Ok(UndoSelection::Legacy(turn.clone()));
+        }
+        let mut applied: Vec<(&Invocation, FileImage)> = Vec::new();
+        for invocation in mutations {
+            let image = invocation.intent.file_image.clone().expect("checked above");
+            match self.file_effect(invocation) {
+                Some(FileEffect::Applied) => applied.push((invocation, image)),
+                Some(FileEffect::NotApplied) => {}
+                Some(FileEffect::Unknown) | None => {
+                    return Ok(UndoSelection::UnknownEffect(turn.clone()));
+                }
+            }
+        }
+        let mut targets: Vec<UndoTarget> = Vec::new();
+        let mut conflicts: Vec<UndoConflict> = Vec::new();
+        let mut by_path: BTreeMap<&str, Vec<(&Invocation, &FileImage)>> = BTreeMap::new();
+        for (invocation, image) in &applied {
+            by_path
+                .entry(image.path.as_str())
+                .or_default()
+                .push((*invocation, image));
+        }
+        for (path, chain) in by_path {
+            let (first_invocation, first) = chain[0];
+            let (_, last) = chain[chain.len() - 1];
+            let mode_ok = chain
+                .iter()
+                .all(|(_, image)| image.pre_image.is_some() == image.pre_mode.is_some());
+            let chained = chain.windows(2).all(|pair| {
+                pair[1].1.pre_image.as_ref().map(|pre| &pre.sha256) == Some(&pair[0].1.post_image)
+            });
+            if !mode_ok {
+                conflicts.push(UndoConflict {
+                    path: path.to_owned(),
+                    reason: "image_binding",
+                });
+                continue;
+            }
+            if !chained {
+                conflicts.push(UndoConflict {
+                    path: path.to_owned(),
+                    reason: "image_chain",
+                });
+                continue;
+            }
+            targets.push(UndoTarget {
+                path: path.to_owned(),
+                invocation_ids: chain
+                    .iter()
+                    .map(|(invocation, _)| invocation.intent.invocation_id.clone())
+                    .collect(),
+                pre_image: first.pre_image.clone(),
+                pre_mode: first.pre_mode,
+                post_image: last.post_image.clone(),
+            });
+            let _ = first_invocation;
+        }
+        if !conflicts.is_empty() {
+            return Ok(UndoSelection::Conflict(conflicts));
+        }
+        // Omitted calls: every bash proposal of the turn, plus executed calls
+        // with mutation, process, network or external effects.
+        let mut omitted: Vec<CallRef> = Vec::new();
+        for (call, name, at) in self.branch_proposals(ancestry) {
+            let in_turn = at.as_ref() == Some(turn);
+            // An executed call outside the trusted write/edit pair that
+            // declares a mutation, process, network or external effect.
+            let other_effect = in_turn
+                && invocations.iter().any(|invocation| {
+                    invocation.intent.call == call
+                        && !is_write_edit(invocation)
+                        && invocation.intent.effects.as_ref().is_some_and(|effects| {
+                            effects.as_slice().iter().any(|effect| {
+                                matches!(
+                                    effect,
+                                    EffectClass::FilesystemMutation
+                                        | EffectClass::Process
+                                        | EffectClass::Network
+                                        | EffectClass::ExternalSideEffect
+                                )
+                            })
+                        })
+                });
+            if other_effect || (in_turn && name == "bash") {
+                omitted.push(call);
+            }
+        }
+        Ok(UndoSelection::Candidate {
+            turn_id: turn.clone(),
+            targets,
+            omitted_calls: omitted,
+        })
+    }
+
+    /// Proposals of the branch, in ancestral proposal/block order.
+    fn branch_proposals(
+        &self,
+        ancestry: &[&StoredEntry],
+    ) -> Vec<(CallRef, String, Option<TurnId>)> {
+        let mut proposals = Vec::new();
+        for stored in ancestry {
+            let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                continue;
+            };
+            for block in &response.content {
+                if let ContentBlock::ToolCall { call_id, name, .. } = block {
+                    proposals.push((
+                        CallRef {
+                            response_entry_id: stored.entry.id.clone(),
+                            call_id: call_id.clone(),
+                        },
+                        name.clone(),
+                        stored.entry.turn_id.clone(),
+                    ));
+                }
+            }
+        }
+        proposals
+    }
+
+    /// The classification recorded with an invocation's result, if any.
+    fn file_effect(&self, invocation: &Invocation) -> Option<FileEffect> {
+        let id = invocation.result.as_ref()?;
+        let stored = self.entries.get(id)?;
+        let EntryPayload::ToolResult(result) = &stored.entry.payload else {
+            return None;
+        };
+        result.result.metadata.file_effect
     }
 
     /// The effective non-default mode of every controlled turn reachable from
@@ -1321,6 +1965,7 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
                 pending,
                 model: parent.model.clone(),
                 controls: parent.controls.clone(),
+                consumed: parent.consumed.clone(),
             }))
         }
         EntryPayload::ToolResult(result) => {
@@ -1332,6 +1977,7 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
                 pending: Arc::from(&parent.pending[1..]),
                 model: parent.model.clone(),
                 controls: parent.controls.clone(),
+                consumed: parent.consumed.clone(),
             }))
         }
         EntryPayload::UserMessage(_) | EntryPayload::Compaction(_) => {
@@ -1350,6 +1996,7 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
                 pending: parent.pending.clone(),
                 model: parent.model.clone(),
                 controls,
+                consumed: parent.consumed.clone(),
             }))
         }
         EntryPayload::ModelChanged(change) => {
@@ -1358,6 +2005,28 @@ fn step(parent: &Arc<BranchFacts>, entry: &Entry) -> Result<Arc<BranchFacts>> {
                 pending: parent.pending.clone(),
                 model: change.model.clone(),
                 controls: parent.controls.clone(),
+                consumed: parent.consumed.clone(),
+            }))
+        }
+        EntryPayload::UndoNote(note) => {
+            require(parent.pending.is_empty(), "head_inside_tool_exchange")?;
+            let consumed = if note.outcome.consumes() {
+                Arc::new(
+                    parent
+                        .consumed
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(note.target_turn_id.clone()))
+                        .collect(),
+                )
+            } else {
+                parent.consumed.clone()
+            };
+            Ok(Arc::new(BranchFacts {
+                pending: parent.pending.clone(),
+                model: parent.model.clone(),
+                controls: parent.controls.clone(),
+                consumed,
             }))
         }
     }
@@ -1425,6 +2094,18 @@ fn legal_transition(from: RuntimeState, to: RuntimeState) -> bool {
         || (to == Recovering && from != Recovering)
 }
 
+/// Whether an intent is one of the trusted write/edit mutations undo may
+/// revert. An intent whose effects were never recorded is not classified
+/// here: its turn is refused rather than treated as read-only.
+fn is_write_edit(invocation: &Invocation) -> bool {
+    invocation.intent.backend == ExecutionBackend::TrustedFs
+        && invocation
+            .intent
+            .effects
+            .as_ref()
+            .is_some_and(|effects| effects.contains(EffectClass::FilesystemMutation))
+}
+
 #[cfg(test)]
 thread_local! {
     /// Whether test builds check derived state after every applied record.
@@ -1446,6 +2127,7 @@ pub(crate) fn without_oracle<R>(f: impl FnOnce() -> R) -> R {
 pub(crate) struct Derived {
     pub branch: OrdMap<EntryId, Arc<BranchFacts>>,
     pub root: Arc<BranchFacts>,
+    pub consumed: BTreeSet<TurnId>,
     pub unresolved: OrdSet<InvocationId>,
     pub invocation_by_call: OrdMap<CallKey, InvocationId>,
     pub unused_approvals: OrdMap<CallKey, ApprovalId>,
@@ -1476,6 +2158,17 @@ impl State {
         }
         Ok(controls)
     }
+    fn walked_consumed(&self, head: Option<&EntryId>) -> Result<BTreeSet<TurnId>> {
+        let mut consumed = BTreeSet::new();
+        for stored in self.ancestry(head)? {
+            if let EntryPayload::UndoNote(note) = &stored.entry.payload
+                && note.outcome.consumes()
+            {
+                consumed.insert(note.target_turn_id.clone());
+            }
+        }
+        Ok(consumed)
+    }
     fn walked_pending(&self, head: Option<&EntryId>) -> Result<Vec<CallRef>> {
         let mut pending = Vec::new();
         for stored in self.ancestry(head)? {
@@ -1505,7 +2198,8 @@ impl State {
                 EntryPayload::UserMessage(_)
                 | EntryPayload::ModelChanged(_)
                 | EntryPayload::Compaction(_)
-                | EntryPayload::ContextControl(_) => {
+                | EntryPayload::ContextControl(_)
+                | EntryPayload::UndoNote(_) => {
                     require(pending.is_empty(), "head_inside_tool_exchange")?;
                 }
             }
@@ -1516,6 +2210,10 @@ impl State {
         Derived {
             branch: self.branch.clone(),
             root: self.root.clone(),
+            consumed: self
+                .facts(self.head.as_ref())
+                .map(|facts| (*facts.consumed).clone())
+                .unwrap_or_default(),
             unresolved: self.unresolved.clone(),
             invocation_by_call: self.invocation_by_call.clone(),
             unused_approvals: self.unused_approvals.clone(),
@@ -1544,6 +2242,11 @@ impl State {
                 self.controls_at(head).unwrap(),
                 &self.walked_controls(head).unwrap(),
                 "controls at {head:?}"
+            );
+            assert_eq!(
+                &*self.facts(head).unwrap().consumed,
+                &self.walked_consumed(head).unwrap(),
+                "consumed turns at {head:?}"
             );
         }
         assert!(self.branch.keys().eq(self.entries.keys()));

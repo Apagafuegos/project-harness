@@ -245,12 +245,20 @@ where
                         pending.push(handle.command(Command::Cancel { turn_id }));
                     }
                     Ok(_) if quitting || app.view().is_some_and(|v| v.phase == Phase::Faulted) => {},
+                    Ok(accepted) if app.undo_reply(&reply) => {
+                        let _ = accepted;
+                    }
                     Ok(accepted) => app.navigation_accepted(&accepted),
                     // Quit's best-effort CancelCompaction finds nothing to cancel
                     // when no compaction is running; that must not replace a
                     // refusal the user still needs to read.
                     Err(Rejection::NotActive) if quitting => {},
-                    Err(error) => if !app.inspector_rejection(&error) { app.navigation_rejected(error); },
+                    Err(error) => {
+                        if !app.undo_reply(&Err(error.clone())) && !app.inspector_rejection(&error)
+                        {
+                            app.navigation_rejected(error);
+                        }
+                    },
                 }
                 dirty = true;
             }

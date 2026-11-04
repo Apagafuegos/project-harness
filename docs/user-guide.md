@@ -239,6 +239,7 @@ reported fingerprint/size; complete corruption is never silently repaired.
 | Ctrl-D | Quit on an empty prompt, draining cancellation/storage |
 | Ctrl-R / Ctrl-E | Expand reasoning summaries / tool output |
 | Ctrl-O / Ctrl-T / Ctrl-L / Ctrl-K | Sessions / branches / models / context |
+| Ctrl-Z | Preview the undo of the newest agent turn's file edits (y confirms, Enter/n/Esc cancels) |
 
 Prompt history is memory-only, seeded from the current branch and reset on
 session replacement. Bracketed paste is atomic editable text, never a send or
@@ -331,6 +332,39 @@ do not create retry loops. All strategies retain originals and exact source
 provenance. Masking is lossy and may grow prose-heavy context; the small recorded
 experiments do not establish a general quality winner or any workspace rollback.
 
+## Undo the agent's file edits
+
+The agent's trusted `write` and `edit` effects can be reverted, one turn at a
+time. Pre-image bytes are captured before each mutation, so undoing restores a
+file the agent overwrote and removes a file it created. Bash and every other
+effect are never reversed, and the report lists them.
+
+In the TUI press **Ctrl-Z** while idle: a modal names every file it would
+restore or remove and every call it will not reverse. `y` confirms; **Enter
+defaults to no**, and `n`/Esc cancel without recording anything. The command
+path is the same as `harness sessions undo`:
+
+```sh
+harness sessions undo SESSION_ID           # asks y/N on a terminal
+harness sessions undo SESSION_ID --yes     # required without a terminal
+```
+
+Undo is all-or-nothing on preflight: if any target's current content differs
+from what the agent left, or a protected path or workspace check fails, nothing
+changes and every conflicting path is named (`undo_conflict`, exit 2). Nothing
+is offered when the branch has no unconsumed turn with a trusted file edit
+(`undo_nothing`), when the turn predates pre-image capture
+(`undo_unavailable_legacy`), or when an effect's application is unknown
+(`undo_uncertain_effect`).
+
+An undo is one durable intent and one durable result, so an interrupted undo is
+reported as uncertain rather than guessed at: reopen the session in the TUI and
+resolve it with per-file observations and a note, or acknowledge that the
+outcome is unknown. Nothing is retried. Until it is resolved the session
+refuses new turns. History is append-only, and the model's context records the
+undo through a user note, so it never assumes the reverted edits are present.
+There is no redo.
+
 ## Export, delete and reclaim space
 
 Close running session engines first; maintenance uses nonblocking journal locks.
@@ -356,7 +390,9 @@ sensitive native/session data. A failed journal export may leave an empty new
 directory. Never publish an export without reviewing its contents.
 
 Deletion is irreversible and removes **only the journal**, never shared
-artifacts, under the exclusive writer lock (`session_locked` if open).
+artifacts, under the exclusive writer lock (`session_locked` if open). Captured
+pre-images are artifacts too: they are kept while any journal references them,
+including after an undo and on every branch, and are removed only by `gc`.
 Without a terminal, deletion and real GC need `--yes`; dry-run does not.
 GC reclaims only unreferenced private regular artifacts older than the **24-hour
 grace window**. Dedupe reuse refreshes mtime, and a shared publication/collection

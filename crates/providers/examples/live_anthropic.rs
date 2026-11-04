@@ -399,6 +399,7 @@ async fn tool_round_trip(adapter: &AnthropicMessages, model: &str) -> Result<Str
                 provenance: harness_core::session::Provenance::Executor,
                 artifacts: Vec::new(),
                 code: None,
+                file_effect: None,
             },
         },
     });

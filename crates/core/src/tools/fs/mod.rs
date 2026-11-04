@@ -4,10 +4,11 @@
 //! pinned root, with the same strict flags for every full relative prefix.
 //! Temporary creation and replacement use the verified, pinned parent.
 
-mod execute;
+pub(super) mod execute;
 mod resolve;
 #[cfg(test)]
 mod search_tests;
+mod undo;
 mod walk;
 
 #[cfg(test)]

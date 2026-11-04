@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::session::{CallId, ModelRef, ResponseId, RuntimeState, SessionSnapshot, TurnId, Usage};
+use crate::session::{
+    CallId, ModelRef, ResponseId, RuntimeState, SessionSnapshot, TurnId, UndoId, Usage,
+};
 
 use super::types::{
     EventKind, InferenceId, PendingApproval, RuntimeEpoch, RuntimeEvent, UncertainInvocation,
@@ -91,6 +93,20 @@ pub struct RuntimeView {
     pub awaiting: Vec<UncertainInvocation>,
     /// Durable single-use approval waiting for the client.
     pub pending_approval: Option<PendingApproval>,
+    /// An interrupted undo waiting for the user, with its per-file evidence.
+    pub undo: Option<UndoState>,
+}
+
+/// An uncertain undo as a client sees it. The durable intent and any terminal
+/// result stay in the snapshot; only the ephemeral hints live here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoState {
+    /// The interrupted undo.
+    pub undo_id: UndoId,
+    /// The turn it was undoing.
+    pub target_turn_id: TurnId,
+    /// Per-file evidence, in target order; never a persisted fact.
+    pub hints: Vec<(String, crate::tools::RecoveryHint)>,
 }
 
 /// Snapshots compare by identity: the exact-byte checksum of their last record
@@ -107,6 +123,7 @@ impl PartialEq for RuntimeView {
             && self.partial == other.partial
             && self.awaiting == other.awaiting
             && self.pending_approval == other.pending_approval
+            && self.undo == other.undo
     }
 }
 
@@ -298,6 +315,30 @@ impl ClientView {
                     plan: plan.clone(),
                     expires_at: expires_at.clone(),
                 });
+            }
+            EventKind::UndoUncertain {
+                undo_id,
+                target_turn_id,
+            } => {
+                view.undo = Some(UndoState {
+                    undo_id: undo_id.clone(),
+                    target_turn_id: target_turn_id.clone(),
+                    hints: Vec::new(),
+                })
+            }
+            EventKind::UndoHints { undo_id, hints } => {
+                if let Some(undo) = view.undo.as_mut().filter(|undo| undo.undo_id == *undo_id) {
+                    undo.hints = hints.clone();
+                }
+            }
+            EventKind::UndoResolved { undo_id } => {
+                if view
+                    .undo
+                    .as_ref()
+                    .is_some_and(|undo| undo.undo_id == *undo_id)
+                {
+                    view.undo = None;
+                }
             }
             EventKind::ApprovalResolved { approval_id, .. } => {
                 if view

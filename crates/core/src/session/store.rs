@@ -330,7 +330,7 @@ pub(crate) fn normalized_command(command: &serde_json::Value) -> Result<Vec<u8>>
 }
 
 fn recovery_commit(commit: &Commit) -> bool {
-    commit.head.reason != HeadReason::Navigate
+    let ordinary = commit.head.reason != HeadReason::Navigate
         && commit
             .entries
             .iter()
@@ -342,7 +342,28 @@ fn recovery_commit(commit: &Commit) -> bool {
             JournalEvent::TurnFinished(v) => v.outcome == TurnOutcome::Interrupted,
             JournalEvent::StateChanged(v) => v.to == RuntimeState::Recovering,
             _ => false,
-        })
+        });
+    ordinary || undo_recovery_commit(commit)
+}
+
+/// The narrow undo shapes a recovery barrier admits: recording uncertainty,
+/// and the terminal note/result pair that resolves it. An `undo_intent` is
+/// never a recovery commit, so recovery can never start or restart an undo.
+fn undo_recovery_commit(commit: &Commit) -> bool {
+    if commit.head.reason == HeadReason::Navigate || commit.events.len() != 1 {
+        return false;
+    }
+    match &commit.events[0] {
+        JournalEvent::UndoUncertain(_) => {
+            commit.head.reason == HeadReason::Retain && commit.entries.is_empty()
+        }
+        JournalEvent::UndoResult(_) => {
+            commit.head.reason == HeadReason::Advance
+                && commit.entries.len() == 1
+                && matches!(commit.entries[0].payload, EntryPayload::UndoNote(_))
+        }
+        _ => false,
+    }
 }
 
 // Never allocate a whole journal or an unbounded physical line. Oversized tails

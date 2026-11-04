@@ -497,7 +497,7 @@ fn a_v3_compaction_may_omit_its_model() {
 }
 
 #[test]
-fn a_v2_prefix_continues_as_v3() {
+fn a_v2_prefix_continues_as_v4() {
     let (_temp, root, mut store) = fresh();
     let ids = turns(&mut store, 2);
     let session = store.snapshot().session_id().clone();
@@ -513,12 +513,12 @@ fn a_v2_prefix_continues_as_v3() {
     let mut store = JournalStore::open(root.clone(), &session).unwrap();
     accepted(&mut store, &ids[0], ContextMode::Pinned);
     let mut expected = vec![2; prefix as usize];
-    expected.push(3);
+    expected.push(4);
     assert_eq!(versions(&root, &session), expected);
     drop(store);
     let inspection = JournalStore::inspect(&root, &session).unwrap();
     assert_eq!(inspection.diagnostic, None);
-    assert_eq!(inspection.versions, [(2, prefix), (3, 1)].into());
+    assert_eq!(inspection.versions, [(2, prefix), (4, 1)].into());
 }
 
 #[test]

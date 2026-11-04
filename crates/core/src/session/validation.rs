@@ -67,6 +67,8 @@ pub(crate) fn record_artifacts(root: &DataRoot, record: &Record, state: &State) 
                     }
                     EntryPayload::ModelChanged(_) => (),
                     EntryPayload::ContextControl(_) => (),
+                    // A note references no artifact.
+                    EntryPayload::UndoNote(_) => (),
                 }
             }
             for event in &commit.events {
@@ -85,6 +87,26 @@ pub(crate) fn record_artifacts(root: &DataRoot, record: &Record, state: &State) 
                     }
                     JournalEvent::TailRepaired(repair) => {
                         root.verify_artifact(&repair.quarantine_artifact)?
+                    }
+                    // A captured pre-image is a direct reference: its bytes
+                    // must exist before the intent that binds them is durable,
+                    // and at every replay afterwards.
+                    JournalEvent::ExecutionIntent(intent) => {
+                        if let Some(image) = &intent.file_image {
+                            if let Some(pre) = &image.pre_image {
+                                root.verify_artifact(pre)?;
+                            }
+                            plan_image(root, intent, state)?;
+                        }
+                    }
+                    JournalEvent::UndoIntent(intent) => {
+                        root.verify_artifact(&intent.configuration)?;
+                        for target in &intent.targets {
+                            if let Some(pre) = &target.pre_image {
+                                root.verify_artifact(pre)?;
+                            }
+                        }
+                        undo_sources(intent, state)?;
                     }
                     _ => (),
                 }
@@ -105,6 +127,82 @@ fn manifest(root: &DataRoot, compaction: &Compaction, state: &State) -> Result<(
     )?)?;
     if actual != expected {
         return Err(StoreError::Invalid("source_manifest_mismatch"));
+    }
+    Ok(())
+}
+
+/// The bound plan of a captured mutation must agree with the image the intent
+/// binds: same path, same pre-image, and — for a write — the same post-image.
+fn plan_image(root: &DataRoot, intent: &ExecutionIntent, state: &State) -> Result<()> {
+    let image = intent
+        .file_image
+        .as_ref()
+        .ok_or(StoreError::Invalid("undo_image_binding"))?;
+    let plan = state
+        .events
+        .iter()
+        .find_map(|entry| match &entry.2 {
+            JournalEvent::AuthorizationDecided(decision)
+                if decision.decision_id == intent.decision_id
+                    && decision.plan_digest == intent.plan_digest =>
+            {
+                Some(decision.plan.clone())
+            }
+            _ => None,
+        })
+        .ok_or(StoreError::Invalid("undo_image_binding"))?;
+    let bytes = root.read_artifact(&plan, codec::MAX_LINE_BYTES)?;
+    let value = codec::unique_json(&bytes)?;
+    let target = &value["target"];
+    let pre = target["pre_image"].as_str();
+    let pre_matches = match (&image.pre_image, pre) {
+        (None, Some("absent")) => true,
+        (Some(reference), Some(stored)) => stored == reference.sha256.as_str(),
+        _ => false,
+    };
+    let post_matches = match value["name"].as_str() {
+        // A write plan carries the digest of exactly the bytes it will write.
+        Some("write") => target["content_sha256"].as_str() == Some(image.post_image.as_str()),
+        // An edit plan binds literal arguments and a pre-digest only; capture
+        // computed the exact replacement with the executor's own rules.
+        Some("edit") => true,
+        _ => false,
+    };
+    if target["path"].as_str() != Some(image.path.as_str()) || !pre_matches || !post_matches {
+        return Err(StoreError::Invalid("undo_image_binding"));
+    }
+    Ok(())
+}
+
+/// Every target of an undo intent must come from the durable images of its
+/// target turn: same path, same first pre-image and same last post-image.
+fn undo_sources(intent: &UndoIntent, state: &State) -> Result<()> {
+    for target in &intent.targets {
+        let mut images = Vec::new();
+        for id in &target.invocation_ids {
+            let invocation = state
+                .invocations
+                .get(id)
+                .ok_or(StoreError::Invalid("undo_binding"))?;
+            let image = invocation
+                .image()
+                .ok_or(StoreError::Invalid("undo_binding"))?;
+            if invocation.turn() != &intent.target_turn_id
+                || image.path != target.path
+                || !invocation.has_result()
+            {
+                return Err(StoreError::Invalid("undo_binding"));
+            }
+            images.push(image);
+        }
+        let first = images.first().ok_or(StoreError::Invalid("undo_binding"))?;
+        let last = images.last().ok_or(StoreError::Invalid("undo_binding"))?;
+        if first.pre_image != target.pre_image
+            || first.pre_mode != target.pre_mode
+            || last.post_image != target.post_image
+        {
+            return Err(StoreError::Invalid("undo_binding"));
+        }
     }
     Ok(())
 }

@@ -29,6 +29,16 @@ pub(super) enum Activity {
         tool: String,
     },
     Planned(Plan),
+    /// A trusted write/edit whose pre-image is being captured, before the
+    /// intent that binds it may be committed.
+    Capture {
+        plan: Plan,
+        /// The ticket the user just allowed, still bound to this plan.
+        approval: Option<PendingApproval>,
+        remember: bool,
+        request: Option<RequestId>,
+        token: CaptureToken,
+    },
     Approval {
         plan: Plan,
         ticket: PendingApproval,
@@ -80,6 +90,12 @@ impl Runtime {
             return;
         }
         if self.cancel.is_some() {
+            if matches!(self.tool, Some(Activity::Capture { .. })) {
+                // The capture is not a dispatch: drop it and answer the call.
+                self.tool = None;
+                self.cancel_unstarted(snapshot, &turn, None, env);
+                return;
+            }
             if matches!(self.tool, Some(Activity::Executing { .. })) {
                 self.cancel_execution();
                 self.persist(
@@ -141,7 +157,7 @@ impl Runtime {
                 };
                 match decide(&plan, plan.facts(), policy) {
                     Authorization::Allow(_) => {
-                        self.allow_plan(snapshot, &turn, plan, None, false, None, env)
+                        self.begin_allow(snapshot, &turn, plan, None, false, None, env)
                     }
                     Authorization::Deny(refusal) => {
                         let decision = self.authorization(
@@ -211,6 +227,7 @@ impl Runtime {
                     });
                 }
             }
+            Some(activity @ Activity::Capture { .. }) => self.tool = Some(activity),
             Some(Activity::Intent(operation)) => self.dispatch(operation),
             Some(
                 activity @ Activity::Executing {
@@ -425,11 +442,11 @@ impl Runtime {
             if let Some(timer) = timer {
                 self.out.push(Effect::CancelTimer { timer });
             }
-            self.allow_plan(
+            self.begin_allow(
                 &snapshot,
                 &turn,
                 plan,
-                Some(ticket.approval_id),
+                Some(ticket),
                 remember,
                 Some(request),
                 env,
@@ -460,6 +477,175 @@ impl Runtime {
         }
     }
 
+    /// An allow either captures the target's pre-image first or, for a call
+    /// with no file mutation, commits immediately. Capture never extends an
+    /// approval's lifetime and a refused capture dispatches nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_allow(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        turn: &TurnId,
+        plan: Plan,
+        approval: Option<PendingApproval>,
+        remember: bool,
+        request: Option<RequestId>,
+        env: &mut dyn Env,
+    ) {
+        if plan
+            .effects()
+            .contains(crate::session::EffectClass::FilesystemMutation)
+        {
+            self.next_token += 1;
+            let token = CaptureToken(self.next_token);
+            self.tool = Some(Activity::Capture {
+                plan: plan.clone(),
+                approval,
+                remember,
+                request,
+                token,
+            });
+            self.out.push(Effect::CaptureImage { token, plan });
+            return;
+        }
+        self.allow_plan(
+            snapshot,
+            turn,
+            plan,
+            approval.map(|ticket| ticket.approval_id),
+            remember,
+            request,
+            None,
+            env,
+        );
+    }
+
+    /// The capture finished. Revalidate the approval, then commit the intent
+    /// that binds the image; a refusal records nothing executed.
+    pub(super) fn captured(
+        &mut self,
+        token: CaptureToken,
+        result: Result<crate::session::FileImage, Refusal>,
+        env: &mut dyn Env,
+    ) {
+        if self.mode != Mode::Ready
+            || !matches!(&self.tool, Some(Activity::Capture { token: expected, .. }) if *expected == token)
+        {
+            return;
+        }
+        let Some(Activity::Capture {
+            plan,
+            approval,
+            remember,
+            request,
+            ..
+        }) = self.tool.take()
+        else {
+            unreachable!()
+        };
+        let snapshot = self.snapshot().clone();
+        let turn = snapshot
+            .active_turn()
+            .cloned()
+            .expect("capture active turn");
+        let image = match result {
+            Ok(image) => image,
+            Err(refusal) => {
+                return self
+                    .refuse_after_capture(&snapshot, &turn, plan, approval, request, refusal, env);
+            }
+        };
+        if let Some(ticket) = approval {
+            let invalid = self
+                .policy
+                .as_ref()
+                .map_or(true, |policy| policy.revision() != plan.policy_revision())
+                || snapshot.policy_revision() != plan.policy_revision();
+            if invalid || env.now().instant() >= ticket.expires_at.instant() {
+                // Capture must not give an expired or invalidated ticket a
+                // second life: refuse exactly as an unanswered ticket would.
+                self.tool = Some(Activity::Approval {
+                    plan,
+                    ticket,
+                    timer: None,
+                    expired: false,
+                });
+                self.refuse_approval(
+                    &snapshot,
+                    &turn,
+                    if invalid {
+                        ApprovalOutcome::Invalidated
+                    } else {
+                        ApprovalOutcome::Expired
+                    },
+                    request,
+                    env,
+                );
+                return;
+            }
+            self.allow_plan(
+                &snapshot,
+                &turn,
+                plan,
+                Some(ticket.approval_id),
+                remember,
+                request,
+                Some(image),
+                env,
+            );
+        } else {
+            self.allow_plan(&snapshot, &turn, plan, None, false, None, Some(image), env);
+        }
+    }
+
+    /// A capture refusal: record the honest denial and nonexecuted refusal.
+    #[allow(clippy::too_many_arguments)]
+    fn refuse_after_capture(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        turn: &TurnId,
+        plan: Plan,
+        approval: Option<PendingApproval>,
+        request: Option<RequestId>,
+        refusal: Refusal,
+        env: &mut dyn Env,
+    ) {
+        let decision = self.authorization(
+            turn,
+            &plan,
+            approval.as_ref().map(|ticket| ticket.approval_id.clone()),
+            Decision::Deny,
+            refusal.code.as_str(),
+            env,
+        );
+        let mut flight = idle_flight();
+        if let Some(ticket) = &approval {
+            flight.tool_events.push(EventKind::ApprovalResolved {
+                approval_id: ticket.approval_id.clone(),
+                outcome: ApprovalOutcome::Denied,
+            });
+            if let Some(request) = request {
+                flight.waiters.push((
+                    request,
+                    Waiter::ApprovalSubmitted(ticket.approval_id.clone()),
+                ));
+            }
+        }
+        let result = runtime_result(
+            turn,
+            plan.call(),
+            refusal.status,
+            refusal.code,
+            &refusal.text(),
+        );
+        self.tool = Some(Activity::Denied(result));
+        self.persist(
+            audit(snapshot, vec![JournalEvent::AuthorizationDecided(decision)]),
+            flight,
+            None,
+            env,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn allow_plan(
         &mut self,
@@ -469,6 +655,7 @@ impl Runtime {
         approval: Option<ApprovalId>,
         remember: bool,
         request: Option<RequestId>,
+        image: Option<crate::session::FileImage>,
         env: &mut dyn Env,
     ) {
         let decision = self.authorization(
@@ -483,6 +670,7 @@ impl Runtime {
             plan.clone(),
             env.invocation_id(),
             decision.decision_id.clone(),
+            image.clone(),
         );
         let intent = ExecutionIntent {
             turn_id: turn.clone(),
@@ -493,6 +681,7 @@ impl Runtime {
             backend: plan.backend(),
             timeout_ms: plan.timeout_ms(),
             effects: Some(plan.effects().clone()),
+            file_image: image,
         };
         // Intent consumes the old revision's authorization before the grant
         // changes that revision. All three events are one atomic transaction.
@@ -651,6 +840,9 @@ impl Runtime {
     }
 
     pub(super) fn clear_tool(&mut self) {
+        if let Some(Activity::Capture { .. }) = self.tool.take() {
+            return;
+        }
         if let Some(Activity::Approval {
             timer: Some(timer), ..
         }) = self.tool.take()
@@ -729,6 +921,7 @@ impl Runtime {
                 provenance: Provenance::Executor,
                 artifacts: outcome.artifacts.iter().map(|b| artifact(b)).collect(),
                 code: outcome.code.map(|c| c.as_str().into()),
+                file_effect: outcome.file_effect,
             },
         };
         let flight = InFlight {

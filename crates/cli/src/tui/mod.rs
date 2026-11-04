@@ -29,12 +29,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use harness_core::{
     context::{Flags, Totals},
     runtime::{
-        ApplyOutcome, ClientView, Command, Phase, Rejection, RuntimeDiagnostic, RuntimeView,
-        SubscriptionItem, UncertainInvocation, UserResolution,
+        Accepted, ApplyOutcome, ClientView, Command, Phase, Rejection, RuntimeDiagnostic,
+        RuntimeView, SubscriptionItem, UncertainInvocation, UndoPreview, UndoResolution,
+        UserResolution,
     },
     session::{
-        ApprovalId, CommandId, ContentBlock, ContextMode, Decision, EntryPayload, InvocationId,
-        ModelRef, RuntimeState, StoredEntry, ToolStatus, TurnId,
+        ApprovalId, CommandId, ContentBlock, ContextMode, Decision, EntryPayload, FileOutcome,
+        InvocationId, ModelRef, RuntimeState, StoredEntry, ToolStatus, TurnId, UndoFileOutcome,
     },
 };
 use ratatui::{Frame, text::Line};
@@ -145,6 +146,22 @@ enum Modal {
         /// Editable destination path, prefilled from the session ID.
         input: String,
     },
+    /// The read-only undo preview, waiting for a y/N confirmation.
+    UndoConfirm {
+        /// Exactly what the durable undo would do.
+        preview: Box<UndoPreview>,
+    },
+    /// An interrupted undo waits for the user's statement about every target.
+    UndoResolve {
+        /// Selected target row.
+        index: usize,
+        /// Acknowledge unknown, or state what was observed per file.
+        mode: UndoResolveMode,
+        /// One observed outcome per target, in target order.
+        files: Vec<FileOutcome>,
+        /// The user's note; required when observing.
+        input: String,
+    },
     /// A refusal with no choice to make, shown in the same dialog frame.
     Notice {
         /// Dialog title.
@@ -152,6 +169,30 @@ enum Modal {
         /// Short explanation lines.
         message: String,
     },
+}
+
+/// How the user answers an interrupted undo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoResolveMode {
+    /// Accept that which files changed is unknown.
+    AcknowledgedUnknown,
+    /// State what each file shows now.
+    Observed,
+}
+
+impl UndoResolveMode {
+    fn next(self) -> Self {
+        match self {
+            Self::AcknowledgedUnknown => Self::Observed,
+            Self::Observed => Self::AcknowledgedUnknown,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::AcknowledgedUnknown => "accept that which files changed is unknown",
+            Self::Observed => "observed: state each file now",
+        }
+    }
 }
 
 /// The core's user-statement choices, restricted to what a terminal can offer.
@@ -303,7 +344,9 @@ impl App {
                 self.prompt.insert_str(at, &text);
                 self.cursor += text.chars().count();
             }
-            Modal::Uncertain { input, .. } => input.push_str(&text),
+            Modal::Uncertain { input, .. } | Modal::UndoResolve { input, .. } => {
+                input.push_str(&text)
+            }
             Modal::ExportPath { input, .. } => {
                 input.extend(text.chars().filter(|c| !c.is_control() || *c == '\n'));
             }
@@ -448,6 +491,8 @@ impl App {
         match self.modal {
             Modal::Approval { .. } => self.approval_key(key),
             Modal::Uncertain { .. } => self.uncertain_key(key),
+            Modal::UndoConfirm { .. } => self.undo_confirm_key(key),
+            Modal::UndoResolve { .. } => self.undo_resolve_key(key),
             Modal::ConfirmQuit => self.confirm_quit_key(key),
             Modal::ConfirmDelete { .. } => self.confirm_delete_key(key),
             Modal::ExportPath { .. } => self.export_path_key(key),
@@ -515,6 +560,34 @@ impl App {
         let Some(view) = self.view.as_ref().map(ClientView::view) else {
             return;
         };
+        if view.phase == Phase::AwaitingResolution
+            && let Some(undo) = view.undo.clone()
+        {
+            // An interrupted undo is resolved as a whole set, never by retrying.
+            let targets = view
+                .snapshot
+                .unresolved_undo()
+                .filter(|pending| pending.intent.undo_id == undo.undo_id)
+                .map(|pending| pending.intent.targets.len())
+                .unwrap_or(0);
+            match &mut self.modal {
+                Modal::UndoResolve {
+                    index, files, mode, ..
+                } if files.len() == targets => {
+                    *index = (*index).min(targets.saturating_sub(1));
+                    let _ = mode;
+                }
+                _ => {
+                    self.modal = Modal::UndoResolve {
+                        index: 0,
+                        mode: UndoResolveMode::AcknowledgedUnknown,
+                        files: vec![FileOutcome::Unknown; targets],
+                        input: String::new(),
+                    }
+                }
+            }
+            return;
+        }
         if let Some(ticket) = &view.pending_approval {
             match &self.modal {
                 Modal::Approval { approval_id, .. } if *approval_id == ticket.approval_id => {}
@@ -552,6 +625,7 @@ impl App {
                 | Modal::ConfirmDelete { .. }
                 | Modal::ExportPath { .. }
                 | Modal::Notice { .. }
+                | Modal::UndoConfirm { .. }
         )
     }
 
@@ -592,6 +666,53 @@ impl App {
                 self.context = Some((totals.clone(), *flags));
             }
             _ => {}
+        }
+    }
+
+    /// Reduce a command reply the shell could not attribute to an inspection or
+    /// a navigation. Returns false when it is an ordinary reply.
+    pub fn undo_reply(&mut self, reply: &Result<Accepted, Rejection>) -> bool {
+        match reply {
+            Ok(Accepted::UndoPreviewed { preview })
+                if preview.targets.is_empty() && preview.omitted.is_empty() =>
+            {
+                self.modal = Modal::Notice {
+                    title: "undo".into(),
+                    message: "no unconsumed trusted file-edit turn on the active branch".into(),
+                };
+                true
+            }
+            Ok(Accepted::UndoPreviewed { preview }) => {
+                self.modal = Modal::UndoConfirm {
+                    preview: preview.clone(),
+                };
+                true
+            }
+            Ok(Accepted::UndoCompleted { outcome, files, .. }) => {
+                self.modal = Modal::None;
+                self.notices.push(Notice::Info(format!(
+                    "undo {}: {}",
+                    outcome.as_str(),
+                    files
+                        .iter()
+                        .map(|row| format!("{} {}", row.outcome.as_str(), row.path))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+                true
+            }
+            Ok(Accepted::UndoResolved { .. }) => {
+                self.modal = Modal::None;
+                self.notices
+                    .push(Notice::Info("interrupted undo resolved".into()));
+                true
+            }
+            Err(rejection @ Rejection::Undo { .. }) => {
+                self.set_error(crate::tui::runtime::rejection(rejection.clone()));
+                self.modal = Modal::None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -637,6 +758,15 @@ impl App {
                 self.output = !self.output;
                 self.rebuild();
                 Vec::new()
+            }
+            // Never an OS job control: the raw-mode loop turns Ctrl-Z into a
+            // read-only undo preview, and only y records anything.
+            KeyCode::Char('z') if control => {
+                if !self.is_idle() {
+                    return Vec::new();
+                }
+                self.clear_error();
+                vec![Action::Command(Command::PreviewUndo)]
             }
             KeyCode::Esc => match self.active_turn() {
                 Some(turn_id) => vec![Action::Command(Command::Cancel { turn_id })],
@@ -852,6 +982,9 @@ impl App {
                                 ToolStatus::Failed
                             },
                             text: input.clone(),
+                            // A terminal cannot classify a captured rename; the
+                            // dialog refuses that case rather than guessing.
+                            file_effect: None,
                         })
                     }
                     _ => None,
@@ -863,6 +996,136 @@ impl App {
                         resolution,
                     })];
                 }
+            }
+            // There is no safe default resolution; Esc keeps the dialog open.
+            KeyCode::Esc => {}
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// The preview is the user's decision point. Enter is the default answer,
+    /// and the default answer is no: only `y` records an undo.
+    fn undo_confirm_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control {
+            return Vec::new();
+        }
+        let Modal::UndoConfirm { preview } = &self.modal else {
+            return Vec::new();
+        };
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let command = Command::Undo {
+                    command_id: CommandId::new(),
+                    expected_sequence: preview.sequence,
+                    expected_head: preview.head.clone(),
+                    expected_configuration: preview.configuration.clone(),
+                    target_turn_id: preview.target_turn_id.clone(),
+                };
+                self.modal = Modal::None;
+                vec![Action::Command(command)]
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
+                // Cancellation records nothing and keeps the prompt draft.
+                self.modal = Modal::None;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn undo_resolve_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let Some(view) = self.view().cloned() else {
+            return Vec::new();
+        };
+        let Some(undo) = view.undo.clone() else {
+            return Vec::new();
+        };
+        let paths: Vec<String> = view
+            .snapshot
+            .unresolved_undo()
+            .filter(|pending| pending.intent.undo_id == undo.undo_id)
+            .map(|pending| {
+                pending
+                    .intent
+                    .targets
+                    .iter()
+                    .map(|target| target.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Modal::UndoResolve {
+            index,
+            mode,
+            files,
+            input,
+        } = &mut self.modal
+        else {
+            return Vec::new();
+        };
+        if paths.len() != files.len() || paths.is_empty() {
+            return Vec::new();
+        }
+        *index = (*index).min(paths.len() - 1);
+        match key.code {
+            KeyCode::Up => *index = index.saturating_sub(1),
+            KeyCode::Down => *index = (*index + 1).min(paths.len() - 1),
+            KeyCode::Left | KeyCode::BackTab | KeyCode::Right | KeyCode::Tab => {
+                *mode = mode.next();
+            }
+            KeyCode::Char('r') if !control && !alt => {
+                *mode = UndoResolveMode::Observed;
+                files[*index] = FileOutcome::ObservedRestored;
+            }
+            KeyCode::Char('x') if !control && !alt => {
+                *mode = UndoResolveMode::Observed;
+                files[*index] = FileOutcome::ObservedRemoved;
+            }
+            KeyCode::Char('o') if !control && !alt => {
+                *mode = UndoResolveMode::Observed;
+                files[*index] = FileOutcome::ObservedOther;
+            }
+            KeyCode::Char('u') if !control && !alt => {
+                *mode = UndoResolveMode::Observed;
+                files[*index] = FileOutcome::Unknown;
+            }
+            KeyCode::Char('a') if !control && !alt => *mode = UndoResolveMode::AcknowledgedUnknown,
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Char(c) if !control && !alt => {
+                if !c.is_control() {
+                    input.push(c);
+                }
+            }
+            KeyCode::Enter => {
+                if input.is_empty() {
+                    return Vec::new();
+                }
+                let resolution = match *mode {
+                    UndoResolveMode::AcknowledgedUnknown => UndoResolution::AcknowledgedUnknown {
+                        note: input.clone(),
+                    },
+                    UndoResolveMode::Observed => UndoResolution::Observed {
+                        files: paths
+                            .iter()
+                            .zip(files.iter())
+                            .map(|(path, outcome)| UndoFileOutcome {
+                                path: path.clone(),
+                                outcome: *outcome,
+                            })
+                            .collect(),
+                        note: input.clone(),
+                    },
+                };
+                let undo_id = undo.undo_id.clone();
+                return vec![Action::Command(Command::ResolveUndo {
+                    undo_id,
+                    resolution,
+                })];
             }
             // There is no safe default resolution; Esc keeps the dialog open.
             KeyCode::Esc => {}

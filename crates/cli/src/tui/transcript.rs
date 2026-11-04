@@ -359,6 +359,11 @@ fn entry_key(
     hash
 }
 
+/// The persisted spelling of an undo outcome.
+fn undo_outcome(outcome: harness_core::session::UndoOutcome) -> &'static str {
+    outcome.as_str()
+}
+
 fn render_entry(
     payload: &EntryPayload,
     toggles: Toggles,
@@ -456,6 +461,24 @@ fn render_entry(
             };
             rows.push(Line::styled(
                 format!("{action} turn {}", turn_label(&control.turn_id)),
+                accent_style(),
+            ));
+            rows.push(Line::default());
+        }
+        EntryPayload::UndoNote(note) => {
+            // The recorded text only: it names paths and calls, never bytes.
+            rows.push(Line::styled(
+                format!(
+                    "── undo ({}) ──────────────────────",
+                    undo_outcome(note.outcome)
+                ),
+                accent_style(),
+            ));
+            for text in note.text.lines() {
+                rows.push(Line::raw(format!("  {}", bounded(text, 200))));
+            }
+            rows.push(Line::styled(
+                "────────────────────────────────────────────",
                 accent_style(),
             ));
             rows.push(Line::default());

@@ -313,6 +313,7 @@ impl FsWorkspace {
             duration_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
             output_truncated: value["truncated"] == true,
             artifacts,
+            file_effect: None,
         }
     }
 

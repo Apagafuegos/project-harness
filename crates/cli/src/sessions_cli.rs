@@ -6,8 +6,13 @@
 //! lock that a running engine holds.
 use crate::{config, export};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use harness_core::runtime::{
+    Accepted, Command as EngineCommand, DriverConfig, Rejection, SessionHandle, ToolHostConfig,
+    UndoOmittedCall, UndoPreview,
+};
 use harness_core::session::{
-    ARTIFACT_GRACE, DataRoot, GcOptions, GcReport, MaintenanceError, SessionId, StoreError,
+    ARTIFACT_GRACE, DataRoot, GcOptions, GcReport, JournalStore, MaintenanceError, SessionId,
+    StoreError,
 };
 use std::{
     io::{self, IsTerminal, Write},
@@ -71,6 +76,36 @@ pub fn command() -> Command {
                         .long("yes")
                         .action(ArgAction::SetTrue)
                         .help("Delete without asking, required without a terminal"),
+                ),
+        )
+        .subcommand(
+            Command::new("undo")
+                .about("Undo the newest agent turn's trusted file edits")
+                .long_about(
+                    "Undo the trusted `write` and `edit` effects of the most recent agent \
+                     turn on the active branch. Pre-image bytes were captured before each \
+                     mutation, so a file the agent changed is restored and a file it created \
+                     is removed. Bash and every other effect are never reversed; the report \
+                     lists them.
+
+                     The undo is all-or-nothing on preflight: if any target's current content \
+                     differs from the recorded post-image, or a protection or workspace check \
+                     fails, nothing changes and every conflicting path is named. It is one \
+                     durable intent and result, so an interrupted undo is reported as \
+                     uncertain and resolved in the TUI; nothing is ever retried. History is \
+                     append-only and the model's context learns about the undo through a \
+                     recorded note.
+
+                     The exclusive journal lock is held from preview through the final commit, \
+                     so a running engine refuses with `session_locked`. Without a terminal, \
+                     `--yes` is required. Cancelling exits 0 without recording anything.",
+                )
+                .arg(session_id())
+                .arg(
+                    Arg::new("yes")
+                        .long("yes")
+                        .action(ArgAction::SetTrue)
+                        .help("Undo without asking, required without a terminal"),
                 ),
         )
         .subcommand(
@@ -159,6 +194,7 @@ pub(super) fn run(arguments: &ArgMatches) -> ExitCode {
         Some(("list", arguments)) => list(arguments),
         Some(("export", arguments)) => export::run(arguments),
         Some(("delete", arguments)) => delete(arguments),
+        Some(("undo", arguments)) => undo(arguments),
         Some(("gc", arguments)) => gc(arguments),
         _ => list(arguments),
     };
@@ -220,6 +256,146 @@ fn delete(arguments: &ArgMatches) -> Result<String, Failure> {
     ))
 }
 
+/// A provider that never runs: `sessions undo` opens no inference.
+struct NoProvider;
+impl harness_core::model::ModelProvider for NoProvider {
+    fn stream(
+        &self,
+        _request: harness_core::model::ModelRequest,
+        _control: harness_core::model::OperationControl,
+    ) -> harness_core::model::ModelEventStream {
+        Box::pin(futures_util::stream::empty())
+    }
+}
+
+fn undo(arguments: &ArgMatches) -> Result<String, Failure> {
+    let path = data_root(arguments)?;
+    let id = arguments
+        .get_one::<SessionId>("session-id")
+        .expect("required");
+    let root = open(&path)?;
+    // Read the recorded workspace and configuration under the shared catalog
+    // lock before any writable open; a live engine is refused here.
+    let inspection = JournalStore::inspect(&root, id).map_err(|error| match error {
+        StoreError::Locked => Failure::Refusal("session_locked".into()),
+        StoreError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+            Failure::Refusal("session_not_found".into())
+        }
+        error => Failure::Storage(error.to_string()),
+    })?;
+    if let Some(diagnostic) = &inspection.diagnostic {
+        return Err(Failure::Refusal(format!(
+            "journal_invalid: {}",
+            diagnostic.code
+        )));
+    }
+    let snapshot = inspection
+        .snapshot
+        .ok_or_else(|| Failure::Refusal("journal_invalid: missing_header".into()))?;
+    let workspace = PathBuf::from(&snapshot.header().workspace);
+    if !workspace.is_absolute() {
+        return Err(Failure::Refusal(
+            "journal_invalid: workspace_not_absolute".into(),
+        ));
+    }
+    let host = ToolHostConfig {
+        workspace_root: workspace,
+        data_root: root.path().to_owned(),
+        // Undo never runs a process: the trusted file backend is all it needs.
+        sandbox: None,
+    };
+    let config = DriverConfig::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Failure::Storage(error.to_string()))?;
+    runtime.block_on(async move {
+        let handle = SessionHandle::open_with_tools(
+            root.into(),
+            id.clone(),
+            std::sync::Arc::new(NoProvider),
+            config,
+            &host,
+        )
+        .await
+        .map_err(|error| Failure::Refusal(error.to_string()))?;
+        let result = undo_session(&handle, arguments).await;
+        handle.shutdown().await;
+        result
+    })
+}
+
+async fn undo_session(handle: &SessionHandle, arguments: &ArgMatches) -> Result<String, Failure> {
+    let preview = match handle.command(EngineCommand::PreviewUndo).await {
+        Ok(Accepted::UndoPreviewed { preview }) => preview,
+        Ok(other) => {
+            return Err(Failure::Storage(format!("unexpected reply: {other:?}")));
+        }
+        Err(rejection) => return Err(refusal(rejection)),
+    };
+    let mut text = preview_text(&preview);
+    if !arguments.get_flag("yes") {
+        if !io::stdin().is_terminal() {
+            return Err(Failure::Refusal("confirmation_required".into()));
+        }
+        if !confirm(&format!(
+            "\nUndo agent turn {}? No redo.",
+            preview.target_turn_id
+        ))? {
+            return Ok("cancelled: nothing was recorded".into());
+        }
+    }
+    match handle
+        .command(EngineCommand::Undo {
+            command_id: harness_core::session::CommandId::new(),
+            expected_sequence: preview.sequence,
+            expected_head: preview.head.clone(),
+            expected_configuration: preview.configuration.clone(),
+            target_turn_id: preview.target_turn_id.clone(),
+        })
+        .await
+    {
+        Ok(Accepted::UndoCompleted { outcome, files, .. }) => {
+            text.push_str(&format!("\nundo {}", outcome.as_str()));
+            for row in files {
+                text.push_str(&format!("\n  {} {}", row.outcome.as_str(), row.path));
+            }
+            text.push_str("\nThe model context records this undo through a user note.");
+            Ok(text)
+        }
+        Ok(other) => Err(Failure::Storage(format!("unexpected reply: {other:?}"))),
+        Err(rejection) => Err(refusal(rejection)),
+    }
+}
+
+/// Render one stable refusal: a code, an optional detail and content-free rows.
+fn refusal(rejection: Rejection) -> Failure {
+    match rejection {
+        Rejection::Undo {
+            code,
+            detail,
+            conflicts,
+            omitted,
+        } => {
+            let mut text = code.to_owned();
+            if !detail.is_empty() {
+                text.push_str(": ");
+                text.push_str(&detail);
+            }
+            for conflict in conflicts {
+                text.push_str(&format!("\n  {} {}", conflict.reason, conflict.path));
+            }
+            text.push_str(&omitted_text(&omitted));
+            Failure::Refusal(text)
+        }
+        Rejection::Busy | Rejection::RecoveryRequired | Rejection::ResolutionRequired => {
+            Failure::Refusal("session_not_idle".into())
+        }
+        Rejection::Invalid(code) => Failure::Refusal(format!("journal_invalid: {code}")),
+        other => Failure::Refusal(format!("command refused: {other:?}")),
+    }
+}
+
 fn gc(arguments: &ArgMatches) -> Result<String, Failure> {
     let path = data_root(arguments)?;
     let root = open(&path)?;
@@ -240,6 +416,51 @@ fn gc(arguments: &ArgMatches) -> Result<String, Failure> {
         })
         .map_err(maintenance)?;
     Ok(report_text(&report))
+}
+
+fn preview_text(preview: &UndoPreview) -> String {
+    let mut text = format!(
+        "Undo agent turn {} ({} target{})",
+        preview.target_turn_id,
+        preview.targets.len(),
+        if preview.targets.len() == 1 { "" } else { "s" }
+    );
+    for target in &preview.targets {
+        if target.restores {
+            text.push_str(&format!("\n  restore: {}", target.path));
+        } else {
+            text.push_str(&format!(
+                "\n  remove (created by the agent): {}",
+                target.path
+            ));
+        }
+    }
+    if preview.targets.is_empty() {
+        text.push_str("\n  no trusted file changes require restoration");
+    }
+    text.push_str(&omitted_text(&preview.omitted));
+    text.push_str("\nOther effects are not reversed. No redo.");
+    text
+}
+
+/// Omitted calls are listed by tool, identity and recorded status, never by
+/// command bytes alone: the arguments are quoted as recorded.
+fn omitted_text(omitted: &[UndoOmittedCall]) -> String {
+    let mut text = String::new();
+    for call in omitted {
+        let status = call
+            .status
+            .map(|status| format!(" ({status:?})").to_lowercase())
+            .unwrap_or_else(|| " (not executed)".into());
+        text.push_str(&format!(
+            "\nNot reversible: {} {} {} {}{}",
+            call.tool, call.call.call_id, "from response", call.call.response_entry_id, status
+        ));
+        if !call.arguments.is_empty() {
+            text.push_str(&format!("\n  arguments: {}", call.arguments));
+        }
+    }
+    text
 }
 
 /// `1 artifact`, `2 artifacts`: a report must read like a sentence.
@@ -274,3 +495,6 @@ fn report_text(report: &GcReport) -> String {
     }
     text
 }
+
+#[cfg(test)]
+mod undo_text_tests;

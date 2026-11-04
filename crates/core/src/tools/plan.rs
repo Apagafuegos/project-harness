@@ -5,7 +5,9 @@ use super::{
     PolicySnapshot, Refusal, ToolDefinition, WorkspacePath,
     builtin::{MIB, Operation},
 };
-use crate::session::{ArtifactRef, CallRef, Digest, EffectSet, ExecutionBackend, ResultCode};
+use crate::session::{
+    ArtifactRef, CallRef, DataRoot, Digest, EffectSet, ExecutionBackend, FileImage, ResultCode,
+};
 
 /// The session's recorded workspace string, not a path resolved by this layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -25,6 +27,15 @@ pub trait WorkspaceView {
     }
     /// Return UTF-8 text or `not_utf8`/`too_large`; never truncate silently.
     fn read_text(&self, path: &WorkspacePath, max_bytes: u64) -> Result<String, Refusal>;
+    /// Capture a trusted write/edit pre-image and publish its raw bytes. A
+    /// view without a mutable filesystem refuses, which turns the call into a
+    /// nonexecuted refusal: nothing is dispatched without an image.
+    fn capture(&self, _plan: &Plan, _artifacts: &DataRoot) -> Result<FileImage, Refusal> {
+        Err(Refusal::new(
+            ResultCode::InfrastructureFailure,
+            "workspace capture unavailable",
+        ))
+    }
 }
 
 /// Kind of a resolved workspace object.

@@ -350,6 +350,7 @@ fn s01_created_target_between_plan_and_execution_is_stale() {
             Ok(())
         },
         None,
+        None,
     );
     assert_code(outcome, ResultCode::StalePlan);
     assert!(
@@ -377,6 +378,7 @@ fn s01_created_target_at_rename_requires_noreplace() {
             }
             Ok(())
         },
+        None,
         None,
     );
     assert_code(outcome, ResultCode::StalePlan);
@@ -407,6 +409,7 @@ fn s01_changed_content_while_preparing_replacement_is_stale() {
             }
             Ok(())
         },
+        None,
         None,
     );
     assert_code(outcome, ResultCode::StalePlan);
@@ -599,6 +602,7 @@ fn s01_cancel_at_every_precommit_step_leaves_original_and_no_temp() {
                 Ok(())
             },
             None,
+            None,
         );
         assert_code(outcome, ResultCode::Cancelled);
         assert_eq!(trace.last(), Some(&Step::Rename));
@@ -615,6 +619,7 @@ fn s01_cancel_at_every_precommit_step_leaves_original_and_no_temp() {
                     index += 1;
                     Ok(())
                 },
+                None,
                 None,
             );
             assert_code(outcome, ResultCode::Cancelled);
@@ -652,6 +657,7 @@ fn s01_cancel_after_rename_reports_success() {
             }
             Ok(())
         },
+        None,
         None,
     );
     assert_eq!(outcome.status, ToolStatus::Succeeded);
@@ -691,6 +697,7 @@ fn s01_directory_relocated_outside_root_during_resolution_or_reopen() {
                 }
                 Ok(())
             },
+            None,
             None,
         );
         assert!(moved);
@@ -914,6 +921,7 @@ fn fs_executor_trait_runs_authorized_plans_and_shared_cancellation() {
             plan(&view, name, arguments).unwrap(),
             "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
             "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+            None,
         );
         let outcome = executor.execute(&operation, &CancelToken::new());
         assert_eq!(outcome.status, ToolStatus::Succeeded, "{}", text(&outcome));
@@ -930,6 +938,7 @@ fn fs_executor_trait_runs_authorized_plans_and_shared_cancellation() {
         plan(&view, "read", json!({"path":"file"})).unwrap(),
         "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
         "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+        None,
     );
     let cancel = CancelToken::new();
     cancel.clone().cancel();
@@ -938,6 +947,7 @@ fn fs_executor_trait_runs_authorized_plans_and_shared_cancellation() {
         plan(&view, "bash", json!({"command":"true"})).unwrap(),
         "019a0000-0000-7000-8000-00000000019c".parse().unwrap(),
         "019a0000-0000-7000-8000-00000000019d".parse().unwrap(),
+        None,
     );
     assert_ne!(bash.plan().backend(), ExecutionBackend::TrustedFs);
     assert_code(
@@ -1121,6 +1131,7 @@ fn fs_unexpected_errno_and_deadline_use_executed_statuses() {
                 }
             },
             None,
+            None,
         );
         assert!(text(&out).contains("EIO"));
         assert_code(out, ResultCode::InfrastructureFailure);
@@ -1136,6 +1147,7 @@ fn fs_unexpected_errno_and_deadline_use_executed_statuses() {
             &CancelToken::new(),
             &mut |_| Ok(()),
             Some(Duration::ZERO),
+            None,
         ),
         ResultCode::Timeout,
     );

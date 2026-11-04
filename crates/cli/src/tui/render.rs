@@ -477,6 +477,110 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             ));
             Some(("uncertain invocation".into(), lines))
         }
+        Modal::UndoConfirm { preview } => {
+            // Exactly the brief's text: paths and calls, never file bytes.
+            let mut lines = vec![Line::raw(format!(
+                "Undo agent turn {}? [y/N]",
+                preview.target_turn_id
+            ))];
+            for target in &preview.targets {
+                if target.restores {
+                    lines.push(Line::raw(format!("Restore: {:?}", target.path)));
+                } else {
+                    lines.push(Line::raw(format!(
+                        "Remove (created by agent): {:?}",
+                        target.path
+                    )));
+                }
+            }
+            if preview.targets.is_empty() {
+                lines.push(Line::raw("No trusted file changes required restoration."));
+            }
+            for call in &preview.omitted {
+                let status = call
+                    .status
+                    .map(|status| format!(" ({status:?})").to_lowercase())
+                    .unwrap_or_else(|| " (not executed)".into());
+                lines.push(Line::raw(format!(
+                    "Not reversible: {} {} from response {}{status}",
+                    call.tool, call.call.call_id, call.call.response_entry_id
+                )));
+                if !call.arguments.is_empty() {
+                    lines.push(Line::raw(format!("  {}", bounded(&call.arguments, 160))));
+                }
+            }
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "Other effects are not reversed. No redo.",
+                app.theme.style(Role::Warning),
+            ));
+            lines.push(Line::styled("y confirms · Enter or n cancels", dim));
+            Some(("undo".into(), lines))
+        }
+        Modal::UndoResolve {
+            index,
+            mode,
+            files,
+            input,
+        } => {
+            let view = app.view()?;
+            let undo = view.undo.as_ref()?;
+            let pending = view.snapshot.unresolved_undo()?;
+            if pending.intent.undo_id != undo.undo_id {
+                return None;
+            }
+            let mut lines = vec![Line::raw(format!(
+                "Interrupted undo of turn {}",
+                undo.target_turn_id
+            ))];
+            for (position, target) in pending.intent.targets.iter().enumerate() {
+                let marker = if position == *index { ">" } else { " " };
+                let observed = files
+                    .get(position)
+                    .map(|outcome| outcome.as_str())
+                    .unwrap_or("unknown");
+                let hint = undo
+                    .hints
+                    .iter()
+                    .find(|(path, _)| *path == target.path)
+                    .map(|(_, hint)| undo_hint_text(hint))
+                    .unwrap_or("no evidence");
+                lines.push(Line::raw(format!(
+                    "{marker} {} · now: {hint} · state: {observed}",
+                    bounded(&target.path, 60)
+                )));
+            }
+            lines.push(Line::raw(""));
+            for choice in [
+                super::UndoResolveMode::AcknowledgedUnknown,
+                super::UndoResolveMode::Observed,
+            ] {
+                lines.push(Line::styled(
+                    format!(
+                        " ({}) {}",
+                        if choice == *mode { "●" } else { " " },
+                        choice.label()
+                    ),
+                    if choice == *mode {
+                        app.theme.style(Role::Warning)
+                    } else {
+                        dim
+                    },
+                ));
+            }
+            lines.push(Line::raw(""));
+            let note = if input.is_empty() {
+                "(type a note)".to_owned()
+            } else {
+                bounded(input, 160)
+            };
+            lines.push(Line::raw(format!("note: {note}")));
+            lines.push(Line::styled(
+                "↑↓ file · r restored · x removed · o other · u unknown · ←→ choice · Enter submit",
+                dim,
+            ));
+            Some(("resolve interrupted undo".into(), lines))
+        }
         // The session screen owns these dialogs and draws them itself.
         Modal::ConfirmDelete { .. } | Modal::ExportPath { .. } | Modal::Notice { .. } => None,
         Modal::ConfirmQuit => Some((
@@ -489,6 +593,17 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
                 ),
             ],
         )),
+    }
+}
+
+/// The ephemeral evidence category of one undo target.
+fn undo_hint_text(hint: &harness_core::runtime::RecoveryHint) -> &'static str {
+    match hint {
+        harness_core::runtime::RecoveryHint::MatchesPostImage => "matches post-image",
+        harness_core::runtime::RecoveryHint::MatchesPreImage => "matches pre-image",
+        harness_core::runtime::RecoveryHint::ChangedSince => "changed since",
+        harness_core::runtime::RecoveryHint::Missing => "missing",
+        harness_core::runtime::RecoveryHint::Unavailable { .. } => "unavailable",
     }
 }
 

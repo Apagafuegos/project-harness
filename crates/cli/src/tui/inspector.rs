@@ -533,6 +533,23 @@ impl App {
                 short(&control.control_entry_id)
             )));
         }
+        // Recorded undos: the note the model reads, with the paths it names.
+        rows.push(Line::raw("Undos (recorded notes on this branch):"));
+        if report.undos.is_empty() {
+            rows.push(Line::raw(" none"));
+        }
+        for undo in &report.undos {
+            rows.push(Line::raw(format!(
+                " {} undo={} turn={} note={}",
+                undo.outcome.as_str(),
+                suffix(undo.undo_id.as_str()),
+                short_turn(&undo.target_turn_id),
+                short(&undo.note_entry_id)
+            )));
+            for path in &undo.paths {
+                rows.push(Line::raw(format!("   {}", bounded(path, 100))));
+            }
+        }
         rows.push(Line::raw(format!("Fingerprint: {}", report.fingerprint)));
         rows.push(Line::raw(format!(
             "Configuration: {}",
@@ -562,7 +579,10 @@ fn short(id: &EntryId) -> String {
         .collect()
 }
 fn short_turn(id: &TurnId) -> String {
-    let text = id.to_string();
+    suffix(id.as_str())
+}
+/// The last eight characters identify one UUIDv7 in a report line.
+fn suffix(text: &str) -> String {
     text.chars()
         .rev()
         .take(8)

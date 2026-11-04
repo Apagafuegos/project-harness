@@ -7,7 +7,9 @@ The runtime performs recovery commits after open
 ([decision 0007](../decisions/0007-startup-recovery.md)); sequential tool intent,
 results and explicit uncertainty recovery are implemented under
 [0010](../decisions/0010-tool-pipeline.md) and
-[0013](../decisions/0013-tool-recovery.md).
+[0013](../decisions/0013-tool-recovery.md). Durable undo of one turn's trusted
+file edits is implemented under
+[0032](../decisions/0032-undo-agent-edits.md) as record version 4.
 
 ## Inputs and output
 
@@ -18,19 +20,24 @@ Artifacts hold large output, media, and protected native state by content hash.
 In-memory indexes and caches are rebuildable; a second database is not authority.
 
 Tree entries hold user/assistant content (including tool-call blocks), tool
-results, model changes, compactions, and whole-turn context controls. Audit
-events hold approvals, execution intent, state transitions, uncertainty, and
-explicit recovery. Token-by-token
+results, model changes, compactions, whole-turn context controls, and recorded
+undo notes. Audit events hold approvals, execution intent, state transitions,
+uncertainty, explicit recovery, and the intent/uncertainty/result of an undo. Token-by-token
 deltas remain transient in v0.1; completed/partial response snapshots are stored.
 
 ## Guarantees
 
 - Entries are immutable and parent-linked; siblings preserve different histories.
+- Records are versioned: readers accept 1..=4, writers emit 4, and opening never
+  migrates or rewrites a record.
 - The active head is durably recorded. Navigation does not assume the last
   physically appended entry is selected, and does not undo filesystem effects.
 - One writer is enforced by a lock; timestamps are not the ordering key.
 - Records are versioned, ordered, uniquely identified, and validated on load.
   Parent/head/call references and state transitions must be valid.
+- An undo is all-or-nothing on preflight, is never retried or rolled back
+  automatically, and its terminal note/result pair is atomic. An unresolved
+  undo blocks new work until the user resolves it.
 - Important intent is synced before a risky operation begins. A durable result
   precedes its use in subsequent inference.
 - Incomplete trailing bytes are detected and reported. Committed corruption is
@@ -51,12 +58,28 @@ writer poisoning on I/O failure, explicit quarantined-tail repair, artifact publ
 command deduplication, and persisted execution uncertainty. J01–J03 exercise
 these storage behaviors, including injected I/O failures. R01 is covered by the
 runtime/driver/tool-host crash tests; the store itself never executes a tool.
-Readers accept record versions 1–3; writers emit v3, without rewriting old
-records ([ADR 0025](../decisions/0025-context-controls.md)). See the
+Readers accept record versions 1–4; writers emit v4, without rewriting old
+records ([ADR 0025](../decisions/0025-context-controls.md),
+[ADR 0032](../decisions/0032-undo-agent-edits.md)). See the
 [usage guide](../session-storage.md) for explicit recovery and platform limits.
 
 Context projection and summarization are a separate [contract 5](context.md).
 SQLite is not an alternative initial store under the agreed v0.1 architecture.
+
+### Undo of agent file edits
+
+A trusted `write`/`edit` captures its target's pre-image bytes (or absence) and
+ordinary mode before the intent that binds them is committed, and records the
+exact post-image digest. The undo of one finished turn restores those images.
+Storage enforces the record shapes and the state table in
+[0032](../decisions/0032-undo-agent-edits.md): the intent is a retained,
+intent-only commit; uncertainty is a retained commit; the terminal commit is one
+advancing `undo_note` with one matching `undo_result`. Consumption of the target
+turn is branch-derived from the note, never a cursor. Bash and every other
+effect are not reversed, and the omitted calls are named in the report.
+Pre-images are ordinary artifacts: referenced for their whole lifetime, listed
+by export and GC from the intent itself, and never included in model text,
+output captures or Markdown.
 
 ## Maintenance and limits
 

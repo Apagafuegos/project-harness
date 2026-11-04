@@ -442,7 +442,7 @@ fn canonical_projection_bytes_are_compact_with_sorted_argument_keys() {
             r#""call_id":"019a0000-0000-7000-8000-000000000066","name":"read","#,
             r#""arguments":{"a":{"b":3,"y":2},"z":1},"provider_call_id":null}]}],"#,
             r#""model":{"provider_instance":"mock","model":"scripted"},"tools":[],"#,
-            r#""options":{"max_output_tokens":4096,"reasoning_effort":null,"provider_options":{}},"projection_version":5}"#
+            r#""options":{"max_output_tokens":4096,"reasoning_effort":null,"provider_options":{}},"projection_version":6}"#
         )
     );
     assert_eq!(fingerprint(&input), Digest::of(&bytes));
@@ -671,6 +671,7 @@ impl Journal {
                                 provenance: Provenance::Runtime,
                                 artifacts: vec![],
                                 code: Some("tools_unavailable".into()),
+                                file_effect: None,
                             },
                         },
                     }),
@@ -1733,7 +1734,7 @@ fn media_blocks_use_flat_estimates() {
 /// v2 added fields the model never sees: the same entries written as v1 or
 /// as v2 build byte-identical reports, fingerprints and items.
 #[test]
-fn entries_written_before_v3_project_identically() {
+fn entries_written_before_v4_project_identically() {
     let mut journal = Journal::new();
     journal.user(vec![text("use tools")]);
     let first = CallId::new();
@@ -1755,16 +1756,64 @@ fn entries_written_before_v3_project_identically() {
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_slice::<Value>(l).unwrap()["record"].clone())
         .collect();
-    assert!(v3.iter().all(|r| r["version"] == 3));
+    assert!(v3.iter().all(|r| r["version"] == 4));
     // Give the responses a fingerprint too, so every v2 field is set.
     let mut with_fingerprints = v3.clone();
     let mut v1 = v3.clone();
     let mut v2 = v3.clone();
     for record in &mut v2 {
         record["version"] = json!(2);
+        // v2 predates the v4 image and effect fields.
+        if let Some(entries) = record
+            .pointer_mut("/payload/entries")
+            .and_then(Value::as_array_mut)
+        {
+            for entry in entries {
+                if let Some(metadata) = entry
+                    .pointer_mut("/payload/result/metadata")
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove("file_effect");
+                }
+            }
+        }
+        if let Some(events) = record
+            .pointer_mut("/payload/events")
+            .and_then(Value::as_array_mut)
+        {
+            for event in events {
+                if event["kind"] == "execution_intent" {
+                    event.as_object_mut().unwrap().remove("file_image");
+                }
+            }
+        }
     }
     for (v2, v1) in with_fingerprints.iter_mut().zip(&mut v1) {
         v1["version"] = json!(1);
+        if let Some(entries) = v1
+            .pointer_mut("/payload/entries")
+            .and_then(Value::as_array_mut)
+        {
+            for entry in entries {
+                if let Some(metadata) = entry
+                    .pointer_mut("/payload/result/metadata")
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove("file_effect");
+                }
+            }
+        }
+        for event in v1
+            .pointer_mut("/payload/events")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if event["kind"] == "execution_intent" {
+                event.as_object_mut().unwrap().remove("file_image");
+                event.as_object_mut().unwrap().remove("effects");
+            }
+        }
         let (Some(Value::Array(new)), Some(Value::Array(old))) = (
             v2.pointer_mut("/payload/entries"),
             v1.pointer_mut("/payload/entries"),

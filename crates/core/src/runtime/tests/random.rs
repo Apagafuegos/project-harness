@@ -391,6 +391,7 @@ fn resolution(d: &Driver, rng: &mut Rng) -> Command {
                 ToolStatus::Uncertain,
             ]),
             text: rng.pick(&["it ran", "nothing changed", ""]).to_string(),
+            file_effect: None,
         }
     };
     Command::ResolveUncertain {
@@ -952,7 +953,7 @@ fn tool_interleavings(d: &mut Driver, rng: &mut Rng, seed: u64) {
             } // result written, lost, or torn
             continue;
         }
-        if d.complete() || d.plan() {
+        if d.complete() || d.plan() || d.capture() {
             continue;
         }
         match d.runtime.phase() {

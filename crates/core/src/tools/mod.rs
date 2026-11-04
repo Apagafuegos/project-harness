@@ -14,7 +14,9 @@ pub mod sandbox;
 mod search;
 
 pub use builtin::{Registry, Tool, ToolDefinition, ValidatedOperation};
-pub use exec::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet};
+pub use exec::{
+    AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet, UndoExecution,
+};
 pub use fs::{FsProtectedPaths, FsUnavailable, FsWorkspace};
 pub use path::WorkspacePath;
 pub use plan::{

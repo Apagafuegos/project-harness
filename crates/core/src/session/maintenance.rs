@@ -198,6 +198,9 @@ fn record_references(record: &Record, out: &mut BTreeSet<Digest>) {
                         out.insert(compaction.source_manifest.sha256.clone());
                         out.insert(compaction.configuration_fingerprint.clone());
                     }
+                    // A note names entries and turns only: it references no
+                    // artifact, and never pre-image bytes.
+                    EntryPayload::UndoNote(_) => (),
                     EntryPayload::ModelChanged(_) | EntryPayload::ContextControl(_) => (),
                 }
             }
@@ -217,6 +220,24 @@ fn record_references(record: &Record, out: &mut BTreeSet<Digest>) {
                     }
                     JournalEvent::TailRepaired(repair) => {
                         out.insert(repair.quarantine_artifact.sha256.clone());
+                    }
+                    // Captured pre-images are referenced directly here, not
+                    // only through the plan artifact, so collection keeps the
+                    // bytes a later undo would restore.
+                    JournalEvent::ExecutionIntent(intent) => {
+                        if let Some(image) = &intent.file_image
+                            && let Some(pre) = &image.pre_image
+                        {
+                            out.insert(pre.sha256.clone());
+                        }
+                    }
+                    JournalEvent::UndoIntent(intent) => {
+                        out.insert(intent.configuration.sha256.clone());
+                        for target in &intent.targets {
+                            if let Some(pre) = &target.pre_image {
+                                out.insert(pre.sha256.clone());
+                            }
+                        }
                     }
                     _ => (),
                 }
@@ -850,6 +871,12 @@ fn entry_section(out: &mut String, snapshot: &SessionSnapshot, stored: &StoredEn
                 portability_name(change.portability)
             ),
         ),
+        // The recorded note text only: a note names paths and calls, never
+        // pre-image bytes, artifact references or commands.
+        EntryPayload::UndoNote(note) => {
+            heading(out, level, "Undo");
+            fenced(out, "text", &note.text);
+        }
     }
 }
 

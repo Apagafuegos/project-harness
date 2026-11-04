@@ -455,6 +455,7 @@ fn print_journal(snapshot: &SessionSnapshot) {
             EntryPayload::ContextControl(c) => {
                 format!("context_control({:?})", c.mode).to_lowercase()
             }
+            EntryPayload::UndoNote(note) => format!("undo_note({:?})", note.outcome).to_lowercase(),
         };
         lines[stored.sequence as usize - 1].push(kind);
     }

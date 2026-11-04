@@ -92,8 +92,20 @@ pub fn select_span(
             .position(|s| &s.entry.id == id)
             .expect("validated ancestry")
     };
-    let previous = active.last();
-    let start = previous.map_or(0, |(_, c)| position(&c.covered_entry_ids[0]));
+    // The latest recorded undo note is a coverage barrier: no span may start at
+    // or before it, and no summary that starts before it may be rolled.
+    let barrier = branch
+        .iter()
+        .rposition(|s| matches!(s.entry.payload, EntryPayload::UndoNote(_)));
+    let eligible: Vec<_> = active
+        .iter()
+        .copied()
+        .filter(|(_, c)| barrier.is_none_or(|barrier| position(&c.covered_entry_ids[0]) > barrier))
+        .collect();
+    let previous = eligible.last();
+    let start = previous.map_or(barrier.map_or(0, |barrier| barrier + 1), |(_, c)| {
+        position(&c.covered_entry_ids[0])
+    });
     let new_start = previous.map_or(start, |(_, c)| {
         position(c.covered_entry_ids.last().expect("nonempty coverage")) + 1
     });
@@ -140,6 +152,17 @@ pub fn select_span(
                 }
             }
         }
+    }
+    // The undo-note barrier can sit after the last eligible turn: nothing may
+    // be covered then, so selection reports that instead of an empty slice.
+    if barrier.is_some() && start >= end {
+        if let Some(reason) = blocked {
+            return Err(reason);
+        }
+        return Err(match previous {
+            Some(_) => NotEligible::NothingNewSinceSummary,
+            None => NotEligible::OnlyRecentTurns,
+        });
     }
     // Effective modes folded over this ancestry only, so a sibling's control
     // never applies. Decision 14: coverage is the selected span minus every

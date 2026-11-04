@@ -40,6 +40,7 @@ async fn r01_write_file_states_and_edit_reverse_hint_through_real_fs_reopen() {
             ToolHost {
                 workspace,
                 executors: vec![executor.clone()],
+                files: None,
             },
             POLICY,
             &[(tool, args), ("read", json!({"path":"a"}))],
@@ -120,6 +121,13 @@ impl WorkspaceView for HintWorkspace {
     fn read_text(&self, path: &WorkspacePath, max: u64) -> Result<String, Refusal> {
         self.inner.read_text(path, max)
     }
+    fn capture(
+        &self,
+        plan: &crate::tools::Plan,
+        artifacts: &crate::session::DataRoot,
+    ) -> Result<crate::session::FileImage, Refusal> {
+        self.inner.capture(plan, artifacts)
+    }
 }
 struct Release(Arc<Hold>);
 impl Drop for Release {
@@ -145,6 +153,7 @@ async fn blocked_hint_does_not_delay_resolution_and_stale_epoch_is_ignored() {
         ToolHost {
             workspace,
             executors: vec![executor.clone()],
+            files: None,
         },
         POLICY,
         &[
@@ -209,6 +218,7 @@ async fn hint_panic_is_unavailable_not_a_session_fault() {
         ToolHost {
             workspace,
             executors: vec![executor],
+            files: None,
         },
         POLICY,
         &[("write", json!({"path":"new","text":"after"}))],

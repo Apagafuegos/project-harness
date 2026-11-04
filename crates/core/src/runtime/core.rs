@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 mod compaction;
 #[path = "pipeline.rs"]
 mod pipeline;
-use crate::tools::{PolicyError, PolicySnapshot, ToolSet};
+use crate::tools::{PolicyError, PolicySnapshot, ToolSet, UndoExecution};
 use compaction::{Generation, PendingStart};
 use pipeline::Activity;
 
@@ -18,12 +18,13 @@ use crate::context::{
 };
 use crate::session::{
     AssistantResponse, CallRef, CommandId, Commit, CommitAck, ContentBlock, ContextControl,
-    ContextMode, Digest, Entry, EntryId, EntryPayload, ExecutionUncertain, HeadChange, HeadReason,
-    InvocationId, JournalEvent, MAX_COUNTER, ModelChanged, ModelError, ModelErrorCode, ModelRef,
-    Portability, Provenance, RecoveryResolved, Resolution, ResponseOutcome, ResultCode,
-    RuntimeState, SessionSnapshot, StateChanged, ToolMetadata, ToolResult, ToolResultEntry,
-    ToolStatus, TurnFinished, TurnId, TurnOutcome, TurnStarted, UnresolvedInvocation, UserMessage,
-    codec, store,
+    ContextMode, Digest, Entry, EntryId, EntryPayload, ExecutionUncertain, FileEffect, FileOutcome,
+    HeadChange, HeadReason, InvocationId, JournalEvent, MAX_COUNTER, ModelChanged, ModelError,
+    ModelErrorCode, ModelRef, Portability, Provenance, RecoveryResolved, Resolution,
+    ResponseOutcome, ResultCode, RuntimeState, SessionSnapshot, StateChanged, ToolMetadata,
+    ToolResult, ToolResultEntry, ToolStatus, TurnFinished, TurnId, TurnOutcome, TurnStarted,
+    UndoFileOutcome, UndoId, UndoIntent, UndoNote, UndoOutcome, UndoResult, UndoSelection,
+    UndoTarget, UndoUncertain, UnresolvedInvocation, UserMessage, codec, store,
 };
 
 use super::{
@@ -49,6 +50,8 @@ const RESTART_UNCERTAIN: &str =
     "process_restart: the process stopped after the execution intent; the outcome is unknown";
 /// Text of the result recording a user's acknowledged unknown outcome.
 const ACKNOWLEDGED_UNKNOWN: &str = "uncertain: the user acknowledged that the outcome is unknown";
+/// Reason recorded with `undo_uncertain` for an undo intent without a result.
+const RESTART_UNDO_UNCERTAIN: &str = "process_restart: the process stopped after the undo intent; the restoration outcome is unknown";
 
 /// The pure agent runtime. `step` performs no I/O, reads no clock and creates
 /// no identity except through `Env`; everything it does is in the effects.
@@ -84,6 +87,26 @@ pub struct Runtime {
     generation: Option<Generation>,
     preview: Option<(EntryId, crate::context::compaction::CompactionPreview)>,
     invalid_preview: Option<(EntryId, &'static str)>,
+    /// The one undo in progress: commit A, restoration, or nothing.
+    undo_activity: Option<UndoActivity>,
+}
+
+/// One undo's local progress, never persisted.
+#[derive(Debug)]
+enum UndoActivity {
+    /// Commit A is in flight.
+    Staging {
+        undo_id: UndoId,
+        request: RequestId,
+        intent: Box<UndoIntent>,
+    },
+    /// The sequential executor is restoring the target set.
+    Restoring {
+        undo_id: UndoId,
+        request: RequestId,
+        intent: Box<UndoIntent>,
+        token: UndoToken,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,6 +137,18 @@ struct InFlight {
     /// New decoded configuration installed only after acknowledgement.
     configuration: Option<SessionConfiguration>,
     compaction_start: Option<PendingStart>,
+    /// A terminal undo commit: answer its request once it is durable.
+    undo_close: Option<UndoClose>,
+    /// An undo uncertainty commit: enter resolution once it is durable.
+    undo_uncertain: Option<(RequestId, UndoId, TurnId)>,
+}
+
+/// The request an undo's terminal commit answers.
+#[derive(Debug)]
+struct UndoClose {
+    request: Option<RequestId>,
+    outcome: Option<(UndoOutcome, Vec<UndoFileOutcome>)>,
+    refusal: Option<Rejection>,
 }
 
 #[derive(Debug)]
@@ -271,6 +306,7 @@ impl Runtime {
             partial: None,
             awaiting: Vec::new(),
             pending_approval: None,
+            undo: None,
         };
         Self {
             config,
@@ -296,6 +332,7 @@ impl Runtime {
             generation: None,
             preview: None,
             invalid_preview: None,
+            undo_activity: None,
         }
     }
 
@@ -439,6 +476,22 @@ impl Runtime {
             Input::ProviderEnded { inference } => self.provider_ended(inference, env),
             Input::TimerFired { timer } => self.timer(timer, env),
             Input::Planned { token, result } => self.planned(token, result, env),
+            Input::Captured { token, result } => self.captured(token, result, env),
+            Input::UndoFinished { token, result } => self.undo_finished(token, result, env),
+            Input::UndoHints {
+                token,
+                undo_id,
+                hints,
+            } => {
+                if self.mode == Mode::AwaitingResolution && self.hint_token == Some(token) {
+                    self.hint_token = None;
+                    if Self::uncertain_undo(self.snapshot())
+                        .is_some_and(|undo| undo.intent.undo_id == undo_id)
+                    {
+                        self.emit(EventKind::UndoHints { undo_id, hints });
+                    }
+                }
+            }
             Input::ToolFinished { token, outcome } => self.tool_finished(token, outcome, env),
             Input::Hints { token, hints } => {
                 if self.mode == Mode::AwaitingResolution && self.hint_token == Some(token) {
@@ -509,6 +562,26 @@ impl Runtime {
                 invocation_id,
                 resolution,
             } => self.resolve_uncertain(request, invocation_id, resolution, env),
+            Command::PreviewUndo => self.preview_undo(request),
+            Command::Undo {
+                command_id,
+                expected_sequence,
+                expected_head,
+                expected_configuration,
+                target_turn_id,
+            } => self.undo(
+                request,
+                command_id,
+                expected_sequence,
+                expected_head,
+                expected_configuration,
+                target_turn_id,
+                env,
+            ),
+            Command::ResolveUndo {
+                undo_id,
+                resolution,
+            } => self.resolve_undo(request, undo_id, resolution, env),
         };
         if let Some(result) = result {
             self.reply(request, result);
@@ -523,6 +596,8 @@ impl Runtime {
             Mode::AwaitingResolution => Err(Rejection::ResolutionRequired),
             Mode::Ready
                 if self.in_flight.is_some()
+                    || self.undo_activity.is_some()
+                    || self.snapshot().unresolved_undo().is_some()
                     || self.verifying.is_some()
                     || self.snapshot().active_turn().is_some()
                     || self
@@ -961,6 +1036,41 @@ impl Runtime {
             return;
         }
         let snapshot = self.snapshot().clone();
+        // An undo intent without a result is uncertain, before any ordinary turn
+        // recovery and whatever the files now look like. No executor is
+        // redispatched and nothing is inspected as a decision.
+        if let Some(undo) = snapshot.unresolved_undo() {
+            if !undo.uncertain {
+                return self.persist_recovery(
+                    audit(
+                        &snapshot,
+                        vec![JournalEvent::UndoUncertain(UndoUncertain {
+                            undo_id: undo.intent.undo_id.clone(),
+                            reason: RESTART_UNDO_UNCERTAIN.into(),
+                        })],
+                    ),
+                    None,
+                    Vec::new(),
+                    env,
+                );
+            }
+            self.mode = Mode::AwaitingResolution;
+            self.sync_phase();
+            let shown = self
+                .view
+                .view()
+                .undo
+                .as_ref()
+                .is_some_and(|shown| shown.undo_id == undo.intent.undo_id);
+            if !shown {
+                self.emit(EventKind::UndoUncertain {
+                    undo_id: undo.intent.undo_id.clone(),
+                    target_turn_id: undo.intent.target_turn_id.clone(),
+                });
+                self.request_undo_hints(&undo);
+            }
+            return;
+        }
         let unresolved = snapshot.unresolved_invocations();
         let Ok(pending) = snapshot.0.pending(snapshot.head()).map(<[CallRef]>::to_vec) else {
             return self.fault(FaultCause::Internal("recovery_head_unknown"));
@@ -1206,8 +1316,13 @@ impl Runtime {
         if pending.first() != Some(&intent.call) {
             return Some(Err(Rejection::Invalid("invocation_not_next")));
         }
-        let (status, provenance, text, kind, note) = match resolution {
-            UserResolution::Observed { status, text } => {
+        let captured = intent.file_image.is_some();
+        let (status, provenance, text, kind, note, file_effect) = match resolution {
+            UserResolution::Observed {
+                status,
+                text,
+                file_effect,
+            } => {
                 if status == ToolStatus::Uncertain {
                     return Some(Err(Rejection::Invalid("observed_status_uncertain")));
                 }
@@ -1217,6 +1332,16 @@ impl Runtime {
                 if text.len() > self.config.max_user_bytes {
                     return Some(Err(Rejection::Invalid("content_too_large")));
                 }
+                // Only a user statement may classify a captured mutation, and
+                // only as applied or not applied.
+                let classified = match file_effect {
+                    Some(FileEffect::Applied | FileEffect::NotApplied) if captured => file_effect,
+                    Some(_) => return Some(Err(Rejection::Invalid("invalid_file_effect"))),
+                    None if captured => {
+                        return Some(Err(Rejection::Invalid("file_effect_required")));
+                    }
+                    None => None,
+                };
                 let note = "the user observed the outcome";
                 (
                     status,
@@ -1224,6 +1349,7 @@ impl Runtime {
                     text,
                     Resolution::Observed,
                     note,
+                    classified,
                 )
             }
             UserResolution::AcknowledgedUnknown => (
@@ -1232,6 +1358,7 @@ impl Runtime {
                 ACKNOWLEDGED_UNKNOWN.to_owned(),
                 Resolution::AcknowledgedUnknown,
                 "the user acknowledged that the outcome is unknown",
+                captured.then_some(FileEffect::Unknown),
             ),
         };
         let turn = intent.turn_id.clone();
@@ -1243,7 +1370,10 @@ impl Runtime {
                     invocation_id: Some(invocation_id.clone()),
                     status,
                     content: vec![ContentBlock::Text { text }],
-                    metadata: metadata(provenance, None),
+                    metadata: ToolMetadata {
+                        file_effect,
+                        ..metadata(provenance, None)
+                    },
                 },
             }),
         )];
@@ -1292,6 +1422,617 @@ impl Runtime {
         None
     }
 
+    // ----- undo -----------------------------------------------------------
+
+    /// The ephemeral preview of the undo this head would select. Read-only: it
+    /// records nothing and never asks for an approval.
+    fn preview_undo(&mut self, _request: RequestId) -> Option<Result<Accepted, Rejection>> {
+        if self.mode == Mode::Faulted {
+            return Some(Err(Rejection::Faulted));
+        }
+        let snapshot = self.snapshot().clone();
+        let (turn_id, targets, omitted) = match self.undo_selection(&snapshot)? {
+            Ok(selection) => selection,
+            Err(rejection) => return Some(Err(rejection)),
+        };
+        Some(Ok(Accepted::UndoPreviewed {
+            preview: Box::new(UndoPreview {
+                undo_id: UndoId::new(),
+                target_turn_id: turn_id,
+                head: snapshot.head().cloned(),
+                sequence: snapshot.sequence(),
+                configuration: snapshot.configuration().sha256.clone(),
+                targets: targets
+                    .iter()
+                    .map(|target| UndoPreviewTarget {
+                        path: target.path.clone(),
+                        restores: target.pre_image.is_some(),
+                        bytes: target.pre_image.as_ref().map(|pre| pre.bytes),
+                    })
+                    .collect(),
+                omitted: self.omitted_display(&snapshot, &omitted),
+            }),
+        }))
+    }
+
+    /// Resolve the selection for an undo request, or the refusal that stops it.
+    #[allow(clippy::type_complexity)]
+    fn undo_selection(
+        &self,
+        snapshot: &SessionSnapshot,
+    ) -> Option<Result<(TurnId, Vec<UndoTarget>, Vec<CallRef>), Rejection>> {
+        // A pending undo or tool uncertainty is the specific refusal.
+        if let Some(undo) = snapshot.unresolved_undo() {
+            return Some(Err(undo_refusal(
+                "undo_uncertain_pending",
+                format!("resolve pending undo {} before undo", undo.intent.undo_id),
+                Vec::new(),
+                Vec::new(),
+            )));
+        }
+        if let Some(invocation) = snapshot.unresolved_invocations().first() {
+            return Some(Err(undo_refusal(
+                "undo_uncertain_pending",
+                format!(
+                    "resolve pending tool intent {} before undo",
+                    invocation.intent.invocation_id
+                ),
+                Vec::new(),
+                Vec::new(),
+            )));
+        }
+        if let Err(rejection) = self.idle_check() {
+            return Some(Err(rejection));
+        }
+        match snapshot.select_undo() {
+            Err(_) => Some(Err(Rejection::Undo {
+                code: "undo_conflict",
+                detail: "unknown head".into(),
+                conflicts: Vec::new(),
+                omitted: Vec::new(),
+            })),
+            Ok(UndoSelection::Candidate {
+                turn_id,
+                targets,
+                omitted_calls,
+            }) => Some(Ok((turn_id, targets, omitted_calls))),
+            Ok(UndoSelection::Nothing { omitted_calls }) => Some(Err(undo_refusal(
+                "undo_nothing",
+                "no unconsumed trusted file-edit turn on the active branch".into(),
+                Vec::new(),
+                self.omitted_display(snapshot, &omitted_calls),
+            ))),
+            Ok(UndoSelection::Legacy(turn)) => Some(Err(undo_refusal(
+                "undo_unavailable_legacy",
+                format!(
+                    "turn {turn} has no complete stored pre-images; turns recorded before \
+                     undo support cannot be undone."
+                ),
+                Vec::new(),
+                Vec::new(),
+            ))),
+            Ok(UndoSelection::UnknownEffect(turn)) => Some(Err(undo_refusal(
+                "undo_uncertain_effect",
+                format!(
+                    "turn {turn} contains an effect whose application is unknown; manual \
+                     reconciliation cannot upgrade the immutable result"
+                ),
+                Vec::new(),
+                Vec::new(),
+            ))),
+            Ok(UndoSelection::Incomplete(turn)) => Some(Err(undo_refusal(
+                "undo_incomplete_turn",
+                format!("selected head does not contain the whole finished target turn {turn}"),
+                Vec::new(),
+                Vec::new(),
+            ))),
+            Ok(UndoSelection::Conflict(mut conflicts)) => {
+                conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+                Some(Err(undo_refusal(
+                    "undo_conflict",
+                    String::new(),
+                    conflicts,
+                    Vec::new(),
+                )))
+            }
+        }
+    }
+
+    /// The displayed name, arguments and status of each omitted call.
+    fn omitted_display(
+        &self,
+        snapshot: &SessionSnapshot,
+        calls: &[CallRef],
+    ) -> Vec<UndoOmittedCall> {
+        calls
+            .iter()
+            .filter_map(|call| {
+                let stored = snapshot.entry(&call.response_entry_id)?;
+                let EntryPayload::AssistantResponse(response) = &stored.entry.payload else {
+                    return None;
+                };
+                let (tool, arguments) = response.content.iter().find_map(|block| match block {
+                    ContentBlock::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } if call_id == &call.call_id => Some((
+                        name.clone(),
+                        serde_json::to_string(&serde_json::Value::Object(arguments.clone()))
+                            .unwrap_or_default(),
+                    )),
+                    _ => None,
+                })?;
+                let status = snapshot
+                    .entries()
+                    .filter_map(|(_, stored)| match &stored.entry.payload {
+                        EntryPayload::ToolResult(result) if &result.result.call == call => {
+                            Some(result.result.status)
+                        }
+                        _ => None,
+                    })
+                    .next();
+                Some(UndoOmittedCall {
+                    call: call.clone(),
+                    tool,
+                    arguments: bounded_text(&arguments, 400),
+                    status,
+                })
+            })
+            .collect()
+    }
+
+    /// Commit A of an undo: exactly one retained `undo_intent`, bound to the
+    /// command so a lost acknowledgement cannot select another turn.
+    #[allow(clippy::too_many_arguments)]
+    fn undo(
+        &mut self,
+        request: RequestId,
+        command_id: CommandId,
+        expected_sequence: u64,
+        expected_head: Option<EntryId>,
+        expected_configuration: Digest,
+        target_turn_id: TurnId,
+        env: &mut dyn Env,
+    ) -> Option<Result<Accepted, Rejection>> {
+        if self.mode == Mode::Faulted {
+            return Some(Err(Rejection::Faulted));
+        }
+        let snapshot = self.snapshot().clone();
+        let command = json!({
+            "kind": "undo",
+            "expected_sequence": expected_sequence,
+            "expected_head": expected_head,
+            "expected_configuration": expected_configuration,
+            "target_turn_id": target_turn_id,
+        });
+        let Ok(normalized) = store::normalized_command(&command) else {
+            return Some(Err(Rejection::Invalid("content_too_large")));
+        };
+        let fingerprint = Digest::of(&normalized);
+        // A retried command learns its original outcome; a receipt is never
+        // permission to dispatch an intent again.
+        if let Some(receipt) = snapshot.command_receipt(&command_id) {
+            if receipt.fingerprint != fingerprint {
+                return Some(Err(Rejection::StaleCommand));
+            }
+            let undo_id = receipt.commit.events.iter().find_map(|event| match event {
+                JournalEvent::UndoIntent(intent) => Some(intent.undo_id.clone()),
+                _ => None,
+            });
+            return Some(match undo_id {
+                Some(undo_id) => match undo_outcome(&snapshot, &undo_id) {
+                    Some((outcome, files)) => Ok(Accepted::UndoCompleted {
+                        undo_id,
+                        outcome,
+                        files,
+                        ack: receipt.acknowledgement.clone(),
+                    }),
+                    None => Err(undo_refusal(
+                        "undo_uncertain_pending",
+                        format!("the undo {undo_id} is still pending"),
+                        Vec::new(),
+                        Vec::new(),
+                    )),
+                },
+                None => Err(Rejection::StaleCommand),
+            });
+        }
+        if self.undo_activity.is_some() {
+            return Some(Err(Rejection::Busy));
+        }
+        // The request is bound to the preview the user confirmed.
+        if expected_sequence != snapshot.sequence()
+            || expected_head.as_ref() != snapshot.head()
+            || expected_configuration != snapshot.configuration().sha256
+        {
+            return Some(Err(undo_refusal(
+                "undo_stale_preview",
+                "session/head/configuration changed; preview again".into(),
+                Vec::new(),
+                Vec::new(),
+            )));
+        }
+        let (turn_id, targets, omitted_calls) = match self.undo_selection(&snapshot)? {
+            Ok(selection) => selection,
+            Err(rejection) => return Some(Err(rejection)),
+        };
+        if turn_id != target_turn_id {
+            // A stale preview never falls back to another turn.
+            return Some(Err(undo_refusal(
+                "undo_stale_preview",
+                "session/head/configuration changed; preview again".into(),
+                Vec::new(),
+                Vec::new(),
+            )));
+        }
+        let undo_id = env.undo_id();
+        if snapshot.has_identity(undo_id.as_str()) {
+            return Some(Err(Rejection::Invalid("duplicate_id")));
+        }
+        let intent = UndoIntent {
+            undo_id: undo_id.clone(),
+            target_turn_id,
+            anchor_head: snapshot.head().cloned(),
+            configuration: snapshot.configuration().clone(),
+            policy_revision: snapshot.policy_revision().into(),
+            targets,
+            omitted_calls,
+        };
+        self.undo_activity = Some(UndoActivity::Staging {
+            undo_id: undo_id.clone(),
+            request,
+            intent: Box::new(intent.clone()),
+        });
+        let commit = Commit {
+            command_id: Some(command_id.clone()),
+            command_fingerprint: Some(fingerprint),
+            head: HeadChange {
+                from: snapshot.head().cloned(),
+                to: snapshot.head().cloned(),
+                reason: HeadReason::Retain,
+            },
+            entries: Vec::new(),
+            events: vec![JournalEvent::UndoIntent(intent)],
+        };
+        self.persist(commit, idle_flight(), Some((command_id, command)), env);
+        None
+    }
+
+    /// After commit A: hand the whole target set to the sequential executor.
+    fn start_undo_restoration(&mut self, snapshot: &SessionSnapshot, env: &mut dyn Env) {
+        let workspace = snapshot.header().workspace.clone();
+        let Some(UndoActivity::Staging {
+            undo_id,
+            request,
+            intent,
+        }) = self.undo_activity.take()
+        else {
+            return;
+        };
+        let intent_targets = intent.targets.clone();
+        self.next_token += 1;
+        let token = UndoToken(self.next_token);
+        self.undo_activity = Some(UndoActivity::Restoring {
+            undo_id: undo_id.clone(),
+            request,
+            intent,
+            token,
+        });
+        // The durable intent just acknowledged is the authority for the target
+        // set: it was validated by storage against the same selection.
+        self.out.push(Effect::UndoRestore {
+            token,
+            workspace,
+            targets: intent_targets,
+        });
+        let _ = env;
+    }
+
+    /// The executor's report: succeed, refuse before any mutation, or record
+    /// uncertainty. Nothing here ever retries or rolls back.
+    fn undo_finished(&mut self, token: UndoToken, result: UndoExecution, env: &mut dyn Env) {
+        if self.mode != Mode::Ready {
+            return;
+        }
+        let Some(UndoActivity::Restoring {
+            undo_id,
+            request,
+            intent,
+            token: expected,
+        }) = self.undo_activity.take()
+        else {
+            return;
+        };
+        if expected != token {
+            self.undo_activity = Some(UndoActivity::Restoring {
+                undo_id,
+                request,
+                intent,
+                token: expected,
+            });
+            return;
+        }
+        let snapshot = self.snapshot().clone();
+        match result {
+            UndoExecution::Refused(mut conflicts) => {
+                conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+                let files: Vec<UndoFileOutcome> = intent
+                    .targets
+                    .iter()
+                    .map(|target| UndoFileOutcome {
+                        path: target.path.clone(),
+                        outcome: FileOutcome::Unchanged,
+                    })
+                    .collect();
+                self.close_undo(
+                    &snapshot,
+                    &intent,
+                    UndoOutcome::NotApplied,
+                    files,
+                    None,
+                    Some(undo_refusal(
+                        "undo_conflict",
+                        String::new(),
+                        conflicts,
+                        Vec::new(),
+                    )),
+                    request,
+                    env,
+                );
+            }
+            UndoExecution::Done { files, complete } => {
+                if complete {
+                    self.close_undo(
+                        &snapshot,
+                        &intent,
+                        UndoOutcome::Succeeded,
+                        files,
+                        None,
+                        None,
+                        request,
+                        env,
+                    );
+                } else {
+                    self.record_undo_uncertainty(
+                        &snapshot,
+                        &intent,
+                        "execution_error: a target may have changed before restoration stopped",
+                        request,
+                        env,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The terminal note/result commit, or an uncertainty record.
+    #[allow(clippy::too_many_arguments)]
+    fn close_undo(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        intent: &UndoIntent,
+        outcome: UndoOutcome,
+        files: Vec<UndoFileOutcome>,
+        resolution_note: Option<String>,
+        refusal: Option<Rejection>,
+        request: RequestId,
+        env: &mut dyn Env,
+    ) {
+        let entry_id = env.entry_id();
+        let omitted = self.omitted_pairs(snapshot, &intent.omitted_calls);
+        let text = crate::session::undo::note_text(
+            &intent.target_turn_id,
+            &intent.undo_id,
+            outcome,
+            &intent.targets,
+            &files,
+            &omitted,
+            resolution_note.as_deref(),
+        );
+        let note = UndoNote {
+            undo_id: intent.undo_id.clone(),
+            target_turn_id: intent.target_turn_id.clone(),
+            outcome,
+            text,
+        };
+        let entry = Entry {
+            id: entry_id.clone(),
+            parent_id: intent.anchor_head.clone(),
+            turn_id: None,
+            payload: EntryPayload::UndoNote(note),
+        };
+        let result = UndoResult {
+            undo_id: intent.undo_id.clone(),
+            outcome,
+            file_outcomes: files.clone(),
+            note_entry_id: entry_id,
+            resolution_note,
+        };
+        let commit = Commit {
+            command_id: None,
+            command_fingerprint: None,
+            head: HeadChange {
+                from: snapshot.head().cloned(),
+                to: Some(entry.id.clone()),
+                reason: HeadReason::Advance,
+            },
+            entries: vec![entry],
+            events: vec![JournalEvent::UndoResult(result)],
+        };
+        let mut flight = idle_flight();
+        flight.undo_close = Some(UndoClose {
+            request: Some(request),
+            outcome: Some((outcome, files)),
+            refusal,
+        });
+        let _ = snapshot;
+        self.persist(commit, flight, None, env);
+    }
+
+    fn record_undo_uncertainty(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        intent: &UndoIntent,
+        reason: &str,
+        request: RequestId,
+        env: &mut dyn Env,
+    ) {
+        let event = JournalEvent::UndoUncertain(UndoUncertain {
+            undo_id: intent.undo_id.clone(),
+            reason: reason.into(),
+        });
+        let commit = audit(snapshot, vec![event]);
+        let mut flight = idle_flight();
+        flight.undo_uncertain = Some((
+            request,
+            intent.undo_id.clone(),
+            intent.target_turn_id.clone(),
+        ));
+        self.persist(commit, flight, None, env);
+    }
+
+    /// The name and call of each omitted call, in intent order.
+    fn omitted_pairs(
+        &self,
+        snapshot: &SessionSnapshot,
+        calls: &[CallRef],
+    ) -> Vec<(CallRef, String)> {
+        self.omitted_display(snapshot, calls)
+            .into_iter()
+            .map(|item| (item.call, item.tool))
+            .collect()
+    }
+
+    /// Record the user's statement about an interrupted undo. It is accepted
+    /// only for the pending uncertain undo, after the executor is clean.
+    fn resolve_undo(
+        &mut self,
+        request: RequestId,
+        undo_id: UndoId,
+        resolution: UndoResolution,
+        env: &mut dyn Env,
+    ) -> Option<Result<Accepted, Rejection>> {
+        match self.mode {
+            Mode::Faulted => return Some(Err(Rejection::Faulted)),
+            Mode::Recovering => return Some(Err(Rejection::RecoveryRequired)),
+            Mode::Ready => return Some(Err(Rejection::Invalid("nothing_to_resolve"))),
+            Mode::AwaitingResolution => {}
+        }
+        if self.in_flight.is_some() || self.undo_activity.is_some() {
+            return Some(Err(Rejection::Busy));
+        }
+        let snapshot = self.snapshot().clone();
+        let Some(pending) = snapshot.unresolved_undo() else {
+            return Some(Err(Rejection::Invalid("unknown_undo")));
+        };
+        if pending.intent.undo_id != undo_id || !pending.uncertain {
+            return Some(Err(Rejection::Invalid("unknown_undo")));
+        }
+        let note: String = match &resolution {
+            UndoResolution::Observed { note, .. }
+            | UndoResolution::AcknowledgedUnknown { note } => note.clone(),
+        };
+        if note.is_empty() {
+            return Some(Err(Rejection::Invalid("empty_content")));
+        }
+        if note.len() > self.config.max_user_bytes {
+            return Some(Err(Rejection::Invalid("content_too_large")));
+        }
+        let (outcome, files) = match resolution {
+            UndoResolution::Observed { files, .. } => {
+                if files.len() != pending.intent.targets.len()
+                    || files
+                        .iter()
+                        .zip(&pending.intent.targets)
+                        .any(|(row, target)| row.path != target.path)
+                {
+                    return Some(Err(Rejection::Invalid("undo_rows_mismatch")));
+                }
+                (UndoOutcome::Observed, files)
+            }
+            UndoResolution::AcknowledgedUnknown { .. } => (
+                UndoOutcome::AcknowledgedUnknown,
+                pending
+                    .intent
+                    .targets
+                    .iter()
+                    .map(|target| UndoFileOutcome {
+                        path: target.path.clone(),
+                        outcome: FileOutcome::Unknown,
+                    })
+                    .collect(),
+            ),
+        };
+        self.hint_token = None;
+        let intent = pending.intent.clone();
+        let entry_id = env.entry_id();
+        let omitted = self.omitted_pairs(&snapshot, &intent.omitted_calls);
+        let text = crate::session::undo::note_text(
+            &intent.target_turn_id,
+            &intent.undo_id,
+            outcome,
+            &intent.targets,
+            &files,
+            &omitted,
+            Some(&note),
+        );
+        let note_entry = Entry {
+            id: entry_id.clone(),
+            parent_id: intent.anchor_head.clone(),
+            turn_id: None,
+            payload: EntryPayload::UndoNote(UndoNote {
+                undo_id: intent.undo_id.clone(),
+                target_turn_id: intent.target_turn_id.clone(),
+                outcome,
+                text,
+            }),
+        };
+        let result = UndoResult {
+            undo_id: intent.undo_id.clone(),
+            outcome,
+            file_outcomes: files,
+            note_entry_id: entry_id,
+            resolution_note: Some(note.clone()),
+        };
+        let commit = Commit {
+            command_id: None,
+            command_fingerprint: None,
+            head: HeadChange {
+                from: snapshot.head().cloned(),
+                to: Some(note_entry.id.clone()),
+                reason: HeadReason::Advance,
+            },
+            entries: vec![note_entry],
+            events: vec![JournalEvent::UndoResult(result)],
+        };
+        let mut flight = idle_flight();
+        flight.undo_close = Some(UndoClose {
+            request: Some(request),
+            outcome: None,
+            refusal: None,
+        });
+        self.persist(commit, flight, None, env);
+        None
+    }
+
+    /// The pending uncertain undo, if any, as recovery must handle it.
+    fn uncertain_undo(snapshot: &SessionSnapshot) -> Option<crate::session::UndoInProgress> {
+        snapshot.unresolved_undo().filter(|undo| undo.uncertain)
+    }
+
+    /// Ask the sequential executor for per-file evidence. Advisory only.
+    fn request_undo_hints(&mut self, undo: &crate::session::UndoInProgress) {
+        self.next_token += 1;
+        let token = HintToken(self.next_token);
+        self.hint_token = Some(token);
+        self.out.push(Effect::InspectUndo {
+            token,
+            targets: undo.intent.targets.clone(),
+        });
+    }
+
     // ----- storage answers ------------------------------------------------
 
     fn persisted(
@@ -1317,6 +2058,13 @@ impl Runtime {
             return self.fault(FaultCause::Internal("acknowledgement_mismatch"));
         }
         let in_flight = self.in_flight.take().expect("checked above");
+        let in_flight_undo_close = in_flight.undo_close;
+        let in_flight_undo_uncertain = in_flight.undo_uncertain;
+        // Commit A of an undo hands the whole target set to the executor only
+        // now that the intent that binds the images is durable.
+        if matches!(self.undo_activity, Some(UndoActivity::Staging { .. })) {
+            self.start_undo_restoration(&self.snapshot().clone(), env);
+        }
         self.emit(EventKind::Committed {
             ack: ack.clone(),
             snapshot,
@@ -1353,6 +2101,41 @@ impl Runtime {
             self.emit(EventKind::PartialCleared {
                 inference: inference.id,
             });
+        }
+        if let Some(close) = in_flight_undo_close {
+            let evidence = match &close.outcome {
+                Some((outcome, files)) => Ok(Accepted::UndoCompleted {
+                    undo_id: self
+                        .snapshot()
+                        .unresolved_undo()
+                        .map(|undo| undo.intent.undo_id.clone())
+                        .unwrap_or_else(|| {
+                            // The undo just resolved; name it from its note.
+                            undo_id_at_head(self.snapshot())
+                        }),
+                    outcome: *outcome,
+                    files: files.clone(),
+                    ack: ack.clone(),
+                }),
+                None => Ok(Accepted::UndoResolved {
+                    undo_id: undo_id_at_head(self.snapshot()),
+                    ack: ack.clone(),
+                }),
+            };
+            if let Some(request) = close.request {
+                match close.refusal {
+                    Some(refusal) => self.reply(request, Err(refusal)),
+                    None => self.reply(request, evidence),
+                }
+            }
+            self.emit(EventKind::UndoResolved {
+                undo_id: undo_id_at_head(self.snapshot()),
+            });
+        }
+        if let Some((request, undo_id, _turn)) = in_flight_undo_uncertain {
+            self.mode = Mode::Recovering;
+            let _ = request;
+            let _ = undo_id;
         }
         // Recovery plans its next step, or leaves it, from the new snapshot.
         let recovering = matches!(self.mode, Mode::Recovering | Mode::AwaitingResolution);
@@ -2489,6 +3272,65 @@ impl Recorded {
     }
 }
 
+/// The stable undo refusal shape.
+fn undo_refusal(
+    code: &'static str,
+    detail: String,
+    conflicts: Vec<crate::session::UndoConflict>,
+    omitted: Vec<UndoOmittedCall>,
+) -> Rejection {
+    Rejection::Undo {
+        code,
+        detail,
+        conflicts,
+        omitted,
+    }
+}
+
+/// The undo identity a terminal note at the head records.
+fn undo_id_at_head(snapshot: &SessionSnapshot) -> UndoId {
+    snapshot
+        .head()
+        .and_then(|head| snapshot.entry(head))
+        .and_then(|stored| match &stored.entry.payload {
+            EntryPayload::UndoNote(note) => Some(note.undo_id.clone()),
+            _ => None,
+        })
+        .or_else(|| {
+            snapshot
+                .unresolved_undo()
+                .map(|undo| undo.intent.undo_id.clone())
+        })
+        .unwrap_or_default()
+}
+
+/// The committed outcome of an undo, for a retried command's answer.
+fn undo_outcome(
+    snapshot: &SessionSnapshot,
+    undo_id: &UndoId,
+) -> Option<(UndoOutcome, Vec<UndoFileOutcome>)> {
+    snapshot.events().find_map(|(_, _, event)| match event {
+        JournalEvent::UndoResult(result) if result.undo_id == *undo_id => {
+            Some((result.outcome, result.file_outcomes.clone()))
+        }
+        _ => None,
+    })
+}
+
+/// Bound a display string without splitting a character.
+fn bounded_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let end = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= limit)
+        .last()
+        .unwrap_or(0);
+    format!("{}...", &text[..end])
+}
+
 fn phase(mode: Mode, snapshot: &SessionSnapshot) -> Phase {
     match mode {
         Mode::Ready => Phase::Durable(snapshot.state()),
@@ -2510,6 +3352,8 @@ fn idle_flight() -> InFlight {
         artifacts: Vec::new(),
         configuration: None,
         compaction_start: None,
+        undo_close: None,
+        undo_uncertain: None,
     }
 }
 
@@ -2521,6 +3365,7 @@ fn metadata(provenance: Provenance, code: Option<ResultCode>) -> ToolMetadata {
         provenance,
         artifacts: Vec::new(),
         code: code.map(|code| code.as_str().to_owned()),
+        file_effect: None,
     }
 }
 

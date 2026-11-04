@@ -151,6 +151,12 @@ const KEYS: &[Binding] = &[
     ),
     binding!(
         "Context",
+        "Ctrl-Z",
+        "undo the newest agent turn's file edits after y/N",
+        (Char('z'), M::CONTROL)
+    ),
+    binding!(
+        "Context",
         "Ctrl-K",
         "inspector: m preview model, c preview compaction, Enter commit shown preview",
         (Char('k'), M::CONTROL)
@@ -173,7 +179,7 @@ const KEYS: &[Binding] = &[
     Binding {
         area: "Dialogs",
         label: "Text / paste",
-        description: "edit only; approval a allow, d deny, r remember, v raw arguments; quit y/Enter or n/Esc; help Esc/F1 closes",
+        description: "edit only; approval a allow, d deny, r remember, v raw arguments; undo y or n/Esc (Enter cancels); recovery r/x/o/u per file, ←→ choice; quit y/Enter or n/Esc; help Esc/F1 closes",
         chords: &[],
     },
 ];
@@ -235,6 +241,7 @@ mod tests {
             "Ctrl-L",
             "Ctrl-R",
             "Ctrl-E",
+            "Ctrl-Z",
             "Ctrl-K",
             "F1 / ?",
             "Tab / Shift-Tab",
@@ -246,7 +253,14 @@ mod tests {
                 "undocumented key: {label}"
             );
         }
-        for c in ['c', 'd', 'r', 'e', 'k', 'o', 't', 'l', 'u', 'w'] {
+        // Ctrl-Z must never be left to the terminal: it is a documented chord
+        // that the raw-mode loop handles, so it cannot suspend the process.
+        assert!(documented(KeyEvent::new(Char('z'), M::CONTROL)));
+        assert!(!documented(KeyEvent::new(
+            Char('z'),
+            M::NONE | M::CONTROL | M::SHIFT
+        )));
+        for c in ['c', 'd', 'r', 'e', 'k', 'o', 't', 'l', 'u', 'w', 'z'] {
             assert!(documented(KeyEvent::new(Char(c), M::CONTROL)));
         }
     }

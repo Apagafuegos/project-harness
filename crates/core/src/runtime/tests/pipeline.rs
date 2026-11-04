@@ -65,15 +65,32 @@ impl Executor for StubBackend<'_> {
             "invocation executed twice"
         );
         invocations.push(operation.invocation_id().clone());
-        if cancel.is_cancelled() && !self.state.success_wins.load(Ordering::Acquire) {
-            return outcome(ToolStatus::Cancelled, Some(ResultCode::Cancelled));
+        let mut result =
+            if cancel.is_cancelled() && !self.state.success_wins.load(Ordering::Acquire) {
+                outcome(ToolStatus::Cancelled, Some(ResultCode::Cancelled))
+            } else {
+                self.state
+                    .outcomes
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| outcome(ToolStatus::Succeeded, None))
+            };
+        // A trusted write/edit is classified by its commit point, exactly as
+        // the real descriptor-rooted executor does.
+        if result.file_effect.is_none()
+            && operation
+                .plan()
+                .effects()
+                .contains(crate::session::EffectClass::FilesystemMutation)
+        {
+            result.file_effect = Some(if result.status == ToolStatus::Succeeded {
+                crate::session::FileEffect::Applied
+            } else {
+                crate::session::FileEffect::NotApplied
+            });
         }
-        self.state
-            .outcomes
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_else(|| outcome(ToolStatus::Succeeded, None))
+        result
     }
 }
 pub(crate) fn outcome(status: ToolStatus, code: Option<ResultCode>) -> ExecutionOutcome {
@@ -89,6 +106,7 @@ pub(crate) fn outcome(status: ToolStatus, code: Option<ResultCode>) -> Execution
         duration_ms: Some(17),
         output_truncated: false,
         artifacts: vec![b"full stub capture".to_vec()],
+        file_effect: None,
     }
 }
 impl Driver {
@@ -120,16 +138,32 @@ impl Driver {
     }
     pub(super) fn approval(&mut self, decision: Decision, remember: bool) -> RequestId {
         let pending = self.runtime.view().pending_approval.unwrap();
-        self.command(Command::SubmitApproval {
+        let request = self.command(Command::SubmitApproval {
             approval_id: pending.approval_id,
             plan_digest: pending.plan_digest,
             decision,
             remember,
-        })
+        });
+        // An allowed trusted write/edit captures its pre-image first; the tool
+        // worker answers that effect before the allow commit exists.
+        if self.capturing.is_some() {
+            self.capture();
+        }
+        request
+    }
+    /// Answer the pending capture from the fake workspace, as the tool worker
+    /// does through the trusted file backend.
+    pub(super) fn capture(&mut self) -> bool {
+        let Some((token, plan)) = self.capturing.take() else {
+            return false;
+        };
+        let result = self.workspace.capture(&plan, &self.root);
+        self.step(Input::Captured { token, result });
+        true
     }
     pub(super) fn run_tools(&mut self) {
-        for _ in 0..100 {
-            if self.complete() || self.plan() || self.execute() {
+        for _ in 0..200 {
+            if self.complete() || self.plan() || self.capture() || self.execute() {
                 continue;
             }
             return;

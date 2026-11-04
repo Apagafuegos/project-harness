@@ -144,6 +144,9 @@ fn without_code<S: Serializer>(result: &ToolResult, serializer: S) -> Result<S::
         provenance,
         artifacts,
         code: _,
+        // Storage evidence about a mutation's commit point. It is never a
+        // model assertion, so it is dropped exactly like the v2 code.
+        file_effect: _,
     } = metadata;
     Projected {
         call,

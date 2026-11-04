@@ -17,6 +17,7 @@ mod manifest;
 pub(crate) mod state;
 pub(crate) mod store;
 mod types;
+pub(crate) mod undo;
 mod validation;
 
 pub use artifacts::DataRoot;
@@ -31,9 +32,12 @@ pub use maintenance::{
     write_markdown_export,
 };
 pub use manifest::compaction_manifest;
-pub use state::{CommandReceipt, SessionSnapshot, StoredEntry, TurnInfo, UnresolvedInvocation};
+pub use state::{
+    CommandReceipt, SessionSnapshot, StoredEntry, TurnInfo, UndoInProgress, UnresolvedInvocation,
+};
 pub use store::{CommitAck, Inspection, JournalStore};
 pub use types::*;
+pub use undo::{UndoConflict, UndoSelection};
 
 #[cfg(test)]
 mod tests;

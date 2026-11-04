@@ -31,7 +31,8 @@ reads and trusted mutations. Execution is sequential in model block order even
 when one response proposes multiple calls.
 
 Results retain call/response/invocation identity, status, content, duration/exit
-metadata where available, truncation information, and artifact references.
+metadata where available, truncation information, artifact references, and — for
+a trusted `write`/`edit` — a `file_effect` classification.
 Distinguish invalid arguments, denial, expected operation failure, infrastructure
 failure, timeout, cancellation, and acknowledged uncertainty. A nonzero command
 exit is an operation result, not a provider transport failure.
@@ -50,6 +51,16 @@ exit is an operation result, not a provider transport failure.
 - Large permitted output is an artifact; bounded model-facing text cannot fill
   the entire context merely because the command printed a large log.
 - Uncertain side effects are reconciled explicitly, never replayed automatically.
+- A trusted `write`/`edit` captures its target's pre-image before its execution
+  intent is committed, and the executor proves the computed replacement is the
+  captured post-image over the captured pre-image and mode. A refused capture
+  dispatches nothing, and capture never extends an approval's lifetime.
+- A mutation's `file_effect` is the executor's observation of the rename commit
+  point: provably not applied before the rename, applied after it even if the
+  parent sync fails, and unknown when the syscall outcome is ambiguous. It is
+  never inferred from the result status or text and is never shown to the model.
+- A user's resolution may classify a captured mutation only as applied or not
+  applied; acknowledging unknown records `unknown`, which undo never upgrades.
 
 Shipped argument objects reject unknown keys. `list` defaults to the workspace
 root and returns at most 1,000 entries. `glob` defaults to path `.` and

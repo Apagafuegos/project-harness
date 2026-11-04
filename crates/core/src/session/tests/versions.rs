@@ -59,10 +59,13 @@ fn field_owner<'a>(record: &'a mut Value, kind: &str, list: &str, index: usize) 
     }
 }
 
-const FIELDS: [(&str, &str); 3] = [
-    ("tool_result", "code"),
-    ("execution_intent", "effects"),
-    ("assistant_response", "projection_fingerprint"),
+/// `(kind, field, first version that requires it)`.
+const FIELDS: [(&str, &str, u32); 5] = [
+    ("tool_result", "code", 2),
+    ("execution_intent", "effects", 2),
+    ("assistant_response", "projection_fingerprint", 2),
+    ("tool_result", "file_effect", 4),
+    ("execution_intent", "file_image", 4),
 ];
 
 #[test]
@@ -74,10 +77,10 @@ fn shipped_schema_bytes_are_pinned() {
 }
 
 #[test]
-fn only_integer_versions_one_to_three_select_a_schema() {
+fn only_integer_supported_versions_select_a_schema() {
     // A header has no versioned field, so it is a valid record of each version.
     let header = records(&source("branching")).remove(0);
-    for version in [json!(1), json!(2), json!(3)] {
+    for version in [json!(1), json!(2), json!(3), json!(4)] {
         let mut record = header.clone();
         record["version"] = version.clone();
         assert_eq!(
@@ -87,7 +90,7 @@ fn only_integer_versions_one_to_three_select_a_schema() {
     }
     for version in [
         json!(0),
-        json!(4),
+        json!(5),
         json!("2"),
         json!(2.0),
         json!(-1),
@@ -109,26 +112,39 @@ fn only_integer_versions_one_to_three_select_a_schema() {
 #[test]
 fn each_version_requires_exactly_its_own_fields() {
     let records = current_records();
-    for (kind, field) in FIELDS {
-        let (v2, list, index) = holding(&records, kind);
-        decoded(&v2).unwrap();
-        // The v2 key under v1 is unknown there.
-        let mut v1_with_field = v2.clone();
-        v1_with_field["version"] = json!(1);
-        assert_eq!(
-            decoded(&v1_with_field).unwrap_err(),
-            "schema_violation",
-            "{kind}"
-        );
-        // Without the key, v2 is missing a required field and v1 is valid.
-        let mut without = v2.clone();
+    for (kind, field, requires) in FIELDS {
+        let (current, list, index) = holding(&records, kind);
+        decoded(&current).unwrap();
+        // The key is unknown in the version before the one that requires it.
+        let mut older = current.clone();
+        older["version"] = json!(requires - 1);
+        for (other, other_field, other_requires) in FIELDS {
+            if other == kind && other_field != field && other_requires > requires - 1 {
+                let owner = field_owner(&mut older, other, list, index);
+                if let Some(map) = owner.as_object_mut() {
+                    map.remove(other_field);
+                }
+            }
+        }
+        assert_eq!(decoded(&older).unwrap_err(), "schema_violation", "{kind}");
+        // Without the key, its own version is missing a required field.
+        let mut without = current.clone();
         field_owner(&mut without, kind, list, index)
             .as_object_mut()
             .unwrap()
             .remove(field)
             .unwrap();
         assert_eq!(decoded(&without).unwrap_err(), "schema_violation", "{kind}");
-        without["version"] = json!(1);
+        // The previous version, which lacks every later field, is valid.
+        without["version"] = json!(requires - 1);
+        for (other, other_field, other_requires) in FIELDS {
+            if other == kind && other_field != field && other_requires > requires - 1 {
+                let owner = field_owner(&mut without, other, list, index);
+                if let Some(map) = owner.as_object_mut() {
+                    map.remove(other_field);
+                }
+            }
+        }
         decoded(&without).unwrap();
     }
 }
@@ -219,7 +235,7 @@ fn context_control_is_a_v3_entry_kind_with_a_closed_mode_set() {
 #[test]
 fn writers_refuse_any_version_but_the_current_one() {
     let (record, _) = codec::decode(&line(&records(&source("branching"))[0])).unwrap();
-    for version in [1, 2, 4] {
+    for version in [1, 2, 3] {
         let record = Record {
             version,
             ..record.clone()
@@ -237,18 +253,23 @@ fn writers_refuse_any_version_but_the_current_one() {
 }
 
 #[test]
-fn new_sessions_write_every_record_as_v3() {
+fn new_sessions_write_every_record_as_v4() {
     assert_eq!(
-        CURRENT_VERSION, 3,
+        CURRENT_VERSION, 4,
         "the writer's version is the record format"
     );
     let records = current_records();
     assert_eq!(records.len(), TOOL_TURN_COMMITS + 1);
-    assert!(records.iter().all(|r| r["version"] == json!(3)));
+    assert!(records.iter().all(|r| r["version"] == json!(4)));
     let (intent, _, index) = holding(&records, "execution_intent");
     assert_eq!(
         intent["payload"]["events"][index]["effects"],
         json!(["read"])
+    );
+    // A read intent binds no image; the v4 key is present and null.
+    assert_eq!(
+        intent["payload"]["events"][index]["file_image"],
+        Value::Null
     );
 }
 
@@ -342,7 +363,32 @@ fn intent(
     effects: EffectSet,
 ) -> Commit {
     let turn_id = snapshot.active_turn().unwrap().clone();
-    let plan = root.put_artifact(br#"{"plan":"effects"}"#).unwrap();
+    let mutation =
+        backend == ExecutionBackend::TrustedFs && effects.contains(EffectClass::FilesystemMutation);
+    let image = mutation.then(|| {
+        let pre = root.put_artifact(b"before").unwrap();
+        let post = Digest::of(b"after");
+        let bytes = serde_json::to_vec(&json!({
+            "version": 2,
+            "name": "write",
+            "workspace": "/workspace",
+            "target": {"path": "f0", "pre_image": pre.sha256, "content_sha256": post},
+        }))
+        .unwrap();
+        (
+            root.put_artifact(&bytes).unwrap(),
+            crate::session::FileImage {
+                path: "f0".into(),
+                pre_image: Some(pre),
+                pre_mode: Some(0o644),
+                post_image: post,
+            },
+        )
+    });
+    let (plan, file_image) = match image {
+        Some((plan, image)) => (plan, Some(image)),
+        None => (root.put_artifact(br#"{"plan":"effects"}"#).unwrap(), None),
+    };
     let decision_id = DecisionId::new();
     audit(
         snapshot,
@@ -367,6 +413,7 @@ fn intent(
                 backend,
                 timeout_ms: 1_000,
                 effects: Some(effects),
+                file_image,
             }),
         ],
     )
@@ -524,15 +571,15 @@ fn a_lower_version_after_a_higher_one_is_corrupt() {
             code: "version_regression".into(),
         })
     );
-    assert_eq!(inspection.versions, [(3, 2)].into());
-    // Equal or higher is fine: v1, v1, v3 replays.
+    assert_eq!(inspection.versions, [(4, 2)].into());
+    // Equal or higher is fine: v1, v1, v4 replays.
     values[0]["version"] = json!(1);
     values[1]["version"] = json!(1);
-    values[2]["version"] = json!(3);
+    values[2]["version"] = json!(4);
     fs::write(&path, reframe(&values)).unwrap();
     let inspection = JournalStore::inspect(&root, &id).unwrap();
     assert_eq!(inspection.diagnostic, None);
-    assert_eq!(inspection.versions, [(1, 2), (3, 1)].into());
+    assert_eq!(inspection.versions, [(1, 2), (4, 1)].into());
 }
 
 /// The versions of a journal's records, in order.
@@ -544,7 +591,7 @@ fn versions(root: &DataRoot, id: &SessionId) -> Vec<u64> {
 }
 
 #[test]
-fn a_repaired_v1_tail_continues_as_v3() {
+fn a_repaired_v1_tail_continues_as_v4() {
     let (_temp, root, id) = fixture("compaction");
     let v1 = records(&source("compaction")).len();
     let mut file = fs::OpenOptions::new()
@@ -576,9 +623,9 @@ fn a_repaired_v1_tail_continues_as_v3() {
     let reopened = JournalStore::open(root.clone(), &id).unwrap().snapshot();
     assert_eq!(reopened.checksum(), live.checksum());
     let mut expected = vec![1; v1];
-    expected.extend([3, 3, 3]);
-    assert_eq!(versions(&root, &id), expected, "the repair commit is v3");
+    expected.extend([4, 4, 4]);
+    assert_eq!(versions(&root, &id), expected, "the repair commit is v4");
     let inspection = JournalStore::inspect(&root, &id).unwrap();
     assert_eq!(inspection.diagnostic, None);
-    assert_eq!(inspection.versions, [(1, v1 as u64), (3, 3)].into());
+    assert_eq!(inspection.versions, [(1, v1 as u64), (4, 3)].into());
 }

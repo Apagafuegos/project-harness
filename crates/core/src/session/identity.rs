@@ -52,7 +52,8 @@ identity!(
     InvocationId,
     ApprovalId,
     DecisionId,
-    CommandId
+    CommandId,
+    UndoId
 );
 
 /// A validated lowercase SHA-256 digest, also safe as an artifact filename.

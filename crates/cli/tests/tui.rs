@@ -1018,6 +1018,7 @@ async fn uncertain_modal_offers_the_core_resolutions() {
             resolution: UserResolution::Observed {
                 status: ToolStatus::Succeeded,
                 text,
+                file_effect: None,
             },
         }) if chosen == &invocation_id && text == "file written"
     ));

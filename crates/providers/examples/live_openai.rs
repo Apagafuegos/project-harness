@@ -410,6 +410,7 @@ async fn tool_round_trip(adapter: &OpenAiResponses, model: &str) -> Result<bool,
                 provenance: harness_core::session::Provenance::Executor,
                 artifacts: Vec::new(),
                 code: None,
+                file_effect: None,
             },
         },
     });

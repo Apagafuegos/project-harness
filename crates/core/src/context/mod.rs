@@ -73,10 +73,10 @@ pub use structured::StructuredState;
 /// Version of the inclusion rules and item shapes, hashed into every
 /// fingerprint. Bump it whenever a rule or item changes, so fingerprints of
 /// old and new projections can never collide.
-pub const PROJECTION_VERSION: u32 = 5;
+pub const PROJECTION_VERSION: u32 = 6;
 
 /// Version of the report and its checks. Bump it when report fields change.
-pub const BUILDER_VERSION: u32 = 6;
+pub const BUILDER_VERSION: u32 = 7;
 
 #[cfg(test)]
 mod tests;

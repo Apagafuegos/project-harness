@@ -38,6 +38,7 @@ impl Env for AdvancingEnv {
         approval_id -> ApprovalId,
         decision_id -> crate::session::DecisionId,
         invocation_id -> InvocationId,
+        undo_id -> crate::session::UndoId,
         policy_revision -> String,
     }
 }
@@ -96,6 +97,10 @@ impl Rig {
                             token,
                             result: tool.plan(&operation, &call, &self.workspace, policy),
                         });
+                    }
+                    Effect::CaptureImage { token, plan } => {
+                        let result = self.workspace.capture(&plan, &self.root);
+                        pending.push_back(Input::Captured { token, result });
                     }
                     Effect::Execute { .. } => self.executions += 1,
                     _ => {}
@@ -242,7 +247,9 @@ fn approval_one_millisecond_before_expiry_uses_decision_instant_for_commit() {
         let ticket = rig.runtime.view().pending_approval.unwrap();
         let decision_at = ticket.expires_at.instant() - time::Duration::milliseconds(1);
         advance_to(&mut rig, decision_at);
-        let samples = rig.env.samples;
+        // Capture is its own effect before the allow commit. Hold the clock so
+        // the two steps see one instant, which is what the approval binds.
+        rig.env.tick = std::time::Duration::ZERO;
         rig.feed(Input::Command {
             request: RequestId(2),
             command: Command::SubmitApproval {
@@ -252,8 +259,10 @@ fn approval_one_millisecond_before_expiry_uses_decision_instant_for_commit() {
                 remember,
             },
         });
-        assert_eq!(rig.env.samples - samples, 1, "one clock read for the step");
-        assert_eq!(rig.executions, 1, "approval at expiry - 1 ms must execute");
+        assert_eq!(
+            rig.executions, 1,
+            "approval at expiry - 1 ms must execute once its capture succeeds"
+        );
         assert_eq!(rig.runtime.phase(), Phase::Durable(Executing));
         assert!(rig.runtime.view().pending_approval.is_none());
         let at =

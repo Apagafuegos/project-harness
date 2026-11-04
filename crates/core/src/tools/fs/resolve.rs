@@ -444,6 +444,14 @@ impl WorkspaceView for FsWorkspace {
         })
     }
 
+    fn capture(
+        &self,
+        plan: &crate::tools::Plan,
+        artifacts: &crate::session::DataRoot,
+    ) -> Result<crate::session::FileImage, Refusal> {
+        self.capture_image(plan, artifacts)
+    }
+
     fn read_text(&self, path: &WorkspacePath, max_bytes: u64) -> Result<String, Refusal> {
         let mut noop = |_| Ok(());
         let mut control = Control::planning(&mut noop);

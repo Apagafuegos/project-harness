@@ -130,7 +130,7 @@ fn inspect_then_repair_only_the_inspected_torn_tail() {
     assert_eq!(after["diagnostic"], Value::Null);
     assert_eq!(after["repairable"], false);
     // The repair commit continues the v1 journal as the current version.
-    assert_eq!(after["versions"], serde_json::json!({"1": 11, "3": 1}));
+    assert_eq!(after["versions"], serde_json::json!({"1": 11, "4": 1}));
     assert_eq!(after["valid_bytes"], after["file_bytes"]);
     // A repaired journal has nothing left to repair.
     let again = repair(

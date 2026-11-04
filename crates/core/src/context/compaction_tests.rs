@@ -1882,10 +1882,10 @@ async fn model_based_requests_end_with_one_fixed_request_only_prompt() {
 /// neither version constant moves, so old journals and fingerprints replay.
 #[test]
 fn request_only_item_leaves_projection_bytes_and_versions_alone() {
-    // M7 conversion deliberately advances both versions; request-only items
+    // M8 undo notes deliberately advance both versions; request-only items
     // still do not appear in ordinary projections.
-    assert_eq!(PROJECTION_VERSION, 5);
-    assert_eq!(BUILDER_VERSION, 6);
+    assert_eq!(PROJECTION_VERSION, 6);
+    assert_eq!(BUILDER_VERSION, 7);
     let request = summary_request_item();
     assert_eq!(request.entry_id(), None);
     assert_eq!(
@@ -1904,5 +1904,75 @@ fn request_only_item_leaves_projection_bytes_and_versions_alone() {
             "entry_id": user.entry_id().unwrap(),
             "content": [{"kind": "text", "text": "hi"}],
         })
+    );
+}
+
+/// ADR 0032: a recorded undo note is a coverage barrier. No span may start at
+/// or before the latest one, and the shared coverage rule refuses a compaction
+/// that would absorb it.
+#[test]
+fn an_undo_note_is_a_coverage_barrier() {
+    use crate::session::{
+        Digest, Entry, EntryId, EntryPayload, SessionSnapshot, StoredEntry, TurnId, UndoId,
+        UndoNote, UndoOutcome,
+    };
+    let mut journal = Journal::new();
+    for index in 0..6 {
+        journal.exchange(&format!("p{index}"), &format!("r{index}"));
+    }
+    let config = CompactionConfig::default();
+    let snapshot = journal.snapshot();
+    let eligible = select_span(&snapshot, snapshot.head(), &config).expect("an eligible span");
+    assert!(!eligible.covered_entry_ids.is_empty());
+
+    // Insert one recorded undo note at the head, exactly as a real record would
+    // place it: an entry with no turn, parented at the previous head.
+    let mut state = (*snapshot.0).clone();
+    let note_id = EntryId::new();
+    let parent = snapshot.head().cloned();
+    state.branch.insert(
+        note_id.clone(),
+        state.branch[parent.as_ref().expect("nonempty")].clone(),
+    );
+    state.entries.insert(
+        note_id.clone(),
+        Arc::new(StoredEntry {
+            entry: Entry {
+                id: note_id.clone(),
+                parent_id: parent,
+                turn_id: None,
+                payload: EntryPayload::UndoNote(UndoNote {
+                    undo_id: UndoId::new(),
+                    target_turn_id: TurnId::new(),
+                    outcome: UndoOutcome::Succeeded,
+                    text: "The user reverted one turn.\n".into(),
+                }),
+            },
+            sequence: snapshot.sequence(),
+            record_checksum: Digest::of(b"undo-note"),
+            entry_index: 0,
+        }),
+    );
+    state.head = Some(note_id.clone());
+    let with_note = SessionSnapshot(Arc::new(state));
+
+    // Nothing before the barrier is eligible again: the only dialogue after it
+    // is the retained window, so selection refuses rather than reaching back.
+    let span = select_span(&with_note, with_note.head(), &config);
+    assert!(
+        matches!(
+            span,
+            Err(NotEligible::OnlyRecentTurns)
+                | Err(NotEligible::NothingNewSinceSummary)
+                | Err(NotEligible::OnlyControlledTurns)
+                | Err(NotEligible::Empty)
+        ),
+        "{span:?}"
+    );
+    // The shared rule refuses the span that was legal before the note.
+    let ancestry = with_note.ancestry(with_note.head()).unwrap();
+    assert_eq!(
+        crate::session::coverage::error(&ancestry, &eligible.covered_entry_ids, |_| true),
+        Err("compaction_covers_undo_note")
     );
 }

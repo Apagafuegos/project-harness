@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::session::{
-    ArtifactRef, CallRef, Digest, EffectClass, ExecutionBackend, ResultCode, ToolStatus,
+    ArtifactRef, CallRef, Digest, EffectClass, ExecutionBackend, FileImage, ResultCode, ToolStatus,
 };
 
 const CONFIG: &[u8] = include_bytes!(
@@ -60,6 +60,69 @@ impl FakeWorkspace {
     }
     pub(crate) fn facts_mut(&mut self, path: &str) -> &mut FileFacts {
         &mut self.entries.get_mut(path).unwrap().0
+    }
+
+    /// The test double of a descriptor-rooted capture: the pre-image is the
+    /// stored bytes of the plan's target, published as an artifact.
+    pub(crate) fn capture(
+        &self,
+        plan: &Plan,
+        artifacts: &crate::session::DataRoot,
+    ) -> Result<FileImage, Refusal> {
+        let value: serde_json::Value = serde_json::from_slice(plan.bytes()).unwrap();
+        let path = value["target"]["path"]
+            .as_str()
+            .expect("mutation plan target");
+        let stored = self.entries.get(path).map(|(_, bytes)| bytes);
+        let pre = value["target"]["pre_image"]
+            .as_str()
+            .expect("pre-image binding");
+        let (pre_image, pre_mode, text) = if pre == "absent" {
+            if stored.is_some() {
+                return Err(Refusal::new(
+                    ResultCode::StalePlan,
+                    "workspace pre-image changed",
+                ));
+            }
+            (None, None, None)
+        } else {
+            let bytes = stored.ok_or_else(|| {
+                Refusal::new(ResultCode::StalePlan, "workspace pre-image changed")
+            })?;
+            if Digest::of(bytes).as_str() != pre {
+                return Err(Refusal::new(
+                    ResultCode::StalePlan,
+                    "workspace pre-image changed",
+                ));
+            }
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| Refusal::new(ResultCode::NotUtf8, "file is not UTF-8"))?
+                .to_owned();
+            (
+                Some(artifacts.put_artifact(bytes).unwrap()),
+                Some(0o644),
+                Some(text),
+            )
+        };
+        let post_image = match value["arguments"]["text"].as_str() {
+            Some(text) => {
+                let digest = Digest::of(text.as_bytes());
+                assert_eq!(value["target"]["content_sha256"], json!(digest));
+                digest
+            }
+            None => {
+                let old = value["arguments"]["old_text"].as_str().unwrap();
+                let new = value["arguments"]["new_text"].as_str().unwrap();
+                let text = text.expect("edit pre-image");
+                Digest::of(super::fs::execute::edited_bytes(&text, old, new)?.as_bytes())
+            }
+        };
+        Ok(FileImage {
+            path: path.to_owned(),
+            pre_image,
+            pre_mode,
+            post_image,
+        })
     }
 }
 impl WorkspaceView for FakeWorkspace {

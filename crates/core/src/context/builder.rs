@@ -15,8 +15,8 @@ use crate::{
     model::ModelInput,
     session::{
         ArtifactRef, AssistantResponse, CallId, Compaction, ContentBlock, ContextMode, EntryId,
-        EntryPayload, ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry, ToolResultEntry,
-        TurnId, UserMessage, coverage,
+        EntryPayload, JournalEvent, ModelRef, ResponseOutcome, SessionSnapshot, StoredEntry,
+        ToolResultEntry, TurnId, UndoNote, UserMessage, coverage,
     },
     tools::ToolDefinition,
 };
@@ -288,6 +288,9 @@ impl<'a> ContextBuilder<'a> {
                 EntryPayload::ContextControl(_) => {
                     walk.exclude(id, Part::Entry, ExclusionReason::ContextControlMarker, None)
                 }
+                // An undo note is the user's own statement about a reverted
+                // turn, so it projects as one user block of its own entry.
+                EntryPayload::UndoNote(note) => walk.note(id, note)?,
                 // An active summary that no other covers: its item was placed
                 // at its first covered entry, which precedes it.
                 EntryPayload::Compaction(_) => {}
@@ -503,6 +506,7 @@ impl<'a> ContextBuilder<'a> {
             excluded: walk.excluded,
             summaries: plan.summaries(self.estimator),
             controls: controls.report_on(&branch),
+            undos: undo_reports(snapshot, &branch),
             totals,
             budget,
             reported_usage,
@@ -962,6 +966,33 @@ impl Walk<'_> {
         Ok(())
     }
 
+    /// One recorded undo note, as a user message carrying its own entry id.
+    /// The text names paths and calls only: no pre-image bytes, artifact
+    /// reference or command ever reaches model text.
+    fn note(&mut self, id: &EntryId, note: &UndoNote) -> Result<(), ContextError> {
+        let tokens = self.tokens(self.estimator.text(&note.text))?;
+        self.count(Category::User, tokens);
+        self.push(
+            ContextItem::User {
+                entry_id: id.clone(),
+                content: vec![ContentBlock::Text {
+                    text: note.text.clone(),
+                }],
+            },
+            IncludedItem {
+                entry_id: Some(id.clone()),
+                kind: ItemKind::User,
+                conversions: Vec::new(),
+                estimated_tokens: tokens,
+                opaque_bytes: 0,
+                blocks: Vec::new(),
+                provenance: None,
+                pinned: false,
+            },
+        );
+        Ok(())
+    }
+
     fn assistant(
         &mut self,
         id: &EntryId,
@@ -1184,6 +1215,40 @@ impl Walk<'_> {
         );
         Ok(())
     }
+}
+
+/// One report row per recorded undo note on the branch, in ancestral order. A
+/// note carries only its own text; the paths it names come from the result
+/// committed with it, so the row never parses the text.
+fn undo_reports(snapshot: &SessionSnapshot, branch: &[&StoredEntry]) -> Vec<UndoReport> {
+    branch
+        .iter()
+        .filter_map(|stored| match &stored.entry.payload {
+            EntryPayload::UndoNote(note) => {
+                let paths = snapshot
+                    .events()
+                    .find_map(|(_, _, event)| match event {
+                        JournalEvent::UndoResult(result) if result.undo_id == note.undo_id => Some(
+                            result
+                                .file_outcomes
+                                .iter()
+                                .map(|row| row.path.clone())
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                Some(UndoReport {
+                    undo_id: note.undo_id.clone(),
+                    target_turn_id: note.target_turn_id.clone(),
+                    note_entry_id: stored.entry.id.clone(),
+                    outcome: note.outcome,
+                    paths,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn budget_for(config: &ContextConfig, model: &ModelRef, estimated: u64, opaque: u64) -> Budget {

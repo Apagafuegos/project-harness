@@ -99,6 +99,7 @@ fn crash_child() {
                     FsWorkspace::open(&options.workspace, &FsProtectedPaths::default()).unwrap(),
                 ),
                 executors: vec![Arc::new(Hold(base.join("ready")))],
+                files: None,
             };
             let script = Script::new([
                 Step::Event(ProviderEvent::Started),

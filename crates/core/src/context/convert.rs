@@ -162,6 +162,7 @@ mod tests {
                 provenance: Provenance::Runtime,
                 artifacts: vec![],
                 code: Some("failed".into()),
+                file_effect: None,
             },
         };
         let rendered = tool_result("read", &result);

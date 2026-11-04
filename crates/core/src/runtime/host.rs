@@ -162,6 +162,7 @@ impl ToolHost {
         if let Ok(files) = files {
             let files = Arc::new(files);
             host.workspace = files.clone();
+            host.files = Some(files.clone());
             host.executors.push(files);
             if let Some(Ok(sandbox)) = sandbox {
                 host.executors.push(Arc::new(sandbox));

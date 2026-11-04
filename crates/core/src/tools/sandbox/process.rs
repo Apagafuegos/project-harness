@@ -459,6 +459,7 @@ pub(super) fn run(
         duration_ms: Some(start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
         output_truncated: overflow || elided,
         artifacts,
+        file_effect: None,
     }
 }
 

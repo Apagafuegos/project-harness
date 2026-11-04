@@ -1,6 +1,6 @@
 # 0032: Durable undo of an agent turn's trusted file edits
 
-Status: Proposed. Design only for M8 step 03a; none of the additions below is implemented.
+Status: Accepted and implemented (M8 step 03b, record version 4).
 
 Date: 2026-11-04
 

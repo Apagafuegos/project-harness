@@ -280,6 +280,7 @@ fn search_directory_symlink_swap_mid_walk_never_reads_outside() {
             Ok(())
         },
         None,
+        None,
     );
     assert!(swapped);
     let result = full(&outcome);
@@ -580,6 +581,7 @@ fn search_cancellation_and_deadline_report_partial_truncation() {
             &CancelToken::new(),
             &mut |_| Ok(()),
             Some(Duration::ZERO),
+            None,
         );
         assert_eq!(outcome.code, Some(ResultCode::Timeout));
         assert_eq!(inline(&outcome)["truncated"], true);

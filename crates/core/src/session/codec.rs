@@ -16,10 +16,10 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COUNTER: u64 = 9_007_199_254_740_991;
 /// Record versions readers accept. Each record is validated against its own
 /// version's schema; any other version fails closed as `unsupported_version`.
-pub const SUPPORTED_VERSIONS: RangeInclusive<u32> = 1..=3;
-/// The only version writers produce, including for sessions created under v1
-/// or v2.
-pub const CURRENT_VERSION: u32 = 3;
+pub const SUPPORTED_VERSIONS: RangeInclusive<u32> = 1..=4;
+/// The only version writers produce, including for sessions created under an
+/// earlier version.
+pub const CURRENT_VERSION: u32 = 4;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -105,6 +105,7 @@ fn schema(version: u32) -> &'static jsonschema::Validator {
     static V1: OnceLock<jsonschema::Validator> = OnceLock::new();
     static V2: OnceLock<jsonschema::Validator> = OnceLock::new();
     static V3: OnceLock<jsonschema::Validator> = OnceLock::new();
+    static V4: OnceLock<jsonschema::Validator> = OnceLock::new();
     match version {
         1 => V1.get_or_init(|| {
             compile(include_str!(
@@ -119,6 +120,11 @@ fn schema(version: u32) -> &'static jsonschema::Validator {
         3 => V3.get_or_init(|| {
             compile(include_str!(
                 "../../../../docs/rfcs/001/schema/session-v3.schema.json"
+            ))
+        }),
+        4 => V4.get_or_init(|| {
+            compile(include_str!(
+                "../../../../docs/rfcs/001/schema/session-v4.schema.json"
             ))
         }),
         _ => unreachable!("unsupported version {version}"),

@@ -25,7 +25,7 @@ use crate::{
 };
 
 mod tools;
-use crate::tools::{CancelToken, PolicySnapshot, WorkspacePath};
+use crate::tools::{CancelToken, PolicySnapshot, Refusal, WorkspacePath};
 pub use tools::ToolHost;
 use tools::{Answer, Job, JobToken, PendingJob, ToolWorker};
 
@@ -531,6 +531,11 @@ impl SessionHandle {
 }
 
 /// One gap-free observation. A reset replaces the entire client view.
+///
+/// A reset legitimately carries the whole immutable view while an event is
+/// small; the difference is inherent to this protocol, and boxing either side
+/// would force every client through another indirection per event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum SubscriptionItem {
     /// Initial view, or resync after lag, an epoch change or a sequence gap.
@@ -1061,6 +1066,117 @@ impl<E: Env + Send + 'static> Driver<E> {
                 Effect::CancelTimer { timer } => {
                     if let Some(task) = self.timers.remove(&timer) {
                         task.abort();
+                    }
+                }
+                Effect::CaptureImage { token, plan } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let root = self.root.clone();
+                    let job = Job::Capture {
+                        epoch: epoch.clone(),
+                        token,
+                        plan: Box::new(plan),
+                        artifacts: root,
+                    };
+                    if self
+                        .tool_pending
+                        .as_ref()
+                        .is_some_and(|p| !matches!(p.token, JobToken::Hints(_)))
+                    {
+                        executor_error = Some("executor_overlap");
+                    } else if self
+                        .send_tool(
+                            job,
+                            PendingJob {
+                                epoch,
+                                token: JobToken::Capture(token),
+                                cancel: None,
+                            },
+                        )
+                        .is_err()
+                    {
+                        // Without a capture, the call is recorded as a refusal:
+                        // no image, no dispatch.
+                        self.step(Input::Captured {
+                            token,
+                            result: Err(Refusal::new(
+                                crate::session::ResultCode::InfrastructureFailure,
+                                "the trusted workspace is unavailable",
+                            )),
+                        });
+                    }
+                }
+                Effect::UndoRestore {
+                    token,
+                    workspace,
+                    targets,
+                } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let root = self.root.clone();
+                    let job = Job::UndoRestore {
+                        epoch: epoch.clone(),
+                        token,
+                        workspace,
+                        targets,
+                        artifacts: root,
+                    };
+                    if self
+                        .tool_pending
+                        .as_ref()
+                        .is_some_and(|p| !matches!(p.token, JobToken::Hints(_)))
+                    {
+                        executor_error = Some("executor_overlap");
+                    } else if self
+                        .send_tool(
+                            job,
+                            PendingJob {
+                                epoch,
+                                token: JobToken::Undo(token),
+                                cancel: None,
+                            },
+                        )
+                        .is_err()
+                    {
+                        // No executor means no evidence of a change.
+                        self.step(Input::UndoFinished {
+                            token,
+                            result: crate::tools::UndoExecution::Done {
+                                files: Vec::new(),
+                                complete: false,
+                            },
+                        });
+                    }
+                }
+                Effect::InspectUndo { token, targets } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let undo_id = self
+                        .runtime
+                        .snapshot()
+                        .unresolved_undo()
+                        .map(|undo| undo.intent.undo_id.clone());
+                    let Some(undo_id) = undo_id else {
+                        continue;
+                    };
+                    if self
+                        .send_tool(
+                            Job::UndoHints {
+                                epoch: epoch.clone(),
+                                token,
+                                undo_id: undo_id.clone(),
+                                targets,
+                            },
+                            PendingJob {
+                                epoch,
+                                token: JobToken::Hints(token),
+                                cancel: None,
+                            },
+                        )
+                        .is_err()
+                    {
+                        self.step(Input::UndoHints {
+                            token,
+                            undo_id,
+                            hints: Vec::new(),
+                        });
                     }
                 }
                 Effect::InspectUncertain { token, invocations } => {

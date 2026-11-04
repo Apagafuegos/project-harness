@@ -6,7 +6,7 @@
 //! Storage is the oracle and the builder revalidates the same rule on the
 //! history it projects, both through this function, so the two cannot drift.
 
-use super::{EntryId, StoredEntry, TurnId};
+use super::{EntryId, EntryPayload, StoredEntry, TurnId};
 
 /// `Ok(())` when `covered` names entries of `ancestry` in ancestral order, and
 /// every entry between its first and last covered entry that it does not cover
@@ -34,6 +34,16 @@ pub(crate) fn error(
     // Covered IDs out of ancestral order end before they begin.
     if last < start {
         return Err("compaction_not_contiguous");
+    }
+    // A recorded undo note is a coverage barrier: a summary may never absorb a
+    // note, nor any dialogue before the latest one, because the note is the
+    // authoritative correction of what the model should assume.
+    if let Some(barrier) = ancestry
+        .iter()
+        .rposition(|stored| matches!(stored.entry.payload, EntryPayload::UndoNote(_)))
+        && start <= barrier
+    {
+        return Err("compaction_covers_undo_note");
     }
     let mut next = 0;
     for stored in &ancestry[start..=last] {

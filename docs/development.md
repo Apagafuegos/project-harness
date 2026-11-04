@@ -383,6 +383,27 @@ Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
 - Live Anthropic use and cross-provider live switching still need
   `ANTHROPIC_API_KEY`; the TUI supports the same provider flags as `ask`.
 
+## Undo tests
+
+Durable undo ([ADR 0032](decisions/0032-undo-agent-edits.md)) is covered at
+four levels. Run them with targeted, serial commands:
+
+```sh
+cargo test -p harness-core --lib session::tests::undo     # storage rules
+cargo test -p harness-core --lib an_undo_note             # coverage barrier
+cargo test -p harness-core --test undo                    # capture, restore, recovery
+cargo test -p harness --test sessions_undo                # CLI exit codes and locking
+cargo test -p harness --bin harness undo_text_tests       # report text
+cargo test -p harness --lib tui::keys                     # Ctrl-Z is documented
+```
+
+`crates/core/tests/undo.rs` runs a real `SessionHandle` against a real
+descriptor-rooted workspace and scripted provider: it asserts the captured
+pre-image (including a >1 MiB target and a binary one), the restored and
+removed paths, the exact note text, the preflight refusal that changes nothing,
+the stale-preview refusal, and resolution of an interrupted undo. It needs no
+network, no provider credentials and no Bubblewrap.
+
 ## Runtime tests
 
 `crates/core/src/runtime/tests` drives the [runtime core](runtime.md) with a

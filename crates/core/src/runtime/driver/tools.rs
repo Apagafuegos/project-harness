@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::{
-    session::{CallRef, ExecutionBackend, ResultCode},
+    session::{CallRef, DataRoot, ExecutionBackend, ResultCode, UndoId, UndoTarget},
     tools::{
-        AuthorizedOperation, CancelToken, Executor, FileFacts, PolicySnapshot, Refusal, Registry,
-        ToolSet, ValidatedOperation, WorkspaceIdentity, WorkspacePath, WorkspaceView,
+        AuthorizedOperation, CancelToken, Executor, FileFacts, Plan, PolicySnapshot, Refusal,
+        Registry, ToolSet, ValidatedOperation, WorkspaceIdentity, WorkspacePath, WorkspaceView,
     },
 };
 
@@ -24,6 +24,10 @@ pub struct ToolHost {
     pub workspace: Arc<dyn WorkspaceView + Send + Sync>,
     /// At most one executor per backend; duplicates fail before journal I/O.
     pub executors: Vec<Arc<dyn Executor>>,
+    /// The trusted descriptor-rooted workspace, when one is installed. Capture
+    /// and undo restoration are capabilities of that concrete backend, not of
+    /// the generic planning view.
+    pub files: Option<Arc<crate::tools::FsWorkspace>>,
 }
 impl ToolHost {
     /// No available tools and no executor thread (the default).
@@ -31,6 +35,47 @@ impl ToolHost {
         Self {
             workspace: Arc::new(NoWorkspace(WorkspaceIdentity(String::new()))),
             executors: Vec::new(),
+            files: None,
+        }
+    }
+
+    /// Capture a trusted write/edit pre-image, or refuse without dispatch.
+    pub(super) fn capture(
+        &self,
+        plan: &Plan,
+        artifacts: &DataRoot,
+    ) -> Result<crate::session::FileImage, Refusal> {
+        self.workspace.capture(plan, artifacts)
+    }
+
+    /// Restore one undo's whole target set.
+    pub(super) fn restore_undo(
+        &self,
+        workspace: &str,
+        targets: &[UndoTarget],
+        artifacts: &DataRoot,
+    ) -> crate::tools::UndoExecution {
+        match &self.files {
+            Some(files) => {
+                files.restore_undo(&WorkspaceIdentity(workspace.to_owned()), targets, artifacts)
+            }
+            None => crate::tools::UndoExecution::Refused(
+                targets
+                    .iter()
+                    .map(|target| crate::session::UndoConflict {
+                        path: target.path.clone(),
+                        reason: "workspace_unavailable",
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Ephemeral per-file evidence for an uncertain undo.
+    pub(super) fn undo_hint(&self, target: &UndoTarget) -> crate::tools::RecoveryHint {
+        match &self.files {
+            Some(files) => files.undo_hint(target),
+            None => crate::tools::RecoveryHint::unavailable("tools_unavailable"),
         }
     }
     pub(super) fn tool_set(&self) -> ToolSet {
@@ -86,6 +131,28 @@ fn unavailable() -> Refusal {
 }
 
 pub(super) enum Job {
+    /// Capture a trusted write/edit pre-image through the workspace.
+    Capture {
+        epoch: RuntimeEpoch,
+        token: CaptureToken,
+        plan: Box<Plan>,
+        artifacts: Arc<DataRoot>,
+    },
+    /// Restore one undo's targets on this sequential worker.
+    UndoRestore {
+        epoch: RuntimeEpoch,
+        token: UndoToken,
+        workspace: String,
+        targets: Vec<UndoTarget>,
+        artifacts: Arc<DataRoot>,
+    },
+    /// Compare an uncertain undo's targets with the current workspace.
+    UndoHints {
+        epoch: RuntimeEpoch,
+        token: HintToken,
+        undo_id: UndoId,
+        targets: Vec<UndoTarget>,
+    },
     Hints {
         epoch: RuntimeEpoch,
         token: HintToken,
@@ -111,6 +178,8 @@ pub(super) enum JobToken {
     Plan(PlanToken),
     Execute(ExecutionToken),
     Hints(HintToken),
+    Capture(CaptureToken),
+    Undo(UndoToken),
 }
 pub(super) struct Answer {
     pub epoch: RuntimeEpoch,
@@ -142,6 +211,65 @@ impl ToolWorker {
                 let registry = Registry::builtin();
                 while let Ok(job) = jobs.recv() {
                     let answer = match job {
+                        Job::Capture {
+                            epoch,
+                            token,
+                            plan,
+                            artifacts,
+                        } => {
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                host.capture(plan.as_ref(), artifacts.as_ref())
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err(Refusal::new(
+                                    ResultCode::InfrastructureFailure,
+                                    "workspace capture panicked",
+                                ))
+                            });
+                            Answer {
+                                epoch,
+                                token: JobToken::Capture(token),
+                                input: Some(Input::Captured { token, result }),
+                            }
+                        }
+                        Job::UndoRestore {
+                            epoch,
+                            token,
+                            workspace,
+                            targets,
+                            artifacts,
+                        } => {
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                host.restore_undo(&workspace, &targets, artifacts.as_ref())
+                            }));
+                            Answer {
+                                epoch,
+                                token: JobToken::Undo(token),
+                                input: result
+                                    .ok()
+                                    .map(|result| Input::UndoFinished { token, result }),
+                            }
+                        }
+                        Job::UndoHints {
+                            epoch,
+                            token,
+                            undo_id,
+                            targets,
+                        } => {
+                            let hints = targets
+                                .iter()
+                                .map(|target| (target.path.clone(), host.undo_hint(target)))
+                                .collect();
+                            Answer {
+                                epoch,
+                                token: JobToken::Hints(token),
+                                input: Some(Input::UndoHints {
+                                    token,
+                                    undo_id,
+                                    hints,
+                                }),
+                            }
+                        }
                         Job::Hints {
                             epoch,
                             token,

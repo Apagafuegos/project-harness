@@ -236,6 +236,7 @@ fn main() -> Result<()> {
             resolution: UserResolution::Observed {
                 status: ToolStatus::Succeeded,
                 text: "Checked new: written".into(),
+                file_effect: None,
             },
         })
         .await

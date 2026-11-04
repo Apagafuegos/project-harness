@@ -16,7 +16,9 @@ use super::{
     },
 };
 use crate::{
-    session::{ContentBlock, Digest, ExecutionBackend, ResultCode, ToolStatus},
+    session::{
+        ContentBlock, Digest, ExecutionBackend, FileEffect, FileImage, ResultCode, ToolStatus,
+    },
     tools::{
         Plan, Refusal, WorkspacePath,
         builtin::{MIB, Operation},
@@ -33,15 +35,16 @@ const READ_BUDGET: usize = OUTPUT_LIMIT - 256;
 // avoids changing the pure planning API or allowing model JSON to construct a
 // Plan. Operations themselves are taken from the typed, private accessor.
 #[derive(Deserialize)]
-struct Binding {
-    workspace: String,
-    timeout_ms: u64,
-    target: Option<Target>,
+pub(super) struct Binding {
+    pub(super) workspace: String,
+    pub(super) timeout_ms: u64,
+    pub(super) target: Option<Target>,
 }
 #[derive(Deserialize)]
-struct Target {
-    path: String,
-    pre_image: String,
+pub(super) struct Target {
+    pub(super) path: String,
+    pub(super) pre_image: String,
+    pub(super) content_sha256: Option<crate::session::Digest>,
 }
 
 impl Executor for FsWorkspace {
@@ -50,7 +53,7 @@ impl Executor for FsWorkspace {
     }
 
     fn execute(&self, operation: &AuthorizedOperation, cancel: &CancelToken) -> ExecutionOutcome {
-        FsWorkspace::execute(self, operation.plan(), cancel)
+        self.execute_with_image(operation.plan(), cancel, operation.image())
     }
 }
 
@@ -59,7 +62,18 @@ impl FsWorkspace {
     /// binding; honour cancellation/deadline until, but never after, the rename.
     /// This low-level API does not grant authorization or execute bash plans.
     pub fn execute(&self, plan: &Plan, cancellation: &CancelToken) -> ExecutionOutcome {
-        self.execute_hooked(plan, cancellation, &mut |_| Ok(()), None)
+        self.execute_with_image(plan, cancellation, None)
+    }
+
+    /// Execute with the image the durable intent captured, so the executor can
+    /// prove that the bytes it is about to write are the ones recorded.
+    pub fn execute_with_image(
+        &self,
+        plan: &Plan,
+        cancellation: &CancelToken,
+        image: Option<&FileImage>,
+    ) -> ExecutionOutcome {
+        self.execute_hooked(plan, cancellation, &mut |_| Ok(()), None, image)
     }
 
     pub(super) fn execute_hooked(
@@ -68,11 +82,23 @@ impl FsWorkspace {
         cancellation: &CancelToken,
         hook: &mut dyn FnMut(Step) -> Result<(), Refusal>,
         timeout: Option<Duration>,
+        image: Option<&FileImage>,
     ) -> ExecutionOutcome {
         let started = Instant::now();
         if plan.operation().search() {
             return self.execute_search(plan, cancellation, hook, timeout, started);
         }
+        // A mutation's effect is classified by its rename commit point, never
+        // inferred from the status this function ends up returning.
+        let mut effect = plan
+            .operation()
+            .mutation()
+            .then_some(FileEffect::NotApplied);
+        let mut commit = || {
+            if let Some(effect) = effect.as_mut() {
+                *effect = FileEffect::Applied;
+            }
+        };
         let result = (|| {
             if plan.backend() != ExecutionBackend::TrustedFs {
                 return Err(Refusal::new(
@@ -113,9 +139,14 @@ impl FsWorkspace {
                     offset_bytes,
                     max_bytes,
                 } => self.execute_read(path, *offset_bytes, *max_bytes, target, &mut control),
-                Operation::Write { path, text, .. } => {
-                    self.replace(path, target, Replacement::Write(text), &mut control)
-                }
+                Operation::Write { path, text, .. } => self.replace(
+                    path,
+                    target,
+                    Replacement::Write(text),
+                    &mut control,
+                    image,
+                    &mut commit,
+                ),
                 Operation::Edit {
                     path,
                     old_text,
@@ -125,6 +156,8 @@ impl FsWorkspace {
                     target,
                     Replacement::Edit(old_text, new_text),
                     &mut control,
+                    image,
+                    &mut commit,
                 ),
                 Operation::Bash { .. }
                 | Operation::List { .. }
@@ -146,6 +179,16 @@ impl FsWorkspace {
                     ResultCode::InfrastructureFailure => ToolStatus::InfrastructureFailure,
                     _ => ToolStatus::Failed,
                 };
+                // A failing syscall in the replacement path is ambiguous: the
+                // rename is not a compare-and-swap, so an unclassifiable
+                // outcome is recorded as unknown rather than as "not applied".
+                if effect == Some(FileEffect::NotApplied)
+                    && error.code != ResultCode::StalePlan
+                    && error.code != ResultCode::Cancelled
+                    && error.code != ResultCode::Timeout
+                {
+                    effect = Some(FileEffect::Unknown);
+                }
                 (status, Some(error.code), error.text(), false)
             }
         };
@@ -157,6 +200,7 @@ impl FsWorkspace {
             duration_ms: Some(duration_ms),
             output_truncated,
             artifacts: Vec::new(),
+            file_effect: effect,
         }
     }
 
@@ -205,12 +249,15 @@ impl FsWorkspace {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replace(
         &self,
         path: &WorkspacePath,
         target: &Target,
         replacement: Replacement<'_>,
         control: &mut Control<'_>,
+        image: Option<&FileImage>,
+        commit: &mut dyn FnMut(),
     ) -> Result<(String, bool), Refusal> {
         let resolved = self.resolve(path, control)?;
         refuse_protection(resolved.protection, true)?;
@@ -245,38 +292,25 @@ impl FsWorkspace {
                 let bytes = read_bounded(file, stat, MIB, control)?;
                 let text = std::str::from_utf8(&bytes)
                     .map_err(|_| Refusal::new(ResultCode::NotUtf8, "file is not UTF-8"))?;
-                let mut matches = text
-                    .as_bytes()
-                    .windows(old.len())
-                    .enumerate()
-                    .filter(|(_, b)| *b == old.as_bytes());
-                let (offset, _) = matches.next().ok_or_else(|| {
-                    Refusal::new(ResultCode::NoMatch, "old_text has no literal match")
-                })?;
-                if matches.next().is_some() {
-                    return Err(Refusal::new(
-                        ResultCode::MultipleMatches,
-                        "old_text has multiple literal matches",
-                    ));
-                }
-                if text.len() - old.len() + new.len() > MIB as usize {
-                    return Err(Refusal::new(
-                        ResultCode::TooLarge,
-                        "edited contents exceed 1 MiB",
-                    ));
-                }
-                let mut updated = String::with_capacity(text.len() - old.len() + new.len());
-                updated.push_str(&text[..offset]);
-                updated.push_str(new);
-                updated.push_str(&text[offset + old.len()..]);
                 (
-                    updated.into_bytes(),
+                    edited_bytes(text, old, new)?.into_bytes(),
                     Mode::from_raw_mode(stat.st_mode & 0o777),
                 )
             }
             _ => return Err(stale()),
         };
         let digest = Digest::of(&bytes);
+        // The captured image is the only proof of what this execution may do:
+        // the computed replacement must be exactly the recorded post-image,
+        // over exactly the recorded pre-image and mode.
+        if let Some(image) = image
+            && (image.path != path.as_str()
+                || digest != image.post_image
+                || image.pre_image.is_some() != current.is_some()
+                || current.as_ref().map(|(_, stat)| stat.st_mode & 0o777) != image.pre_mode)
+        {
+            return Err(stale());
+        }
         let name = format!(".harness-{}.tmp", uuid::Uuid::now_v7().simple());
         let file = open_relative(
             parent.as_fd(),
@@ -339,7 +373,10 @@ impl FsWorkspace {
                 }
             })?;
             temporary.armed = false;
-            // This is the commit point. Do not check cancellation or deadline.
+            // This is the commit point: from here the effect is applied, even
+            // if the directory sync below fails.
+            commit();
+            // Do not check cancellation or deadline after the commit point.
             // The hook makes post-commit cancellation deterministic in tests.
             (control.hook)(Step::SyncParent)?;
             fs::fsync(&parent).map_err(errno)?;
@@ -372,6 +409,39 @@ impl FsWorkspace {
         }
         Ok(Some((file, stat)))
     }
+}
+
+/// The exact replacement bytes of one literal edit, under the rules
+/// `FsWorkspace::replace` enforces: nonempty-ish literal match by bytes
+/// (overlapping occurrences count), exactly one match, UTF-8 input and a
+/// bounded result. Capture and execution share this function, so the digest an
+/// intent records is the digest the executor writes.
+pub(crate) fn edited_bytes(text: &str, old: &str, new: &str) -> Result<String, Refusal> {
+    let mut matches = text
+        .as_bytes()
+        .windows(old.len())
+        .enumerate()
+        .filter(|(_, window)| *window == old.as_bytes());
+    let (offset, _) = matches
+        .next()
+        .ok_or_else(|| Refusal::new(ResultCode::NoMatch, "old_text has no literal match"))?;
+    if matches.next().is_some() {
+        return Err(Refusal::new(
+            ResultCode::MultipleMatches,
+            "old_text has multiple literal matches",
+        ));
+    }
+    if text.len() - old.len() + new.len() > MIB as usize {
+        return Err(Refusal::new(
+            ResultCode::TooLarge,
+            "edited contents exceed 1 MiB",
+        ));
+    }
+    let mut updated = String::with_capacity(text.len() - old.len() + new.len());
+    updated.push_str(&text[..offset]);
+    updated.push_str(new);
+    updated.push_str(&text[offset + old.len()..]);
+    Ok(updated)
 }
 
 enum Replacement<'a> {

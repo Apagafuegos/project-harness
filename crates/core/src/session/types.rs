@@ -96,6 +96,11 @@ pub struct ToolMetadata {
     /// keep any code the schema accepts; writers take one from [`ResultCode`].
     #[serde(default)]
     pub code: Option<String>,
+    /// What the executor observed about the rename commit point of a trusted
+    /// write/edit; v4 only. `None` on every other call, and on every result of
+    /// an earlier version, where the effect is unavailable rather than absent.
+    #[serde(default)]
+    pub file_effect: Option<FileEffect>,
 }
 
 /// Persisted tool result value fields.
@@ -323,6 +328,116 @@ pub struct ExecutionIntent {
     /// treated as read-only. Writing an intent requires a set.
     #[serde(default)]
     pub effects: Option<EffectSet>,
+    /// The bound pre-image capture of a trusted write/edit; v4 only. `None`
+    /// on every other call, and on every intent of an earlier version, which
+    /// has no stored pre-image and so cannot be undone.
+    #[serde(default)]
+    pub file_image: Option<FileImage>,
+}
+
+/// One trusted write/edit target captured before dispatch. Every key is
+/// present in v4; `pre_image` and `pre_mode` are null exactly when the target
+/// was absent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileImage {
+    /// Canonical workspace path from the bound plan.
+    pub path: String,
+    /// Exact pre-image bytes, or null for a created file.
+    pub pre_image: Option<ArtifactRef>,
+    /// Ordinary permission bits of the pre-image, or null when absent.
+    pub pre_mode: Option<u32>,
+    /// SHA-256 of the exact replacement bytes this execution will write.
+    pub post_image: Digest,
+}
+
+/// One applied trusted file mutation the user asked to undo. `pre_image` and
+/// `pre_mode` come from the first mutation of `path` in the turn and
+/// `post_image` from the last; `invocation_ids` is nonempty and in execution
+/// order, so adjacent images must chain exactly.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoTarget {
+    /// Canonical workspace path of every mutation in this target.
+    pub path: String,
+    /// Applied trusted mutations of `path` in the undon turn, in order.
+    pub invocation_ids: Vec<InvocationId>,
+    /// Pre-image of the first mutation, or null when it created the file.
+    pub pre_image: Option<ArtifactRef>,
+    /// Ordinary permission bits to restore, or null when it created the file.
+    pub pre_mode: Option<u32>,
+    /// Post-image of the last mutation, which the current file must still have.
+    pub post_image: Digest,
+}
+
+/// The durable intent of one undo, committed before any target is touched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoIntent {
+    /// Undo identity; unique in the journal's identity namespace.
+    pub undo_id: UndoId,
+    /// Finished turn whose trusted file mutations are reverted.
+    pub target_turn_id: TurnId,
+    /// Head the undo was selected and confirmed at.
+    pub anchor_head: Option<EntryId>,
+    /// Session configuration in effect, which may not change until it resolves.
+    pub configuration: ArtifactRef,
+    /// Authorization policy revision in effect.
+    pub policy_revision: String,
+    /// Targets to restore, unique by path and sorted bytewise.
+    pub targets: Vec<UndoTarget>,
+    /// Calls the undo does not reverse, in ancestral proposal order.
+    pub omitted_calls: Vec<CallRef>,
+}
+
+/// Recorded when an undo may have changed some target but cannot prove what.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoUncertain {
+    /// The interrupted undo.
+    pub undo_id: UndoId,
+    /// Why the outcome is unknown, bounded to 1 KiB.
+    pub reason: String,
+}
+
+/// The terminal result of one undo, always committed with its note entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoResult {
+    /// The resolved undo.
+    pub undo_id: UndoId,
+    /// How the undo ended.
+    pub outcome: UndoOutcome,
+    /// Exactly one row per intent target, in target order.
+    pub file_outcomes: Vec<UndoFileOutcome>,
+    /// The `undo_note` entry committed with this result.
+    pub note_entry_id: EntryId,
+    /// The user's statement for an observed or acknowledged-unknown outcome.
+    pub resolution_note: Option<String>,
+}
+
+/// One target's outcome, by its canonical path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoFileOutcome {
+    /// Canonical workspace path of the intent target.
+    pub path: String,
+    /// What happened to it.
+    pub outcome: FileOutcome,
+}
+
+/// The recorded user-visible note of one undo, projected as a user message.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UndoNote {
+    /// The resolved undo.
+    pub undo_id: UndoId,
+    /// The turn that was the subject of the undo.
+    pub target_turn_id: TurnId,
+    /// How the undo ended; equals its result's outcome.
+    pub outcome: UndoOutcome,
+    /// Deterministic text, exactly as the builder projects it.
+    pub text: String,
 }
 
 /// Persisted execution uncertain fields.
@@ -520,6 +635,12 @@ pub enum JournalEvent {
     ConfigurationChanged(ConfigurationChanged),
     /// Tail repaired audit event.
     TailRepaired(TailRepaired),
+    /// Undo intent audit event.
+    UndoIntent(UndoIntent),
+    /// Undo uncertainty audit event.
+    UndoUncertain(UndoUncertain),
+    /// Undo result audit event.
+    UndoResult(UndoResult),
 }
 
 /// Persisted EntryPayload variants.
@@ -538,6 +659,9 @@ pub enum EntryPayload {
     Compaction(Compaction),
     /// Context control.
     ContextControl(ContextControl),
+    /// A recorded undo note: one user message that corrects the model's
+    /// assumptions without rewriting the reverted history.
+    UndoNote(UndoNote),
 }
 
 /// Persisted RecordPayload variants.
@@ -871,6 +995,84 @@ pub enum ExecutionBackend {
     TrustedFs,
     /// Bubblewrap.
     Bubblewrap,
+}
+
+/// Persisted FileEffect values: what an executor observed about a mutation's
+/// rename commit point. Never inferred from a result's status or text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileEffect {
+    /// The commit point was provably not reached.
+    NotApplied,
+    /// The rename committed, even if a later step failed.
+    Applied,
+    /// The outcome could not be determined.
+    Unknown,
+}
+
+/// Persisted UndoOutcome values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UndoOutcome {
+    /// Every target was restored or removed.
+    Succeeded,
+    /// Provably nothing was restored, so nothing was consumed.
+    NotApplied,
+    /// The user stated what an interrupted undo left behind.
+    Observed,
+    /// The user accepted that an interrupted undo's effects are unknown.
+    AcknowledgedUnknown,
+}
+impl UndoOutcome {
+    /// Whether this outcome consumes the target turn: every outcome but a
+    /// provable no-op means the user will not be offered that turn again.
+    pub fn consumes(self) -> bool {
+        self != Self::NotApplied
+    }
+    /// The persisted spelling, which the note text also uses.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::NotApplied => "not_applied",
+            Self::Observed => "observed",
+            Self::AcknowledgedUnknown => "acknowledged_unknown",
+        }
+    }
+}
+
+/// Persisted FileOutcome values: one restored, removed, unchanged or unknown
+/// target of an undo, in the executor's or the user's observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOutcome {
+    /// The pre-image bytes were written back.
+    Restored,
+    /// A created file was removed.
+    Removed,
+    /// The target was left exactly as it was.
+    Unchanged,
+    /// The user observed the pre-image restored.
+    ObservedRestored,
+    /// The user observed the created file gone.
+    ObservedRemoved,
+    /// The user observed something else.
+    ObservedOther,
+    /// Neither the user nor the executor could tell.
+    Unknown,
+}
+impl FileOutcome {
+    /// The persisted spelling, which the note text also uses.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Restored => "restored",
+            Self::Removed => "removed",
+            Self::Unchanged => "unchanged",
+            Self::ObservedRestored => "observed_restored",
+            Self::ObservedRemoved => "observed_removed",
+            Self::ObservedOther => "observed_other",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Persisted Resolution values.

@@ -234,16 +234,18 @@ analysis and the reasons deletion and reclamation are separate commands.
 
 ## Record versions
 
-Each record carries its own `version`. Readers accept versions 1, 2 and 3
+Each record carries its own `version`. Readers accept versions 1, 2, 3 and 4
 (`SUPPORTED_VERSIONS`) and validate every record against its own version's
-bundled schema. Writers write only version 3 (`CURRENT_VERSION`), including
-when they append to a session created under v1 or v2. A v1 journal therefore
-continues as a v1 prefix and a v3 suffix, one unbroken checksum chain; the
-tail-repair commit is an ordinary v3 commit. Opening never rewrites a record.
+bundled schema. Writers write only version 4 (`CURRENT_VERSION`), including
+when they append to a session created under an earlier version. A v1 journal
+therefore continues as a v1 prefix and a v4 suffix, one unbroken checksum
+chain; the tail-repair commit is an ordinary v4 commit. An older binary refuses
+at the first v4 record with `unsupported_version`; it never ignores an undo or
+appends past one. Opening never rewrites or migrates a record.
 
 | Rule | Error code |
 | --- | --- |
-| `version` is not the integer 1, 2 or 3 (`0`, `4`, `"2"`, `2.0`, missing) | `unsupported_version` |
+| `version` is not the integer 1, 2, 3 or 4 (`0`, `5`, `"2"`, `2.0`, missing) | `unsupported_version` |
 | A record's shape is not that of its own version | `schema_violation` |
 | A record's version is lower than the previous record's | `version_regression` |
 | A writer is handed a record whose version is not `CURRENT_VERSION` | `write_version` |
@@ -289,6 +291,81 @@ with the plan artifact it does not read. The context projection leaves out
 `code` and the fingerprint, so a v1 and a v2 copy of the same entries project
 identically. A v1 record carrying a v2 field, or a v2 record missing one, is a
 `schema_violation`.
+
+v4 adds the pre-image binding a durable undo needs. Its two new required keys
+are present-and-nullable, so one spelling exists per v4 object:
+
+| Change | v4 value | Read from v1-v3 as |
+| --- | --- | --- |
+| `tool_metadata.file_effect` | `not_applied`, `applied`, `unknown` or `null` | `None`: unavailable, not "absent" |
+| `execution_intent.file_image` | an image object, or `null` | `None`: no stored pre-image |
+| `journal_event.kind` | gains `undo_intent`, `undo_uncertain`, `undo_result` | no such event exists |
+| `entry.payload.kind` | gains `undo_note` | no such entry exists |
+
+A `file_image` is `{path, pre_image, pre_mode, post_image}`: the canonical
+workspace path, the pre-image bytes as an optional artifact reference, the
+ordinary permission bits or `null` exactly when the target was absent, and the
+SHA-256 of the exact replacement bytes. A trusted `write`/`edit` intent in a v4
+record always carries one, and every other call always carries `null`; its
+result carries a `file_effect` classification exactly for those calls. The
+classification is the executor's observation of the rename commit point, never
+an inference from the result's status or text.
+
+An `undo_intent` is `{undo_id, target_turn_id, anchor_head, configuration,
+policy_revision, targets, omitted_calls}`. A target is
+`{path, invocation_ids, pre_image, pre_mode, post_image}` with the mutations in
+execution order, the first pre-image and the last post-image, and targets are
+unique by path and sorted bytewise. `undo_uncertain` is `{undo_id, reason}`
+with a reason bounded to 1 KiB. `undo_result` is `{undo_id, outcome,
+file_outcomes, note_entry_id, resolution_note}` with one row per target in
+target order, and `undo_note` is `{undo_id, target_turn_id, outcome, text}`.
+The outcome set is `succeeded`, `not_applied`, `observed` and
+`acknowledged_unknown`; a resolution note is required exactly for the last
+two and bounded to 64 KiB.
+
+Undo records have exact commit shapes:
+
+| Commit | Shape | Error code |
+| --- | --- | --- |
+| intent | retained head, no entries, exactly one `undo_intent` | `undo_commit_shape` |
+| uncertainty | retained head, no entries, exactly one `undo_uncertain` | `undo_commit_shape` |
+| terminal | one advancing `undo_note` at the intent's anchor, exactly one `undo_result` naming it | `undo_commit_shape` |
+
+Storage additionally checks, before any entry of the commit is applied:
+
+| Rule | Error code |
+| --- | --- |
+| The intent is not exactly the selection derived from durable facts (turn, targets, omitted calls), or its anchor/configuration/revision differ | `undo_binding` |
+| The image does not agree with the bound plan's path, pre-image or write post-image | `undo_image_binding` |
+| The note, rows, text or result do not match the intent, or the note id is wrong | `undo_result_binding` |
+| The result arrives in the wrong uncertainty phase, or duplicates one | `undo_recovery_state` |
+| Targets are unsorted, duplicated or empty of mutations | `undo_binding` |
+
+The terminal note text is deterministic: storage recomputes it from the intent,
+the rows and the omitted calls' recorded tool names, so a hand-written note
+cannot say something the journal does not support. `session/validation.rs`
+verifies every pre-image artifact, the intent's configuration and the
+plan/image agreement during append *and* replay, and
+`session/maintenance.rs::record_references` lists the same digests for export
+and collection.
+
+## Undo of one turn's file edits
+
+Undo reverts the trusted `write`/`edit` effects of one finished turn: a file the
+turn created is removed, a file it overwrote gets its captured pre-image bytes
+back, and nothing else is ever reversed. An `undo_note` entry is the durable
+record the model reads; it is not dialogue, has no turn, and sits at the
+intent's anchor head. A note consumes its target turn on its own ancestry only,
+so a sibling branch is offered the same turn again.
+
+An unresolved undo is unfinished work: it blocks turn starts, navigation,
+configuration changes, a second undo, and every ordinary tool exchange until
+its result is committed. Recording uncertainty sets the operational state to
+`recovering`, and the terminal commit sets it back to `idle`. A not-applied
+undo consumes nothing, so the user may ask again. Storage admits exactly two
+undo shapes through a recovery barrier: an `undo_uncertain`, and the terminal
+note/result pair. It never admits an `undo_intent`, so recovery can neither
+start nor restart an undo.
 
 ## Context controls
 

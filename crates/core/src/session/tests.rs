@@ -10,6 +10,7 @@ use std::{
 
 mod artifact_gc;
 mod controls;
+mod undo;
 mod versions;
 
 fn at() -> Timestamp {
@@ -265,6 +266,7 @@ impl ToolTurns {
                             backend: ExecutionBackend::TrustedFs,
                             timeout_ms: 30_000,
                             effects: EffectSet::new([EffectClass::Read]),
+                            file_image: None,
                         }),
                     ],
                 )
@@ -701,7 +703,7 @@ fn j01_invalid_complete_records_fail_closed_without_losing_valid_prefix() {
                     json!("reasoning_summary")
             }),
         ),
-        ("version", Box::new(|r| r[8]["version"] = json!(4))),
+        ("version", Box::new(|r| r[8]["version"] = json!(5))),
         ("sequence", Box::new(|r| r[8]["seq"] = json!(100))),
         ("unknown_field", Box::new(|r| r[8]["extra"] = json!(true))),
         (
@@ -1350,6 +1352,7 @@ fn recovery_blocks_navigation_and_never_reexecutes_uncertain_intents() {
                         provenance: Provenance::UserAcknowledgedUnknown,
                         artifacts: vec![],
                         code: None,
+                        file_effect: None,
                     },
                 },
             }),
@@ -1501,6 +1504,7 @@ fn tool_result(
                         provenance,
                         artifacts: vec![],
                         code: code_for(status, provenance),
+                        file_effect: None,
                     },
                 },
             }),

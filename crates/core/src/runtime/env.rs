@@ -3,7 +3,7 @@
 use super::RuntimeEpoch;
 
 use crate::session::{
-    ApprovalId, CallId, DecisionId, EntryId, InvocationId, ResponseId, Timestamp, TurnId,
+    ApprovalId, CallId, DecisionId, EntryId, InvocationId, ResponseId, Timestamp, TurnId, UndoId,
 };
 
 /// Time and identity generation. A step reads nothing else from the outside.
@@ -31,6 +31,8 @@ pub trait Env {
     fn invocation_id(&mut self) -> InvocationId;
     /// New opaque policy revision for a remembered allowance.
     fn policy_revision(&mut self) -> String;
+    /// New undo identity, in the shared uniqueness namespace.
+    fn undo_id(&mut self) -> UndoId;
 }
 
 /// Lazily sample one instant per step. Expiry checks, timer durations and any
@@ -67,6 +69,7 @@ impl Env for StepEnv<'_> {
         decision_id -> DecisionId,
         invocation_id -> InvocationId,
         policy_revision -> String,
+        undo_id -> UndoId,
     }
 }
 
@@ -104,6 +107,9 @@ impl Env for SystemEnv {
     }
     fn policy_revision(&mut self) -> String {
         EntryId::new().to_string()
+    }
+    fn undo_id(&mut self) -> UndoId {
+        UndoId::new()
     }
 }
 
@@ -167,6 +173,9 @@ impl Env for DeterministicEnv {
         self.at.clone()
     }
     fn entry_id(&mut self) -> EntryId {
+        self.next()
+    }
+    fn undo_id(&mut self) -> UndoId {
         self.next()
     }
     fn turn_id(&mut self) -> TurnId {

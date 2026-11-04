@@ -101,6 +101,9 @@ fragments itself.
 | `Persist` | `CommitToken`, `Commit`, optional `(CommandId, Value)`, artifacts, `at` | Publish artifacts, bind command, append, answer |
 | `StartInference` | `InferenceId`, `TurnId`, head, `ModelInput`, fingerprint, `ResponseId` | Open a stream for the projection built in `Preparing` |
 | `PlanCall` | `PlanToken`, call, tool, validated operation | Plan against the trusted workspace and current policy |
+| `CaptureImage` | `CaptureToken`, immutable `Plan` | Capture the target's pre-image and publish it, before the intent |
+| `UndoRestore` | `UndoToken`, workspace identity, targets | Restore one undo's whole target set on the sequential executor |
+| `InspectUndo` | `HintToken`, targets | Advisory per-file evidence for an uncertain undo |
 | `Execute` | `ExecutionToken`, `AuthorizedOperation` | Run after intent acknowledgement |
 | `CancelExecution` | `ExecutionToken` | Request cancellation; still await the executor answer |
 | `InspectUncertain` | `HintToken`, invocation/authorized-plan artifact pairs | Request nonblocking advisory evidence |
@@ -116,7 +119,9 @@ the assistant entry will carry, which RFC-001 gives the provider request.
 
 `Accepted` is `TurnStarted { turn_id, ack }`, `Cancelling { turn_id, ack }`,
 `Resolved { invocation_id, ack }`, `HeadSelected { ack }`,
-`ModelSwitched { ack, preview }`, `ContextControlSet { ack, turn_id, mode }` or
+`ModelSwitched { ack, preview }`, `ContextControlSet { ack, turn_id, mode }`,
+`UndoPreviewed { preview }`, `UndoCompleted { undo_id, outcome, files, ack }`,
+`UndoResolved { undo_id, ack }` or
 `ApprovalSubmitted { approval_id, ack }` (decision durable), with the matching
 post-ack `EventKind::ContextControlSet { turn_id, mode }`.
 `Rejection` is `Busy`, `RecoveryRequired`,
@@ -418,6 +423,56 @@ command and `inspect_context(None, Some(model))` build a pure portability previe
 the command rejects unsupported loss before any write. Reports include native
 state loss and required media/tool incompatibilities, plus the target budget.
 
+### Capture before dispatch
+
+An allowed trusted `write`/`edit` does not go straight to its intent. The core
+emits `Effect::CaptureImage`; the sequential tool worker opens the target
+through the descriptor-rooted workspace, checks protection, regular/single-link
+status, parent identity and the plan's pre-image, streams the raw pre-image
+bytes into the content-addressed store, and computes the exact post-image with
+the executor's own edit rules. `Input::Captured` carries the resulting
+`FileImage`. Only then, after revalidating the approval's expiry and the policy
+revision, does the core commit `authorization_decided` + `execution_intent`
+(with `file_image`) + `authorizing>executing`. A stale capture refuses without
+dispatch, a denied call captures nothing, and an approval never outlives its
+deadline because a capture took time.
+
+At execution the same image is rechecked: the computed replacement digest must
+equal `post_image`, the target must still have the captured pre-image and
+ordinary mode, and the rename is the commit point that classifies
+`file_effect`.
+
+### Undo commands
+
+`PreviewUndo` is read-only: it derives the newest finished, unconsumed turn with
+trusted file mutations on the current ancestry, builds the exact targets and
+omitted calls, and returns an ephemeral `UndoPreview` bound to the head,
+sequence, configuration and turn. `Undo { command_id, expected_sequence,
+expected_head, expected_configuration, target_turn_id }` recomputes the same
+selection and refuses `undo_stale_preview` if any binding differs; a stale
+preview never falls back to another turn. It commits one retained
+`undo_intent`, bound to the command so a lost acknowledgement can neither
+select another turn nor dispatch twice, and only that acknowledgement starts
+the sequential restoration.
+
+The restoration preflights the whole target set, stages same-directory
+temporaries, rechecks the whole set, and only then mutates each target in order,
+re-resolving from the pinned root immediately before every rename or unlink. A
+complete preflight refusal commits the terminal pair as `not_applied` (which
+consumes nothing) and replies `Rejection::Undo { code: "undo_conflict" }` with
+every conflicting path and content-free reason. Full success commits the
+terminal note/result pair as `succeeded`. Anything that may have changed a
+target commits `undo_uncertain` instead, and the runtime enters resolution:
+`Command::ResolveUndo { undo_id, resolution }` records the user's per-file
+observation or acknowledged unknown with its note, in one atomic commit. No
+undo is ever retried, rolled back, or resumed automatically.
+
+Undo refusals are `undo_conflict`, `undo_nothing`, `undo_unavailable_legacy`,
+`undo_uncertain_pending`, `undo_uncertain_effect`, `undo_incomplete_turn`,
+`undo_stale_preview`, and the existing `session_not_idle`, `recovery_required`,
+and `faulted`. Key operations do not need an approval: an undo is a trusted
+user action, but it bypasses model approval, never enforcement.
+
 ### Context controls
 
 `SetContextControl { turn_id, mode }` needs an idle session for the same reasons
@@ -561,6 +616,14 @@ planned or in flight the phase is `RecoveryRequired` and commands get
 receipt. A failed recovery commit faults the runtime as usual; after
 `reopen()`, `Start` plans again from the new snapshot. Commits are atomic, so
 a half-applied step is impossible and nothing is written twice.
+
+**An unresolved undo** is recovered first, before any turn recovery: an undo
+intent without a result becomes `undo_uncertain` with a `process_restart`
+reason in a retained commit, whatever the files now look like, and the runtime
+then waits for `ResolveUndo` and requests per-file hints. No executor is
+redispatched and no restoration is retried. Storage admits only that
+uncertainty commit and the terminal note/result pair through the recovery
+barrier, never an `undo_intent`.
 
 **An interrupted turn with nothing uncertain** closes in one commit:
 

@@ -21,10 +21,22 @@ Provider-native serialization remains the adapter's responsibility.
 
 The report exposes active branch/head, included/excluded entries, reasons,
 summary provenance, token estimates/estimator version, reserves, portability
-diagnostics, and configuration identity. Actual provider usage remains separately
+diagnostics, configuration identity, effective whole-turn controls, and the
+recorded undo notes on the branch (`undos`, omitted when there are none). Actual provider usage remains separately
 labeled and does not pretend to measure a request not sent yet. The engine
 inspection API is part of the first headless slice; the shipped Ratatui inspector
 uses that same headless API.
+
+### Recorded undo notes
+
+A recorded undo is projected as one `ContextItem::User` block carrying the
+note's entry id; it is a user action, never executor or model output, and never
+a new turn. Its text names paths and call identities only: no pre-image bytes,
+artifact reference or command text ever reaches the projection or an export.
+Undo notes are never covered by a compaction: the latest one is a coverage
+barrier, so a new span starts after it and no pre-existing summary is
+superseded to reach back over it. `PROJECTION_VERSION` (6) and
+`BUILDER_VERSION` (7) record these inclusion and report changes.
 
 ## Compaction
 

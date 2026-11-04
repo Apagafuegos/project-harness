@@ -9,8 +9,9 @@ use crate::context::{ContextConfig, ContextError, Flags, PreviewReport, Totals};
 use crate::model::ModelInput;
 use crate::session::{
     ArtifactRef, CallId, CallRef, CommandId, Commit, CommitAck, ContentBlock, Digest, EntryId,
-    Inspection, InvocationId, ModelRef, ResponseId, SessionSnapshot, StoreError, Timestamp,
-    ToolStatus, TurnId, TurnOutcome, Usage,
+    FileImage, Inspection, InvocationId, ModelRef, ResponseId, SessionSnapshot, StoreError,
+    Timestamp, ToolStatus, TurnId, TurnOutcome, UndoConflict, UndoFileOutcome, UndoId, UndoOutcome,
+    UndoTarget, Usage,
 };
 
 pub use crate::model::{ProviderEvent, ProviderOutcome};
@@ -18,7 +19,9 @@ pub use crate::tools::RecoveryHint;
 
 use super::view::Phase;
 use crate::session::{ApprovalId, Decision, ResultCode};
-use crate::tools::{AuthorizedOperation, ExecutionOutcome, Plan, Refusal, ValidatedOperation};
+use crate::tools::{
+    AuthorizedOperation, ExecutionOutcome, Plan, Refusal, UndoExecution, ValidatedOperation,
+};
 
 macro_rules! local_id {
     ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {$(
@@ -48,6 +51,10 @@ local_id!(
     HintToken,
     /// Identifies one compaction generation; driver answers are epoch scoped.
     CompactionToken,
+    /// Identifies one pre-image capture; stale replies are ignored.
+    CaptureToken,
+    /// Identifies one undo restoration; stale replies are ignored.
+    UndoToken,
 );
 
 /// UUIDv7 identity of one runtime incarnation, never journaled.
@@ -196,6 +203,30 @@ pub enum Input {
         /// The executor's observation, not a promise of rollback.
         outcome: ExecutionOutcome,
     },
+    /// A trusted write/edit pre-image capture completed. Nothing is dispatched
+    /// before the intent that binds it is acknowledged.
+    Captured {
+        /// Token of the capture in flight.
+        token: CaptureToken,
+        /// The bound image, or the refusal that stopped the call.
+        result: Result<FileImage, Refusal>,
+    },
+    /// The sequential executor finished one undo restoration.
+    UndoFinished {
+        /// Token of the restoration in flight.
+        token: UndoToken,
+        /// Whether anything changed, and what.
+        result: UndoExecution,
+    },
+    /// Per-file advisory evidence for an uncertain undo. Never persisted.
+    UndoHints {
+        /// Fresh inspection identity.
+        token: HintToken,
+        /// The undo the hints are about.
+        undo_id: UndoId,
+        /// One ephemeral hint per target path.
+        hints: Vec<(String, RecoveryHint)>,
+    },
     /// Advisory inspection completed; never persisted.
     Hints {
         /// Fresh inspection identity.
@@ -283,6 +314,31 @@ pub enum Command {
         /// The strategy later previews and commits use.
         strategy: crate::context::StrategyId,
     },
+    /// Ephemeral, read-only preview of the undo the current head would select.
+    PreviewUndo,
+    /// Durably undo one finished agent turn's trusted file mutations. The
+    /// expected values bind the request to the preview the user confirmed.
+    Undo {
+        /// Journal deduplication key for commit A; never reused for another
+        /// request.
+        command_id: CommandId,
+        /// Sequence the preview was taken at.
+        expected_sequence: u64,
+        /// Head the preview was taken at.
+        expected_head: Option<EntryId>,
+        /// Session configuration in effect at the preview.
+        expected_configuration: Digest,
+        /// The turn the preview named. A stale request never reselects.
+        target_turn_id: TurnId,
+    },
+    /// State what an interrupted undo left behind, or accept that it is
+    /// unknown. Accepted only for the pending uncertain undo.
+    ResolveUndo {
+        /// The interrupted undo.
+        undo_id: UndoId,
+        /// The user's statement about the whole set.
+        resolution: UndoResolution,
+    },
     /// State what happened to an invocation whose outcome is unknown. Only
     /// accepted while the runtime awaits resolution.
     ResolveUncertain {
@@ -314,6 +370,10 @@ pub enum UserResolution {
         status: ToolStatus,
         /// The user's account, bounded by `max_user_bytes`; not empty.
         text: String,
+        /// For a captured write/edit, the user's statement about whether the
+        /// rename committed. Null for every other call: a user statement is
+        /// the only thing that may classify a legacy uncertainty.
+        file_effect: Option<crate::session::FileEffect>,
     },
     /// The user accepts not knowing. Recorded with status `uncertain` and
     /// `user_acknowledged_unknown` provenance.
@@ -337,6 +397,68 @@ pub struct UncertainInvocation {
     pub intent_at: Timestamp,
     /// Ephemeral current-file evidence, never a journal fact.
     pub hint: Option<RecoveryHint>,
+}
+
+/// The user's statement about one interrupted undo, covering every target.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UndoResolution {
+    /// The user checked each file. Recorded with `observed`, which is not a
+    /// claim that restoration was all-or-nothing.
+    Observed {
+        /// One row per intent target, in target order.
+        files: Vec<UndoFileOutcome>,
+        /// The user's account, bounded by `max_user_bytes`; not empty.
+        note: String,
+    },
+    /// The user accepts not knowing which files changed.
+    AcknowledgedUnknown {
+        /// The user's account, bounded by `max_user_bytes`; not empty.
+        note: String,
+    },
+}
+
+/// One target of an ephemeral undo preview.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoPreviewTarget {
+    /// Canonical workspace path.
+    pub path: String,
+    /// Whether its pre-image is restored, rather than the created file removed.
+    pub restores: bool,
+    /// Bytes the pre-image would write back, when it is restored.
+    pub bytes: Option<u64>,
+}
+
+/// One call an undo does not reverse, as a client displays it. Display data
+/// only: it is resolved from the original proposal and never persisted again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoOmittedCall {
+    /// The proposal.
+    pub call: CallRef,
+    /// The proposed tool name.
+    pub tool: String,
+    /// Compact argument JSON, bounded for display.
+    pub arguments: String,
+    /// The recorded status, when the call was executed.
+    pub status: Option<ToolStatus>,
+}
+
+/// An ephemeral, read-only preview of the undo the current head would select.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UndoPreview {
+    /// Identity the later `Undo` would record.
+    pub undo_id: UndoId,
+    /// The selected turn.
+    pub target_turn_id: TurnId,
+    /// Head the preview was taken at.
+    pub head: Option<EntryId>,
+    /// Journal sequence the preview was taken at.
+    pub sequence: u64,
+    /// Session configuration in effect.
+    pub configuration: Digest,
+    /// Targets in committed order.
+    pub targets: Vec<UndoPreviewTarget>,
+    /// Calls the undo does not reverse.
+    pub omitted: Vec<UndoOmittedCall>,
 }
 
 /// Why a commit was not persisted.
@@ -531,6 +653,30 @@ pub enum Effect {
         /// Opaque validated and defaulted arguments.
         operation: ValidatedOperation,
     },
+    /// Capture the pre-image of an authorized trusted write/edit and publish
+    /// it, before the intent that binds it is committed.
+    CaptureImage {
+        /// Token echoed in `Input::Captured`.
+        token: CaptureToken,
+        /// The immutable plan whose target is captured.
+        plan: Plan,
+    },
+    /// Restore one undo's targets on the sequential executor, after commit A.
+    UndoRestore {
+        /// Token echoed in `Input::UndoFinished`.
+        token: UndoToken,
+        /// The session's recorded workspace identity.
+        workspace: String,
+        /// Targets in committed order.
+        targets: Vec<UndoTarget>,
+    },
+    /// Inspect the current files of an uncertain undo. Never persisted.
+    InspectUndo {
+        /// Fresh advisory job identity.
+        token: HintToken,
+        /// Targets to compare with the current workspace.
+        targets: Vec<UndoTarget>,
+    },
     /// Run only after the execution intent has been acknowledged.
     Execute {
         /// Token echoed in `Input::ToolFinished`.
@@ -638,6 +784,29 @@ pub enum Accepted {
         /// Classified target preview, with metadata only for every affected part.
         preview: Box<PreviewReport>,
     },
+    /// The preview is memory-only and grants no write authority.
+    UndoPreviewed {
+        /// Exactly what an `Undo` for this head would do.
+        preview: Box<UndoPreview>,
+    },
+    /// The undo's terminal result and its note are durable.
+    UndoCompleted {
+        /// The resolved undo.
+        undo_id: UndoId,
+        /// How it ended.
+        outcome: UndoOutcome,
+        /// One row per target, in target order.
+        files: Vec<UndoFileOutcome>,
+        /// The commit holding the result and the note.
+        ack: CommitAck,
+    },
+    /// The user's resolution of an interrupted undo is durable.
+    UndoResolved {
+        /// The resolved undo.
+        undo_id: UndoId,
+        /// The commit holding the result and the note.
+        ack: CommitAck,
+    },
     /// The `context_control` entry is durable.
     ContextControlSet {
         /// Its acknowledgement.
@@ -690,6 +859,17 @@ pub enum Rejection {
     StaleCommand,
     /// The command itself is invalid, with a stable code.
     Invalid(&'static str),
+    /// An undo-specific refusal, with its stable code and content-free detail.
+    Undo {
+        /// Stable refusal code, such as `undo_conflict`.
+        code: &'static str,
+        /// Content-free detail; empty for a conflict, which lists its paths.
+        detail: String,
+        /// Conflicting targets, sorted by path.
+        conflicts: Vec<UndoConflict>,
+        /// Calls the undo does not reverse.
+        omitted: Vec<UndoOmittedCall>,
+    },
     /// `portability_loss`: the target cannot accept the projection under this policy.
     PortabilityLoss(Box<PreviewReport>),
 }
@@ -899,6 +1079,26 @@ pub enum EventKind {
         plan: Vec<u8>,
         /// Five-minute deadline.
         expires_at: Timestamp,
+    },
+    /// An undo is durably uncertain and waits for `ResolveUndo`. Its per-file
+    /// hints follow in `UndoHints`.
+    UndoUncertain {
+        /// The interrupted undo.
+        undo_id: UndoId,
+        /// The turn it was undoing.
+        target_turn_id: TurnId,
+    },
+    /// Advisory per-file evidence about an uncertain undo; never persisted.
+    UndoHints {
+        /// The interrupted undo.
+        undo_id: UndoId,
+        /// One hint per target path.
+        hints: Vec<(String, RecoveryHint)>,
+    },
+    /// The undo is resolved; this clears the pending uncertainty.
+    UndoResolved {
+        /// The resolved undo.
+        undo_id: UndoId,
     },
     /// The resolution is durable. This clears the pending ticket.
     ApprovalResolved {
