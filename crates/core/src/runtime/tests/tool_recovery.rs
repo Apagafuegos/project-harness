@@ -224,3 +224,37 @@ fn hints_bind_authorized_artifact_and_survive_view_resync_without_journaling() {
         resolve(d);
     });
 }
+
+#[test]
+fn d9_search_intent_is_closed_read_only_without_reexecution() {
+    fn search_enabled() -> Driver {
+        let mut config = super::pipeline::configuration();
+        config["enabled_tools"] = json!(["read", "write", "edit", "bash", "list", "glob", "grep"]);
+        super::pipeline::configured(config)
+    }
+    for fate in [Crash::Lost, Crash::Durable, Crash::Torn] {
+        scenario_from(search_enabled, |d| {
+            read_intent(d, &[("grep", json!({"pattern":"hello"}))]);
+            let invocation = d.runtime.snapshot().unresolved_invocations()[0]
+                .intent
+                .invocation_id
+                .clone();
+            d.kill(fate);
+            d.restart();
+            d.settle();
+            assert_eq!(d.count(), 0);
+            assert_eq!(d.runtime.phase(), Phase::Durable(RuntimeState::Idle));
+            assert!(d.runtime.view().awaiting.is_empty());
+            let results = results(d);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].invocation_id, Some(invocation));
+            assert_eq!(results[0].status, ToolStatus::Cancelled);
+            assert_eq!(results[0].metadata.code.as_deref(), Some("process_restart"));
+            assert_eq!(results[0].metadata.provenance, Provenance::Runtime);
+            assert!(d.runtime.snapshot().events().all(|(_, _, e)| !matches!(
+                e,
+                JournalEvent::ExecutionUncertain(_) | JournalEvent::RecoveryResolved(_)
+            )));
+        });
+    }
+}

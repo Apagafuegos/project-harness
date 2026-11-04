@@ -198,7 +198,7 @@ fn registry_unknown_tool_tool_disabled_and_reserved_names() {
             .definitions()
             .map(|d| d.name.as_str())
             .collect::<Vec<_>>(),
-        ["read", "write", "edit", "bash"]
+        ["read", "write", "edit", "bash", "list", "glob", "grep"]
     );
     for name in ["read", "write", "edit", "bash"] {
         let policy = default_policy();
@@ -1422,6 +1422,7 @@ fn tools_source_has_no_runtime_io() {
         ("plan", include_str!("plan.rs")),
         ("policy", include_str!("policy.rs")),
         ("recovery", include_str!("recovery.rs")),
+        ("search", include_str!("search.rs")),
         ("tests", include_str!("tests.rs")),
     ];
     for line in include_str!("mod.rs").lines() {
@@ -1446,5 +1447,102 @@ fn tools_source_has_no_runtime_io() {
         ] {
             assert!(!source.contains(&forbidden), "{name}: {forbidden}");
         }
+    }
+}
+
+#[test]
+fn search_tools_follow_workspace_read_ignore_allowances_and_bind_every_argument() {
+    let mut view = FakeWorkspace::new();
+    view.file("dir/a.rs", b"needle");
+    view.directory("dir");
+    let cases = [
+        ("list", json!({"path":"."})),
+        ("glob", json!({"pattern":"**/*.rs","path":"."})),
+        ("grep", json!({"pattern":"needle","path":"."})),
+    ];
+    for (name, a) in &cases {
+        let name = *name;
+        for setting in ["allow", "ask", "deny"] {
+            let mut c = config();
+            c["enabled_tools"] = json!(["read", "write", "edit", "bash", "list", "glob", "grep"]);
+            c["workspace_read"] = json!(setting);
+            // Reads never consume allowances; an unrelated grant cannot widen them.
+            c["allowances"] = json!([{"tool":"write","path":"."}]);
+            let p = policy(c);
+            let built = plan(name, a.clone(), &view, &p).unwrap();
+            let expected = match setting {
+                "allow" => 2,
+                "deny" => 0,
+                _ => 1,
+            };
+            let auth = decide(&built, built.facts(), &p);
+            assert_eq!(outcome(auth), expected, "{name} {setting}");
+            if setting == "ask" {
+                let Authorization::Ask(request) = decide(&built, built.facts(), &p) else {
+                    panic!("ask row must produce a ticket");
+                };
+                assert_eq!(Digest::of(&request.plan_bytes), request.plan_digest);
+                assert_eq!(request.policy_revision, p.revision());
+            }
+            // Defaulted arguments are part of the approval digest.
+            let mut changed = a.clone();
+            match name {
+                "list" => changed["path"] = json!("dir"),
+                "glob" => changed["include_ignored"] = json!(true),
+                _ => changed["case_insensitive"] = json!(true),
+            }
+            assert_ne!(
+                plan(name, changed, &view, &p).unwrap().digest(),
+                built.digest(),
+                "{name}: an argument change must change the approval digest"
+            );
+        }
+    }
+    // A protected path is refused with the same code `read` uses, before any walk.
+    view.facts_mut("dir").protection = Protection::Denied;
+    let p = policy({
+        let mut c = config();
+        c["enabled_tools"] = json!(["read", "write", "edit", "bash", "list", "glob", "grep"]);
+        c
+    });
+    for (name, a) in [
+        ("list", json!({"path":"dir"})),
+        ("glob", json!({"pattern":"*","path":"dir"})),
+        ("grep", json!({"pattern":"needle","path":"dir"})),
+    ] {
+        refusal(
+            plan(name, a, &view, &p),
+            ResultCode::ProtectedPath,
+            ToolStatus::Denied,
+        );
+    }
+    view.facts_mut("dir").protection = Protection::None;
+    let p = policy({
+        let mut c = config();
+        c["enabled_tools"] = json!(["read", "write", "edit", "bash", "list", "glob", "grep"]);
+        c["protected_paths"] = json!(["dir"]);
+        c
+    });
+    for (name, a) in [
+        ("list", json!({"path":"dir"})),
+        ("glob", json!({"pattern":"*","path":"dir"})),
+        ("grep", json!({"pattern":"needle","path":"dir"})),
+    ] {
+        refusal(
+            plan(name, a, &view, &p),
+            ResultCode::ProtectedPath,
+            ToolStatus::Denied,
+        );
+    }
+    for (name, a) in [
+        ("list", json!({"path":".git"})),
+        ("glob", json!({"pattern":"*","path":".git/objects"})),
+        ("grep", json!({"pattern":"needle","path":".git"})),
+    ] {
+        refusal(
+            plan(name, a, &view, &p),
+            ResultCode::ProtectedPath,
+            ToolStatus::Denied,
+        );
     }
 }

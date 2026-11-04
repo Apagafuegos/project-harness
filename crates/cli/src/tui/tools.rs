@@ -108,6 +108,7 @@ pub(super) struct Facts<'a> {
     pub(super) status: Option<harness_core::session::ToolStatus>,
     pub(super) code: Option<&'a str>,
     pub(super) exit_code: Option<i32>,
+    pub(super) search: Option<(u64, bool)>,
 }
 
 /// One compact call header, plus the diff an `edit` call carries.
@@ -125,6 +126,15 @@ pub(super) fn call(
         Span::raw(" "),
     ];
     spans.extend(summary(name, arguments));
+    if let Some((count, truncated)) = facts.search {
+        spans.push(Span::styled(
+            format!(
+                " ({count} results{})",
+                if truncated { "; truncated" } else { "" }
+            ),
+            theme.style(Role::Dim),
+        ));
+    }
     let suffix = match (facts.exit_code, facts.code) {
         (Some(exit), _) => Some(format!(" (exit {exit})")),
         (None, Some(code)) => Some(format!(" ({})", bounded(code, 60))),
@@ -181,6 +191,22 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
                 Span::styled(format!(" ({bytes} B)"), dim),
             ]
         }
+        "list" => vec![Span::raw(bounded(
+            string(arguments, "path").unwrap_or("."),
+            120,
+        ))],
+        "glob" => vec![Span::styled(
+            line(&bounded(string(arguments, "pattern").unwrap_or("?"), 200)),
+            code,
+        )],
+        "grep" => vec![Span::styled(
+            format!(
+                "/{}/ {}",
+                line(&bounded(string(arguments, "pattern").unwrap_or("?"), 200)),
+                line(&bounded(string(arguments, "path").unwrap_or("."), 120))
+            ),
+            code,
+        )],
         "edit" => vec![Span::styled(
             bounded(string(arguments, "path").unwrap_or("?"), 120),
             plain,
@@ -234,6 +260,25 @@ pub(super) fn approval(
     let dim = theme.style(Role::Dim);
     let label = theme.style(Role::Strong);
     let code = theme.style(Role::InlineCode);
+    if !raw && matches!(name, "list" | "glob" | "grep") {
+        let defaults = match name {
+            "list" => serde_json::json!({"path":"."}),
+            "glob" => serde_json::json!({"path":".","pattern":"","include_ignored":false}),
+            _ => {
+                serde_json::json!({"pattern":"","path":".","glob":null,"case_insensitive":false,"output":"matches","context_lines":0,"max_results":200,"include_ignored":false})
+            }
+        };
+        let mut values = defaults.as_object().expect("defaults").clone();
+        values.extend(arguments.clone());
+        let mut rows = vec![Line::styled("read-only", dim)];
+        for (key, value) in values {
+            rows.push(Line::from(vec![
+                Span::styled(format!("{key}: "), label),
+                Span::raw(line(&value.to_string())),
+            ]));
+        }
+        return rows;
+    }
     if raw || !matches!(name, "bash" | "edit" | "write" | "read") {
         let mut rows = Vec::new();
         if !matches!(name, "bash" | "edit" | "write" | "read") {
@@ -358,6 +403,92 @@ fn boolean(arguments: &Map<String, Value>, key: &str) -> bool {
     arguments.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// Search metadata comes only from the recorded model-facing result.
+pub(super) fn search_facts(text: &str) -> Option<(u64, bool)> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    Some((value["count"].as_u64()?, value["truncated"].as_bool()?))
+}
+
+/// Decode search JSON for display only; malformed/non-search text stays literal.
+pub(super) fn result_lines(name: &str, text: &str) -> Vec<String> {
+    if !matches!(name, "list" | "glob" | "grep") {
+        return text.lines().map(str::to_owned).collect();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return text.lines().map(str::to_owned).collect();
+    };
+    let mut rows = Vec::new();
+    if let Some(entries) = value["entries"].as_array() {
+        for entry in entries {
+            let name = entry["name"].as_str().unwrap_or("?");
+            rows.push(match entry["type"].as_str() {
+                Some("file") => format!("file {name} ({} B)", entry["size"]),
+                Some("dir") => format!("dir {name}/"),
+                _ => format!("symlink {name} [not followed]"),
+            });
+        }
+    } else if let Some(paths) = value["paths"].as_array() {
+        rows.extend(paths.iter().filter_map(Value::as_str).map(str::to_owned));
+    } else if let Some(matches) = value["matches"].as_array() {
+        for found in matches {
+            let path = found["path"].as_str().unwrap_or("?");
+            for context in found["before"].as_array().into_iter().flatten() {
+                rows.push(format!(
+                    "{path}-{}- {}",
+                    context["line"],
+                    context["text"].as_str().unwrap_or("")
+                ));
+            }
+            rows.push(format!(
+                "{path}:{}: {}",
+                found["line"],
+                found["text"].as_str().unwrap_or("")
+            ));
+            for context in found["after"].as_array().into_iter().flatten() {
+                rows.push(format!(
+                    "{path}-{}- {}",
+                    context["line"],
+                    context["text"].as_str().unwrap_or("")
+                ));
+            }
+        }
+    } else {
+        return text.lines().map(str::to_owned).collect();
+    }
+    if rows.is_empty() {
+        rows.push("no results".into());
+    }
+    if let Some(skipped) = value["skipped"].as_object() {
+        for (reason, count) in skipped {
+            if count.as_u64().is_some_and(|count| count > 0) {
+                rows.push(format!("skipped {reason}: {count}"));
+            }
+        }
+    }
+    for limit in value["limits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        rows.push(format!("limit: {limit}"));
+    }
+    for warning in value["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        rows.push(format!("warning: {warning}"));
+    }
+    if let Some(omitted) = value["inline_omitted"].as_u64() {
+        rows.push(format!(
+            "{omitted} results omitted inline; full output in artifact"
+        ));
+    }
+    rows
+}
+
 /// A code block's dim gutter, for tool output rows.
 pub(super) fn output_gutter() -> Span<'static> {
     Span::styled("│ ", Theme::default().style(Role::Dim))
@@ -426,6 +557,7 @@ mod tests {
                     status: Some(status),
                     code: Some("tools_unavailable"),
                     exit_code: None,
+                    search: None,
                 },
             );
             let header = text(&rows);
@@ -447,6 +579,7 @@ mod tests {
             Facts {
                 status: Some(ToolStatus::Failed),
                 code: Some("nonzero_exit"),
+                search: None,
                 exit_code: Some(101),
             },
         ));
@@ -461,6 +594,129 @@ mod tests {
             unknown.contains("web_search") && unknown.contains('q'),
             "{unknown}"
         );
+    }
+
+    #[test]
+    fn search_blocks_at_80_columns_no_color_and_ascii() {
+        use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+        for (ascii, expected) in [
+            (
+                false,
+                "✓ list . (2 results)\n│ file a.rs (3 B)\n│ dir src/\n✓ glob **/*.rs (1 results)\n│ a.rs\n✓ grep /hit/ . (1 results; truncated)\n│ a.rs:1: hit\n│ limit: max_results:matches",
+            ),
+            (
+                true,
+                "ok list . (2 results)\n| file a.rs (3 B)\n| dir src/\nok glob **/*.rs (1 results)\n| a.rs\nok grep /hit/ . (1 results; truncated)\n| a.rs:1: hit\n| limit: max_results:matches",
+            ),
+        ] {
+            let mut rows = Vec::new();
+            for (name, args, result) in [
+                (
+                    "list",
+                    serde_json::json!({}),
+                    serde_json::json!({"count":2,"truncated":false,"entries":[{"name":"a.rs","type":"file","size":3},{"name":"src","type":"dir"}]}),
+                ),
+                (
+                    "glob",
+                    serde_json::json!({"pattern":"**/*.rs"}),
+                    serde_json::json!({"count":1,"truncated":false,"paths":["a.rs"]}),
+                ),
+                (
+                    "grep",
+                    serde_json::json!({"pattern":"hit"}),
+                    serde_json::json!({"count":1,"truncated":true,"matches":[{"path":"a.rs","line":1,"text":"hit"}],"limits":["max_results:matches"]}),
+                ),
+            ] {
+                let result = result.to_string();
+                rows.extend(call(
+                    name,
+                    &arguments(args),
+                    Facts {
+                        status: Some(ToolStatus::Succeeded),
+                        search: search_facts(&result),
+                        ..Facts::default()
+                    },
+                ));
+                rows.extend(
+                    result_lines(name, &result)
+                        .iter()
+                        .map(|line| output_row(line)),
+                );
+            }
+            let theme = Theme::new(true, ascii);
+            theme.apply(&mut rows);
+            let rows = super::super::render::wrap_lines(rows, 80, ascii);
+            let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+            terminal
+                .draw(|frame| frame.render_widget(Paragraph::new(rows), frame.area()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let actual = (0..8)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(actual, expected);
+            assert!(
+                buffer
+                    .content
+                    .iter()
+                    .all(|cell| cell.fg == ratatui::style::Color::Reset
+                        && cell.bg == ratatui::style::Color::Reset)
+            );
+        }
+    }
+
+    #[test]
+    fn search_approval_previews_show_every_default_and_argument() {
+        for (name, args, fields) in [
+            ("list", serde_json::json!({}), vec!["path: \".\""]),
+            (
+                "glob",
+                serde_json::json!({"pattern":"*.rs","include_ignored":true}),
+                vec!["pattern: \"*.rs\"", "path: \".\"", "include_ignored: true"],
+            ),
+            (
+                "grep",
+                serde_json::json!({"pattern":"hit","glob":"*.rs","context_lines":5,"max_results":12,"case_insensitive":true,"include_ignored":true,"output":"files","path":"src"}),
+                vec![
+                    "pattern: \"hit\"",
+                    "path: \"src\"",
+                    "glob: \"*.rs\"",
+                    "context_lines: 5",
+                    "max_results: 12",
+                    "case_insensitive: true",
+                    "include_ignored: true",
+                    "output: \"files\"",
+                ],
+            ),
+        ] {
+            let preview = text(&approval(Path::new("/work"), name, &arguments(args), false));
+            for field in fields {
+                assert!(preview.contains(field), "{preview}: missing {field}");
+            }
+        }
+        let preview = text(&approval(
+            Path::new("/work"),
+            "grep",
+            &arguments(serde_json::json!({"pattern":"hit"})),
+            false,
+        ));
+        for field in [
+            "case_insensitive: false",
+            "output: \"matches\"",
+            "context_lines: 0",
+            "max_results: 200",
+            "include_ignored: false",
+            "glob: null",
+        ] {
+            assert!(preview.contains(field), "{preview}");
+        }
     }
 
     #[test]

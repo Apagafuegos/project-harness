@@ -287,7 +287,7 @@ pub fn continuation_switch(o: &SessionOptions) -> Option<(ModelRef, Portability)
 }
 
 fn policy_json(summary: Option<&ModelRef>, strategy: StrategyId) -> Value {
-    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash"],
+    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash","list","glob","grep"],
         "workspace_read":"ask", "workspace_mutation":"ask", "process":"ask", "network":"deny",
         "protected_paths":[], "allowances":[],
         "compaction":{"strategy":strategy.as_str(),"summary_model":summary,"automatic":summary.is_some()}})
@@ -335,6 +335,16 @@ fn session_configuration(
 ) -> Result<(Value, Vec<String>), Failure> {
     let mut value = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
     let tools = available_tools(availability);
+    let search = |name: &str| tools.iter().any(|tool| tool == name);
+    let search_hint = if search("list") && search("glob") && search("grep") {
+        if search("bash") {
+            "Prefer list, glob and grep over bash for finding files and text."
+        } else {
+            "Prefer list, glob and grep for finding files and text."
+        }
+    } else {
+        ""
+    };
     let base = include_str!("base-instruction.txt")
         .replace(
             "{tools}",
@@ -349,7 +359,8 @@ fn session_configuration(
             o.workspace
                 .to_str()
                 .ok_or_else(|| configuration("workspace_not_utf8"))?,
-        );
+        )
+        .replace("{search_hint}", search_hint);
     let mut instructions = vec![json!({"level":"system", "text":base})];
     let (files, warnings) = instruction_files(
         &o.workspace,

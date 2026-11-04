@@ -18,6 +18,11 @@ pub trait WorkspaceView {
     fn identity(&self) -> &WorkspaceIdentity;
     /// Inspect using trusted resolution; absence is a fact, not an error.
     fn inspect(&self, path: &WorkspacePath) -> Result<FileFacts, Refusal>;
+    /// Inspect kind/protection without content hashing for bounded search.
+    /// Views without a separate metadata implementation may reuse inspection.
+    fn inspect_metadata(&self, path: &WorkspacePath) -> Result<FileFacts, Refusal> {
+        self.inspect(path)
+    }
     /// Return UTF-8 text or `not_utf8`/`too_large`; never truncate silently.
     fn read_text(&self, path: &WorkspacePath, max_bytes: u64) -> Result<String, Refusal>;
 }
@@ -139,7 +144,31 @@ impl Plan {
             cwd: cwd_protection,
         };
         let mut mounts = Vec::new();
-        let target = if let Some(path) = operation.path() {
+        let target = if operation.search() {
+            let path = operation.path().expect("search path");
+            if policy.protected_paths().iter().any(|p| path.beneath(p))
+                || path.as_str().split('/').any(|p| p == ".git")
+            {
+                return Err(Refusal::new(
+                    ResultCode::ProtectedPath,
+                    "target or directory is protected",
+                ));
+            }
+            let current = workspace.inspect_metadata(path)?;
+            facts.target = policy.protection(path, current.protection);
+            if facts.target != Protection::None {
+                return Err(Refusal::new(
+                    ResultCode::ProtectedPath,
+                    "target or directory is protected",
+                ));
+            }
+            if matches!(operation, Operation::Grep { .. }) && current.kind == FileKind::Regular {
+                // Grep accepts either a file or a directory, without content reads in planning.
+            } else {
+                require_directory(&current)?;
+            }
+            None
+        } else if let Some(path) = operation.path() {
             let current = workspace.inspect(path)?;
             facts.target = policy.protection(path, current.protection);
             refuse_protection(facts.target, operation.mutation())?;
@@ -223,7 +252,10 @@ impl Plan {
                         ));
                     }
                 }
-                Operation::Bash { .. } => unreachable!(),
+                Operation::Bash { .. }
+                | Operation::List { .. }
+                | Operation::Glob { .. }
+                | Operation::Grep { .. } => unreachable!(),
             }
             let pre_image = if absent {
                 PreImage::Absent("absent")

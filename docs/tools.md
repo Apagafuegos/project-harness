@@ -80,6 +80,41 @@ original untouched. After rename, cancellation does not undo the mutation or
 replace success. Parent-fsync failure can report an infrastructure failure
 following a committed replacement; never assume rollback or retry it silently.
 
+## Implemented: search tools
+
+`list`, `glob` and `grep` are trusted, in-process, read-only tools on the same
+descriptor-rooted workspace (ADR 0031). They are appended after `bash` in the
+registry, have effects `[read]` and backend `trusted_fs`, and therefore follow
+the `workspace_read` policy and `--approve-read-only` with no new approval
+classification. They never use allowances. Their canonical plans bind every
+defaulted argument.
+
+- **`list`:** one directory (default `.`), at most 1,000 entries, byte-sorted
+  `file`/`dir`/`symlink` rows with file sizes.
+- **`glob`:** one gitignore-style pattern relative to `path` (default `.`), at
+  most 1,000 file paths and 20,000 visited directories including the start.
+- **`grep`:** pure-Rust `regex` syntax over UTF-8 files, optional gitignore-style
+  `glob` filter, `matches` (path, line, text, optional before/after context) or
+  `files`, 200 results by default and at most 2,000, context 0–5 lines.
+  Files over 1 MiB, binary files (NUL in the first 8 KiB) and non-UTF-8 files
+  are skipped and counted; at most 64 MiB is scanned. Line text is cut to 500
+  UTF-8 bytes with a marker.
+
+Walks never follow symlinks and skip FIFOs/device nodes. `.git`, configured
+protected paths and the pinned harness data root are omitted before listing or
+matching, even with `include_ignored`, and are never counted as skips. Root and
+nested `.gitignore` files are read through the workspace API under the 64 KiB
+cap; an unreadable one warns without revealing content and is ignored. Dot
+directories are skipped in recursive walks unless a literal pattern component
+names them. `include_ignored: true` disables ignore rules only.
+
+Results are deterministic compact JSON: rows, counts, `truncated`, the exact
+limit names reached, warnings, visited directories, scanned bytes and skip
+counts by reason. Inline text is at most 32 KiB; a larger result publishes its
+complete JSON as an artifact and keeps a bounded prefix inline. The shared
+30-second deadline and cancellation propagate between entries, files and lines.
+Interrupted search intents use the existing read-only restart closure.
+
 ## Planned separately
 
 Native provider adapters and a CLI chat command remain separate work.

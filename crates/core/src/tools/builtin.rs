@@ -61,6 +61,24 @@ pub(super) enum Operation {
         old_text: String,
         new_text: String,
     },
+    List {
+        path: WorkspacePath,
+    },
+    Glob {
+        pattern: String,
+        path: WorkspacePath,
+        include_ignored: bool,
+    },
+    Grep {
+        pattern: String,
+        path: WorkspacePath,
+        glob: Option<String>,
+        case_insensitive: bool,
+        output: String,
+        context_lines: u64,
+        max_results: u64,
+        include_ignored: bool,
+    },
     Bash {
         command: String,
         cwd: WorkspacePath,
@@ -75,15 +93,27 @@ impl Operation {
             Self::Write { .. } => 1,
             Self::Edit { .. } => 2,
             Self::Bash { .. } => 3,
+            Self::List { .. } => 4,
+            Self::Glob { .. } => 5,
+            Self::Grep { .. } => 6,
         }
     }
     pub(super) fn path(&self) -> Option<&WorkspacePath> {
         match self {
-            Self::Read { path, .. } | Self::Write { path, .. } | Self::Edit { path, .. } => {
-                Some(path)
-            }
+            Self::Read { path, .. }
+            | Self::Write { path, .. }
+            | Self::Edit { path, .. }
+            | Self::List { path }
+            | Self::Glob { path, .. }
+            | Self::Grep { path, .. } => Some(path),
             Self::Bash { .. } => None,
         }
+    }
+    pub(super) fn search(&self) -> bool {
+        matches!(
+            self,
+            Self::List { .. } | Self::Glob { .. } | Self::Grep { .. }
+        )
     }
     pub(super) fn mutation(&self) -> bool {
         matches!(self, Self::Write { .. } | Self::Edit { .. })
@@ -99,11 +129,11 @@ struct Builtin {
 /// A fixed registry. It has no registration or replacement API.
 #[derive(Clone, Debug)]
 pub struct Registry {
-    tools: [Builtin; 4],
+    tools: [Builtin; 7],
 }
 
 impl Registry {
-    /// The four definitions, regardless of executor availability (step 4 gates dispatch).
+    /// All definitions, regardless of executor availability (step 4 gates dispatch).
     pub fn builtin() -> Self {
         Self {
             tools: std::array::from_fn(|index| Builtin {
@@ -131,13 +161,16 @@ impl Registry {
         Ok(tool)
     }
 
-    /// All definitions in fixed read/write/edit/bash order.
+    /// All definitions in fixed read/write/edit/bash/list/glob/grep order.
     pub fn definitions(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.tools.iter().map(|t| &t.definition)
     }
 }
 
 fn definition(index: usize) -> ToolDefinition {
+    if index >= 4 {
+        return super::search::definition(index);
+    }
     let path = json!({"type":"string", "minLength":1, "description":"Workspace-relative Linux path; no absolute paths, traversal, NUL, or symlinks. At most 4096 UTF-8 bytes."});
     let (name, description, properties, required, effect) = match index {
         0 => (
@@ -183,7 +216,7 @@ fn definition(index: usize) -> ToolDefinition {
 }
 
 fn schema(index: usize) -> &'static jsonschema::Validator {
-    static SCHEMAS: [OnceLock<jsonschema::Validator>; 4] = [const { OnceLock::new() }; 4];
+    static SCHEMAS: [OnceLock<jsonschema::Validator>; 7] = [const { OnceLock::new() }; 7];
     SCHEMAS[index].get_or_init(|| {
         jsonschema::validator_for(&definition(index).input_schema).expect("built-in schema")
     })
@@ -299,6 +332,37 @@ impl Tool for Builtin {
                 old_text: string("old_text"),
                 new_text: string("new_text"),
             },
+            4 => Operation::List {
+                path: path("path")?,
+            },
+            5 => {
+                let pattern = string("pattern");
+                super::search::glob_matcher(&pattern)?;
+                Operation::Glob {
+                    pattern,
+                    path: path("path")?,
+                    include_ignored: arguments["include_ignored"].as_bool().unwrap_or(false),
+                }
+            }
+            6 => {
+                let pattern = string("pattern");
+                let case_insensitive = arguments["case_insensitive"].as_bool().unwrap_or(false);
+                super::search::regex(&pattern, case_insensitive)?;
+                let glob = arguments["glob"].as_str().map(str::to_owned);
+                if let Some(pattern) = &glob {
+                    super::search::glob_matcher(pattern)?;
+                }
+                Operation::Grep {
+                    pattern,
+                    path: path("path")?,
+                    glob,
+                    case_insensitive,
+                    output: arguments["output"].as_str().unwrap_or("matches").into(),
+                    context_lines: integer("context_lines", 0)?,
+                    max_results: integer("max_results", 200)?,
+                    include_ignored: arguments["include_ignored"].as_bool().unwrap_or(false),
+                }
+            }
             _ => {
                 let command = string("command");
                 if command.len() > 65536 {

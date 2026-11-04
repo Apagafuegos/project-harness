@@ -15,7 +15,10 @@ The model proposes a name/arguments; the registry does not accept a model-select
 executor, permission mode, or replacement implementation.
 
 Initial tools are `read`, `write`, and `edit` as trusted built-in Rust operations,
-and `bash` as a sandboxed subprocess. Listing/search tools may follow later.
+and `bash` as a sandboxed subprocess. M8 adds `list`, `glob` and `grep` as
+trusted, in-process, read-only built-ins on the descriptor-rooted workspace
+([ADR 0031](../decisions/0031-search-and-navigation-tools.md)); they use the
+existing `workspace_read` rule, protected-path rules and read-only recovery.
 Future MCP and custom extensions register capabilities through this boundary;
 their infrastructure is outside v0.1.
 
@@ -48,7 +51,17 @@ exit is an operation result, not a provider transport failure.
   the entire context merely because the command printed a large log.
 - Uncertain side effects are reconciled explicitly, never replayed automatically.
 
-Shipped argument objects reject unknown keys. `read` pages regular UTF-8 files
+Shipped argument objects reject unknown keys. `list` defaults to the workspace
+root and returns at most 1,000 entries. `glob` defaults to path `.` and
+`include_ignored: false`, returns at most 1,000 paths and visits at most 20,000
+directories including the start. `grep` defaults to path `.`,
+`case_insensitive: false`, `output: matches`, `context_lines: 0`,
+`max_results: 200` (at most 2,000) and `include_ignored: false`; it scans at
+most 64 MiB, skips and counts files over 1 MiB, binary files and non-UTF-8
+files, and cuts line text to 500 UTF-8 bytes with a marker. Every reached limit
+is explicit in the result. Search walks never follow symlinks, omit `.git` and
+protected paths before matching or counting them, honour root/nested
+`.gitignore` under a 64 KiB cap, and are bounded by the shared tool deadline. `read` pages regular UTF-8 files
 (up to 1 MiB per range); `write` defaults to no overwrite and requires an existing
 parent; `edit` requires exactly one literal match, including overlapping matches.
 Writes/edits accept at most 1 MiB. Bash command bytes are bounded to 64 KiB,

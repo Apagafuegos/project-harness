@@ -140,7 +140,10 @@ impl Allowance {
                 command: command.clone(),
                 cwd: cwd.clone(),
             })),
-            Operation::Read { .. } => None,
+            Operation::Read { .. }
+            | Operation::List { .. }
+            | Operation::Glob { .. }
+            | Operation::Grep { .. } => None,
         }
     }
 
@@ -373,7 +376,10 @@ pub fn decide(plan: &Plan, facts: &PlanFacts, policy: &PolicySnapshot) -> Author
         })
     };
     match plan.operation() {
-        Operation::Read { .. } => match policy.workspace_read {
+        Operation::Read { .. }
+        | Operation::List { .. }
+        | Operation::Glob { .. }
+        | Operation::Grep { .. } => match policy.workspace_read {
             ReadPolicy::Allow => Authorization::Allow(Box::new(plan.clone())),
             ReadPolicy::Ask => ask(),
             ReadPolicy::Deny => deny(),

@@ -115,6 +115,14 @@ root. Journals live in `sessions/`, shared content-addressed bytes in
 `artifacts/`. Keep both for a complete backup: opaque native state is sensitive
 and not encrypted by harness. Only one engine can write a session at a time.
 
+New sessions also offer three trusted, in-process read-only tools: `list` for one
+directory, `glob` for paths matching a gitignore-style pattern, and `grep` for a
+pure-Rust regular-expression content search with an optional glob filter and
+optional context. They never follow symlinks, omit `.git` and protected paths,
+honour root and nested `.gitignore` files, state truncation explicitly, and can
+be auto-approved with `--approve-read-only`. Older sessions keep the tool set
+recorded when they were created; start a new session to use them.
+
 ## User TOML defaults
 
 `$XDG_CONFIG_HOME/harness/config.toml`, falling back to

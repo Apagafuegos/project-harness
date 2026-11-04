@@ -3,3 +3,4 @@ Available tools in this session: {tools}.
 Tool calls run one at a time, and each may need the user's approval.
 Do not retry a denied call unchanged; ask the user or adapt instead.
 Subprocesses have no network access. File paths are workspace-relative.
+{search_hint}

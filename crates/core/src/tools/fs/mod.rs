@@ -6,6 +6,9 @@
 
 mod execute;
 mod resolve;
+#[cfg(test)]
+mod search_tests;
+mod walk;
 
 #[cfg(test)]
 mod tests;
@@ -52,6 +55,7 @@ pub struct FsWorkspace {
     root: OwnedFd,
     identity: WorkspaceIdentity,
     protected: BTreeMap<ObjectId, Protection>,
+    excluded: Vec<WorkspacePath>,
     // Keep identities alive: inode numbers must not be recycled during a session.
     protected_handles: Vec<OwnedFd>,
 }
@@ -102,6 +106,12 @@ impl FsWorkspace {
             root,
             identity: WorkspaceIdentity(identity.into()),
             protected: BTreeMap::new(),
+            excluded: protected
+                .configured
+                .iter()
+                .cloned()
+                .chain(protected.harness_data_root.iter().cloned())
+                .collect(),
             protected_handles: Vec::new(),
         };
         let git = WorkspacePath::new(".git").map_err(unavailable)?;

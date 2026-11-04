@@ -11,6 +11,7 @@ mod plan;
 mod policy;
 mod recovery;
 pub mod sandbox;
+mod search;
 
 pub use builtin::{Registry, Tool, ToolDefinition, ValidatedOperation};
 pub use exec::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, ToolSet};

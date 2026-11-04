@@ -1,0 +1,1 @@
+{"version":2,"call":{"response_entry_id":"019a0000-0000-7000-8000-00000000019a","call_id":"019a0000-0000-7000-8000-00000000019b"},"name":"list","arguments":{"path":"."},"workspace":"/project","cwd":".","effects":["read"],"backend":"trusted_fs","mounts":[],"network":"deny","timeout_ms":30000,"policy_revision":"initial","target":null}

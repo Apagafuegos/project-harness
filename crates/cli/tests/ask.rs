@@ -284,6 +284,9 @@ async fn approve_read_only_uses_registry_but_never_auto_approves_mutation() {
     let mut tty = FakeTerminal::new(false);
     let p = Arc::new(ScriptedProvider::new([
         proposal("read", json!({"path":"note"})),
+        proposal("list", json!({})),
+        proposal("glob", json!({"pattern":"*"})),
+        proposal("grep", json!({"pattern":"hello"})),
         proposal("write", json!({"path":"new","text":"no"})),
         reply("done"),
     ]));
@@ -299,7 +302,20 @@ async fn approve_read_only_uses_registry_but_never_auto_approves_mutation() {
             _ => None,
         })
         .collect();
-    assert!(statuses.contains(&ToolStatus::Succeeded) && statuses.contains(&ToolStatus::Denied));
+    assert_eq!(
+        statuses,
+        vec![
+            ToolStatus::Succeeded,
+            ToolStatus::Succeeded,
+            ToolStatus::Succeeded,
+            ToolStatus::Succeeded,
+            ToolStatus::Denied
+        ]
+    );
+    assert_eq!(
+        recorded_configuration(&f, &err)["enabled_tools"],
+        json!(["read", "write", "edit", "bash", "list", "glob", "grep"])
+    );
 }
 
 #[tokio::test]
@@ -952,6 +968,36 @@ async fn legacy_session_without_a_strategy(f: &Fixture) -> SessionId {
     .unwrap();
     handle.shutdown().await;
     session
+}
+
+#[tokio::test]
+async fn pre_search_session_keeps_recorded_tools_and_rejects_new_tools() {
+    let mut f = Fixture::new();
+    let session = legacy_session_without_a_strategy(&f).await;
+    let before = journal_bytes(&f, &session);
+    f.options.session = Some(session.clone());
+    let provider = Arc::new(ScriptedProvider::new([
+        proposal("glob", json!({"pattern":"*"})),
+        reply("continued"),
+    ]));
+    let (code, _, err) = f.run(provider.clone(), None).await;
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        recorded_configuration(&f, &err)["enabled_tools"],
+        json!(["read", "write", "edit"])
+    );
+    assert!(journal_bytes(&f, &session).starts_with(&before));
+    assert_eq!(configuration_changes(&journal_bytes(&f, &session)), 0);
+    assert!(provider.streams().iter().all(|stream| {
+        stream
+            .request
+            .input
+            .tools
+            .iter()
+            .all(|definition| !matches!(definition.name.as_str(), "list" | "glob" | "grep"))
+    }));
+    assert!(f.snapshot(&err).entries().any(|(_, entry)| matches!(&entry.entry.payload,
+        EntryPayload::ToolResult(result) if result.result.metadata.code.as_deref() == Some("tool_disabled"))));
 }
 
 fn configuration_changes(bytes: &[u8]) -> usize {

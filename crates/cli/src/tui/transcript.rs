@@ -263,6 +263,7 @@ struct Facts {
     status: ToolStatus,
     code: Option<String>,
     exit_code: Option<i32>,
+    search: Option<(u64, bool)>,
 }
 
 fn call_index(ancestry: &[&harness_core::session::StoredEntry]) -> Calls {
@@ -294,6 +295,10 @@ fn call_index(ancestry: &[&harness_core::session::StoredEntry]) -> Calls {
                         status: result.result.status,
                         code: result.result.metadata.code.clone(),
                         exit_code: result.result.metadata.exit_code,
+                        search: result.result.content.iter().find_map(|block| match block {
+                            ContentBlock::Text { text } => tools::search_facts(text),
+                            _ => None,
+                        }),
                     },
                 );
             }
@@ -336,6 +341,10 @@ fn entry_key(
                 if let Some(facts) = calls.facts.get(call_id) {
                     mix(facts.status as u64 + 4);
                     mix(facts.exit_code.unwrap_or(i32::MIN) as u64);
+                    if let Some((count, truncated)) = facts.search {
+                        mix(count);
+                        mix(u64::from(truncated));
+                    }
                     for byte in facts.code.as_deref().unwrap_or_default().bytes() {
                         mix(u64::from(byte));
                     }
@@ -405,6 +414,7 @@ fn render_entry(
                                 status: facts.map(|facts| facts.status),
                                 code: facts.and_then(|facts| facts.code.as_deref()),
                                 exit_code: facts.and_then(|facts| facts.exit_code),
+                                search: facts.and_then(|facts| facts.search),
                             },
                         ));
                         approval_rows(&mut rows, approvals, call_id);
@@ -692,9 +702,11 @@ fn output(
     for content in &result.result.content {
         match content {
             ContentBlock::Text { text } => {
-                for text in text.lines() {
-                    lines.push(text.to_owned());
-                }
+                let name = calls
+                    .names
+                    .get(&result.result.call.call_id)
+                    .map_or("", |(name, _)| name.as_str());
+                lines.extend(tools::result_lines(name, text));
             }
             other => media(&mut block, other),
         }

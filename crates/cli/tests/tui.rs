@@ -47,7 +47,7 @@ fn summary_model() -> ModelRef {
 fn policy(compaction: bool) -> Vec<u8> {
     let mut value = json!({
         "policy_revision": "tui-test",
-        "enabled_tools": ["read", "write", "edit"],
+        "enabled_tools": ["read", "write", "edit", "list", "glob", "grep"],
         "workspace_read": "allow",
         "workspace_mutation": "ask",
         "process": "deny",
@@ -1867,6 +1867,57 @@ async fn user_text_keeps_indentation_and_wraps_long_lines_without_truncating() {
     assert!(screen.contains("▌ │ cargo test"), "{screen}");
     assert!(screen.contains("after"), "{screen}");
     assert!(!screen.contains("```"), "{screen}");
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_blocks_expand_with_ctrl_e_at_80_columns() {
+    use harness::tui::theme::Theme;
+    let fixture = Fixture::new(false);
+    for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+        fs::write(fixture.workspace.join(name), "hit\n").unwrap();
+    }
+    let mut recorded = fixture
+        .create([
+            proposal("list", json!({})),
+            proposal("glob", json!({"pattern":"*.rs"})),
+            proposal("grep", json!({"pattern":"hit","max_results":1})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("find code").await;
+    recorded.wait_finished(&turn).await;
+    for ascii in [false, true] {
+        let mut app = App::with_theme(recorded.info.clone(), Theme::new(true, ascii));
+        for item in &recorded.items {
+            app.on_subscription(item.clone());
+        }
+        let screen = body(&text(&render(&mut app, 80, 100)));
+        for expected in [
+            "list . (4 results)",
+            "glob *.rs (4 results)",
+            "grep /hit/ . (1 results; truncated)",
+            "Ctrl-E for full output",
+        ] {
+            assert!(screen.contains(expected), "{screen}");
+        }
+        assert!(!screen.contains("file d.rs"), "{screen}");
+        app.on_key(modified(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let buffer = render(&mut app, 80, 100);
+        let expanded = text(&buffer);
+        assert!(expanded.contains("file d.rs (4 B)"), "{expanded}");
+        assert!(expanded.contains("a.rs:1: hit"), "{expanded}");
+        if ascii {
+            assert!(expanded.is_ascii());
+        }
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| cell.fg == ratatui::style::Color::Reset
+                    && cell.bg == ratatui::style::Color::Reset)
+        );
+    }
     recorded.shutdown().await;
 }
 

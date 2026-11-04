@@ -28,6 +28,8 @@ impl ObjectId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step {
     Resolve,
+    WalkEntry,
+    WalkDirectory,
     Stat,
     OpenFile,
     HashRead,
@@ -81,12 +83,12 @@ pub(super) struct Resolved {
     pub(super) protection: Protection,
     pub(super) complete: bool,
     pub(super) path: WorkspacePath,
-    ancestors: Vec<(String, ObjectId)>,
+    pub(super) ancestors: Vec<(String, ObjectId)>,
 }
 
 pub(super) fn open_relative(
     parent: BorrowedFd<'_>,
-    name: &str,
+    name: impl rustix::path::Arg,
     flags: OFlags,
     mode: Mode,
     control: &mut Control<'_>,
@@ -96,6 +98,20 @@ pub(super) fn open_relative(
     #[cfg(test)]
     super::tests::record_open();
     fs::openat2(parent, name, flags | OFlags::CLOEXEC, mode, RESOLVE).map_err(errno)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+}
+pub(super) struct DirectoryEntry {
+    pub(super) name: std::ffi::CString,
+    pub(super) raw_path: std::path::PathBuf,
+    pub(super) path: Option<WorkspacePath>,
+    pub(super) kind: EntryKind,
+    pub(super) size: u64,
 }
 
 impl FsWorkspace {
@@ -111,102 +127,153 @@ impl FsWorkspace {
     ) -> Result<(Vec<WorkspacePath>, bool), Refusal> {
         let mut noop = |_| Ok(());
         let mut control = Control::planning(&mut noop);
-        let resolved = path.map(|p| self.resolve(p, &mut control)).transpose()?;
-        if let Some(r) = &resolved {
-            refuse_protection(r.protection, false)?;
+        let root = WorkspacePath::new(".")?;
+        let (entries, limited) = self.directory_entries(
+            path.unwrap_or(&root),
+            limit,
+            |entry| {
+                entry.kind == EntryKind::Directory
+                    && entry.path.is_some()
+                    && entry.name.to_str().is_ok_and(&keep)
+            },
+            &mut control,
+        )?;
+        Ok((
+            entries.into_iter().filter_map(|entry| entry.path).collect(),
+            limited,
+        ))
+    }
+
+    pub(super) fn directory_entries(
+        &self,
+        path: &WorkspacePath,
+        limit: usize,
+        keep: impl Fn(&DirectoryEntry) -> bool,
+        control: &mut Control<'_>,
+    ) -> Result<(Vec<DirectoryEntry>, bool), Refusal> {
+        let resolved = self.resolve(path, control)?;
+        if resolved.protection != Protection::None {
+            return Err(Refusal::new(
+                ResultCode::ProtectedPath,
+                "directory is protected",
+            ));
         }
+        let pinned = resolved
+            .object
+            .as_ref()
+            .ok_or_else(|| Refusal::new(ResultCode::NotFound, "directory absent"))?;
         let directory = open_relative(
             self.root.as_fd(),
-            path.map_or(".", WorkspacePath::as_str),
+            path.as_str(),
             OFlags::RDONLY | OFlags::DIRECTORY,
             Mode::empty(),
-            &mut control,
+            control,
             Step::OpenFile,
         )?;
         let stat = fs::fstat(&directory).map_err(errno)?;
-        if let Some(r) = &resolved {
-            let pinned = r
-                .object
-                .as_ref()
-                .ok_or_else(|| Refusal::new(ResultCode::NotFound, "directory absent"))?;
-            if ObjectId::of(&stat) != ObjectId::of(&fs::fstat(pinned).map_err(errno)?) {
-                return Err(stale());
-            }
-            self.verify_ancestors(&r.ancestors, &mut control)?;
+        if ObjectId::of(&stat) != ObjectId::of(&fs::fstat(pinned).map_err(errno)?) {
+            return Err(stale());
         }
-        let mut paths = std::collections::BTreeSet::new();
+        self.verify_ancestors(&resolved.ancestors, control)?;
+        let mut entries = std::collections::BTreeMap::new();
         let mut limited = false;
         for entry in fs::Dir::read_from(&directory).map_err(errno)? {
+            control.check(Step::WalkEntry)?;
             let entry = entry.map_err(errno)?;
-            if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b".." | b".git") {
                 continue;
             }
-            let Ok(name) = entry.file_name().to_str() else {
+            let relative = name.to_str().ok().map(|name| {
+                if path.as_str() == "." {
+                    name.to_owned()
+                } else {
+                    format!("{}/{name}", path.as_str())
+                }
+            });
+            // Filter configured spellings before metadata access, including exclusions absent at startup.
+            if relative.as_ref().is_some_and(|p| {
+                self.excluded.iter().any(|excluded| {
+                    excluded.as_str() == "."
+                        || p == excluded.as_str()
+                        || p.starts_with(&format!("{}/", excluded.as_str()))
+                })
+            }) {
                 continue;
+            }
+            use std::os::unix::ffi::OsStrExt;
+            let raw_path = if path.as_str() == "." {
+                std::path::PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()))
+            } else {
+                std::path::Path::new(path.as_str())
+                    .join(std::ffi::OsStr::from_bytes(name.to_bytes()))
             };
-            if name == "." || name == ".." || !keep(name) {
+            // O_PATH|NOFOLLOW permits metadata on the symlink itself, never its
+            // target. The same resolver flags reject mount crossings and every
+            // intermediate symlink, including for non-UTF-8 entry names.
+            let object = match open_relative(
+                self.root.as_fd(),
+                raw_path.as_path(),
+                OFlags::PATH | OFlags::NOFOLLOW,
+                Mode::empty(),
+                control,
+                Step::Resolve,
+            ) {
+                Ok(object) => object,
+                Err(error)
+                    if matches!(
+                        error.code,
+                        ResultCode::NotFound
+                            | ResultCode::SymlinkRejected
+                            | ResultCode::ProtectedPath
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let stat = fs::fstat(&object).map_err(errno)?;
+            if self.protection(&stat) != Protection::None {
                 continue;
             }
-            let relative =
-                path.map_or_else(|| name.to_owned(), |p| format!("{}/{name}", p.as_str()));
-            // Some filesystems do not report d_type. Resolve unknown entries
-            // strictly instead of silently omitting their real directories.
-            if entry.file_type() == FileType::Unknown {
-                match open_relative(
-                    self.root.as_fd(),
-                    &relative,
-                    OFlags::PATH | OFlags::DIRECTORY,
-                    Mode::empty(),
-                    &mut control,
-                    Step::Resolve,
-                ) {
-                    Ok(_) => {}
-                    Err(error)
-                        if matches!(
-                            error.code,
-                            ResultCode::NotRegularFile
-                                | ResultCode::SymlinkRejected
-                                | ResultCode::NotFound
-                        ) =>
-                    {
-                        continue;
-                    }
-                    Err(error) => return Err(error),
-                }
+            let kind = match FileType::from_raw_mode(stat.st_mode) {
+                FileType::RegularFile => EntryKind::File,
+                FileType::Directory => EntryKind::Directory,
+                FileType::Symlink => EntryKind::Symlink,
+                _ => continue,
+            };
+            let candidate = DirectoryEntry {
+                name: name.to_owned(),
+                raw_path,
+                path: relative.and_then(|p| WorkspacePath::new(&p).ok()),
+                kind,
+                size: stat.st_size as u64,
+            };
+            if !keep(&candidate) {
+                continue;
             }
-            if let Ok(path) = WorkspacePath::new(&relative) {
-                paths.insert(path.as_str().to_owned());
-                if paths.len() > limit {
-                    paths.pop_last();
-                    limited = true;
-                }
+            entries.insert(name.to_bytes().to_vec(), candidate);
+            if entries.len() > limit {
+                entries.pop_last();
+                limited = true;
             }
         }
-        // A retained descriptor is not authority to read a moved-out ancestor.
-        if let Some(r) = &resolved {
-            self.verify_ancestors(&r.ancestors, &mut control)?;
-        }
+        self.verify_ancestors(&resolved.ancestors, control)?;
         let current = open_relative(
             self.root.as_fd(),
-            path.map_or(".", WorkspacePath::as_str),
+            path.as_str(),
             OFlags::PATH | OFlags::DIRECTORY,
             Mode::empty(),
-            &mut control,
+            control,
             Step::Resolve,
         )?;
         if ObjectId::of(&stat) != ObjectId::of(&fs::fstat(&current).map_err(errno)?) {
             return Err(stale());
         }
-        Ok((
-            paths
-                .into_iter()
-                .map(|p| WorkspacePath::new(&p).expect("validated path"))
-                .collect(),
-            limited,
-        ))
+        Ok((entries.into_values().collect(), limited))
     }
 
-    fn protection(&self, stat: &Stat) -> Protection {
+    pub(super) fn protection(&self, stat: &Stat) -> Protection {
         self.protected
             .get(&ObjectId::of(stat))
             .copied()
@@ -291,7 +358,7 @@ impl FsWorkspace {
         ))
     }
 
-    fn verify_ancestors(
+    pub(super) fn verify_ancestors(
         &self,
         ancestors: &[(String, ObjectId)],
         control: &mut Control<'_>,
@@ -355,6 +422,26 @@ impl WorkspaceView for FsWorkspace {
     fn inspect(&self, path: &WorkspacePath) -> Result<FileFacts, Refusal> {
         let mut noop = |_| Ok(());
         self.inspect_controlled(path, &mut Control::planning(&mut noop))
+    }
+
+    // Linux st_nlink is u32 on aarch64 and u64 on x86_64.
+    #[allow(clippy::useless_conversion)]
+    fn inspect_metadata(&self, path: &WorkspacePath) -> Result<FileFacts, Refusal> {
+        let mut noop = |_| Ok(());
+        let mut control = Control::planning(&mut noop);
+        let resolved = self.resolve(path, &mut control)?;
+        let stat = resolved
+            .object
+            .as_ref()
+            .map(|fd| fs::fstat(fd).map_err(errno))
+            .transpose()?;
+        Ok(FileFacts {
+            kind: stat.as_ref().map_or(FileKind::Absent, kind),
+            size: stat.as_ref().map_or(0, |s| s.st_size as u64),
+            nlink: stat.as_ref().map_or(0, |s| u64::from(s.st_nlink)),
+            digest: None,
+            protection: resolved.protection,
+        })
     }
 
     fn read_text(&self, path: &WorkspacePath, max_bytes: u64) -> Result<String, Refusal> {

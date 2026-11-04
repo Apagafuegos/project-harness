@@ -25,6 +25,8 @@ time.workspace = true
 rustix.workspace = true
 thiserror.workspace = true
 jsonschema.workspace = true
+regex.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

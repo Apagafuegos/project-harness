@@ -70,6 +70,9 @@ impl FsWorkspace {
         timeout: Option<Duration>,
     ) -> ExecutionOutcome {
         let started = Instant::now();
+        if plan.operation().search() {
+            return self.execute_search(plan, cancellation, hook, timeout, started);
+        }
         let result = (|| {
             if plan.backend() != ExecutionBackend::TrustedFs {
                 return Err(Refusal::new(
@@ -123,7 +126,10 @@ impl FsWorkspace {
                     Replacement::Edit(old_text, new_text),
                     &mut control,
                 ),
-                Operation::Bash { .. } => Err(Refusal::new(
+                Operation::Bash { .. }
+                | Operation::List { .. }
+                | Operation::Glob { .. }
+                | Operation::Grep { .. } => Err(Refusal::new(
                     ResultCode::InfrastructureFailure,
                     "unsupported file executor plan",
                 )),
