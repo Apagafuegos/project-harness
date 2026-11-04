@@ -1,0 +1,1 @@
+Not run: DeepSeek key unavailable (exit 77 semantics); no transcript exists.

@@ -1,0 +1,1 @@
+Investigate the failing test by running cargo test --offline. Report its fully qualified name and the observed versus expected quantity. If execution is unavailable, say so and identify the likely failing test from source instead, clearly distinguishing inference from observed output. Do not change any files.

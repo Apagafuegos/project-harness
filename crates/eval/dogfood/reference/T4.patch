@@ -1,0 +1,22 @@
+--- a/src/display.rs
++++ b/src/display.rs
+@@ -5,1 +5,1 @@
+-pub fn render_balance(stock: &BTreeMap<String, i64>) -> String {
++pub fn format_balance(stock: &BTreeMap<String, i64>) -> String {
+@@ -40,1 +40,1 @@
+-        assert_eq!(render_balance(&BTreeMap::new()), "");
++        assert_eq!(format_balance(&BTreeMap::new()), "");
+@@ -47,1 +47,1 @@
+-        assert_eq!(render_balance(&stock), "apple: 4\npear: -2\n");
++        assert_eq!(format_balance(&stock), "apple: 4\npear: -2\n");
+@@ -74,1 +74,1 @@
+-        assert_eq!(parse_balance(&render_balance(&stock)).unwrap(), stock);
++        assert_eq!(parse_balance(&format_balance(&stock)).unwrap(), stock);
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -12,1 +12,1 @@
+-    display::render_balance(&ledger.balances())
++    display::format_balance(&ledger.balances())
+@@ -17,1 +17,1 @@
+-    display::render_balance(&ledger.balance_through(day))
++    display::format_balance(&ledger.balance_through(day))

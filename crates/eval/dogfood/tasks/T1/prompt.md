@@ -1,0 +1,1 @@
+Explain how this crate stores movements and renders/parses balances. Name the map type and ordering, whether zero balances survive, how blank input lines and duplicate item lines are handled, and the public formatting function. Read the source; do not change any files. Give a concise answer.

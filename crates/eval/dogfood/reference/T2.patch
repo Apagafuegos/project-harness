@@ -1,0 +1,11 @@
+--- a/src/ledger.rs
++++ b/src/ledger.rs
+@@ -58,7 +58,7 @@
+     pub fn balance_through(&self, cutoff: u32) -> BTreeMap<String, i64> {
+         let mut stock = BTreeMap::new();
+         for movement in &self.movements {
+-            if movement.day < cutoff {
++            if movement.day <= cutoff {
+                 *stock.entry(movement.item.clone()).or_default() += movement.quantity;
+             }
+         }

@@ -1,0 +1,62 @@
+{
+  "approvals": 2,
+  "approvals_by_tool": {
+    "bash": 2
+  },
+  "errors": {},
+  "exit_code": 0,
+  "harness_commit": "b5f3ad38553609338e910b88dfb9eaa7399052d6",
+  "inferences": 3,
+  "input_tokens": 4312,
+  "model": "gpt-6.1-sol",
+  "model_errors": {},
+  "oracle": {
+    "answer_facts": true,
+    "cargo_exit": null,
+    "changed_files": [],
+    "pass": true,
+    "tests_preserved": true
+  },
+  "output_tokens": 300,
+  "provider": "openai",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": null,
+  "refusals": {},
+  "result_code": "completed",
+  "retry_after_ms": null,
+  "schema": 1,
+  "status": "run",
+  "task": "T1",
+  "tool_calls": {
+    "bash": 2
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 43.22563500702381,
+      "exit_code": 0,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "bash"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 47.82038000226021,
+      "exit_code": 0,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "bash"
+    }
+  ],
+  "tool_ms": 91.04601500928402,
+  "tool_time_percent": 0.723495562444614,
+  "turn_wall_ms": 12584.184303998947,
+  "wall_ms": 13208
+}

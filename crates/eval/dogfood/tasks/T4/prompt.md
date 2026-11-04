@@ -1,0 +1,1 @@
+Rename the public display::render_balance function to display::format_balance, updating every definition and use across the crate, including tests. Remove the old name entirely; no compatibility alias. Preserve behavior and existing tests. Run cargo test --offline; leave the unrelated seeded cutoff failure unchanged.

@@ -1031,6 +1031,50 @@ Session export and journal-only deletion are implemented, including TUI keys;
 explicit GC reclaims old unreferenced artifacts under ADR 0030. Automatic
 retention remains future work. See the [user guide](user-guide.md).
 
+## Dogfood measurement
+
+`crates/eval/dogfood/` is an opt-in live measurement of how well the harness does
+small but real coding work. It is dev tooling, not product behaviour: `check.sh`
+never runs it, and it is not a workspace member. The fixture is a
+dependency-free crate under `crates/eval/dogfood/fixture/`; five tasks (`T1`–`T5`)
+each have a prompt and a mechanical oracle under `crates/eval/dogfood/tasks/`.
+
+The runner copies the fixture into a fresh temporary workspace and a fresh
+private data root under `target/dogfood-tmp/`, runs `harness ask` under a PTY,
+answers each approval prompt with `y`, and extracts its metrics from the durable
+journal; the copy, journal and transcript are deleted afterwards.
+
+**This spends real provider quota.** DeepSeek needs `DEEPSEEK_API_KEY` in the
+environment; without it those cells are recorded `not_run` and the script exits
+77. OpenAI uses the read-only Codex login.
+
+```sh
+# every task on both providers, one run each, no retries
+scripts/dogfood.sh --provider all --task all --out docs/dogfood/baseline
+
+# one task on one provider
+scripts/dogfood.sh --provider openai --task T3 --out /tmp/dogfood-T3
+```
+
+Each cell writes `metrics.json` and a sanitized `excerpt.txt`; the run writes
+`summary.json` with the per-provider decision-7 share. Optional oracles inspect
+the result on the host: file diffs against the pristine fixture, a
+`cargo test --offline` of the copy, and answer greps. That host `Command` use is
+intentional and confined to this opt-in script; the harness itself still runs
+every model-requested command in Bubblewrap.
+
+The oracles are themselves checked offline, with no network and no keys:
+
+```sh
+scripts/dogfood.sh --self-test
+```
+
+That proves each oracle fails on the pristine fixture, passes on the committed
+reference patch and answer under `crates/eval/dogfood/reference/`, and that
+`T1`/`T5` also fail if any file changed. It additionally builds one real journal
+through the runtime and checks the metric extraction against it. It runs host
+`cargo` on the fixture, so it stays out of `check.sh`.
+
 ## Specification artifacts
 
 [RFC-001](rfcs/001-core-types-state-persistence.md) has a bundled JSON Schema,

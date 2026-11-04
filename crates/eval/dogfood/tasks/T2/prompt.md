@@ -1,0 +1,1 @@
+Fix the seeded inclusive-cutoff bug in Ledger::balance_through: movements on the cutoff day must be included. Run cargo test --offline to verify. Preserve all existing tests without ignoring or weakening them. Do not implement unrelated features or renames.
