@@ -1,8 +1,8 @@
 # Milestone 7 acceptance — v0.1 candidate
 
-M7's pre-release features and documentation are implemented. **Tagging,
-publication and verification of the final release assets remain pending the
-orchestrator**, not completed by this step. Workspace version is **0.1.0**;
+M7's pre-release features and documentation are implemented, and the
+orchestrator has since tagged and published them (see [Release
+record](#release-record) below). Workspace version is **0.1.0**;
 `publish = false`, toolchain, dependencies and Cargo.lock are unchanged in step 09.
 The repository is public; decision 17 supersedes the plan's private-release
 premise. Security audit accepted at
@@ -33,7 +33,7 @@ and reconciled contracts/docs before the orchestrator tags v0.1.0.
 | 07: licence / binary release pipeline | [ADR 0029](decisions/0029-release-pipeline.md), [release evidence](development.md#accepted-dry-run-evidence); workspace metadata, LICENSE-MIT/APACHE, `.github/workflows/release.yml`, `scripts/{release-version,package-release,test-release,third-party-notices}.sh` | Met for tooling and historical two-target dry run; publication pending |
 | 08: security audit after features | [Accepted report](security/v0.1-audit.md), [classified history inventory](security/history-hits.tsv), `tests/security_audit.rs`, provider error-code/probe-env/file/maintenance regressions, `scripts/test-history-scan.sh` | Met within stated threat model, not absence-of-vulnerabilities proof |
 | 09: reconcile / guide / acceptance / changelog | All six [contracts](README.md), [user guide](user-guide.md), README/index/roadmap and relevant architecture/context/storage/release notes; CHANGELOG.md; unconditional required-guide manifest/cmp and isolated refusal fixture in `scripts/test-release.sh` | Met for changes and focused local checks; exact-head full CI required in handoff |
-| Orchestrator: tag v0.1.0 / verify public assets | Final candidate dispatch/tag/version/static smoke/archive/checksum/publication verification | Pending, deliberately not performed |
+| Orchestrator: tag v0.1.0 / verify public assets | Final candidate dispatch 41747234468, tag `v0.1.0`, publish run 41748617731, published assets re-downloaded and checksummed (see [Release record](#release-record)) | Met |
 
 ### Concrete semantics covered
 
@@ -249,6 +249,30 @@ and invalid epoch refusals remain covered.
 Changed local Markdown links/anchors and guide help syntax are checked before
 handoff. Source tests are behavioral, not tests mirroring documentation prose.
 The handoff reports exact final SHA, CI run and both required job results.
-Remaining release actions: orchestrator review/integration, final-candidate
-workflow verification, protected tag, and verification of public assets/checksums.
-No release date, published archive or final binary reproducibility is claimed.
+Release actions at handoff: orchestrator review/integration, final-candidate
+workflow verification, protected tag, and verification of public assets/checksums
+— all completed afterwards and recorded under [Release record](#release-record).
+Final binary reproducibility is not claimed.
+
+## Release record
+
+- `main` integrated the reviewed candidate at
+  `b51a3099623b402bc1d6e4438ea062225c578d4b` after CI 41745778217 passed.
+- Final-candidate dispatch [41747234468](https://github.com/Apagafuegos/project-harness/actions/runs/41747234468)
+  passed on that exact commit: both `verify` jobs, both native musl builds,
+  byte-reproducible packaging and checksum generation; publish is skipped on
+  dispatch by design.
+- Its `release-assets` artifact was downloaded and checked before tagging:
+  sorted `SHA256SUMS` verified for both archives; each archive held the binary,
+  both licences, README, `CHANGELOG.md`, a byte-identical `docs/user-guide.md`
+  and `third-party-notices/`; the aarch64 binary reported `harness 0.1.0`, was
+  statically linked, and its `--help`/`doctor --help` ran.
+- Annotated tag `v0.1.0` was pushed at that commit; publish run
+  [41748617731](https://github.com/Apagafuegos/project-harness/actions/runs/41748617731)
+  passed and created the release at 2026-11-04T00:49:21Z.
+- The published [release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
+  was re-downloaded: both archives and `SHA256SUMS` matched the verified
+  dispatch artifact byte for byte.
+- Remaining, outside this record: live Anthropic/cross-provider switching (no
+  key), a live coding/tool workflow, signed provenance, reproducible *binaries*
+  and an absence-of-vulnerabilities claim. None of these was ever claimed.

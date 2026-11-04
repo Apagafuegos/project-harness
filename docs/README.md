@@ -1,6 +1,6 @@
 # Documentation
 
-v0.1 is a release candidate with implemented headless and terminal clients.
+v0.1.0 is released with implemented headless and terminal clients.
 Start with the [user guide](user-guide.md) for installation and daily use.
 A design document alone is not evidence of implementation; acceptance documents
 separate behavioral tests, historical live runs and remaining partials.
@@ -148,7 +148,8 @@ M7 implements projection-only conversion (0015 amendment), user TOML (0028),
 user/nested instructions (0022 amendment), TUI UX/GFM/highlighting (0023 Parts
 6–7), public release tooling (0029) and session maintenance (0030). The accepted
 security audit baseline is `5b89aa2f0f3b038b73993d4c1d137da494c6027f`.
-Tagging and publication remain the orchestrator's pending actions.
+The public [`v0.1.0` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
+carries both musl archives and their checksums.
 Schema/examples alone are not evidence of implementation.
 
 **Implementation status** is recorded in the README and roadmap. A contract is

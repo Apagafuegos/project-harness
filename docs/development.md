@@ -963,6 +963,9 @@ git tag -a v0.1.0 -m 'Release v0.1.0'
 git push origin v0.1.0
 ```
 
+`v0.1.0` was cut this way at `b51a309` after dispatch 41747234468 verified both
+targets; publish run 41748617731 created the release.
+
 A tag must exactly equal `v` plus the workspace version. The version job refuses
 mismatches before building; `verify` reuses both ordinary CI jobs without
 forking their provisioning or gates. The build matrix compiles offline, checks

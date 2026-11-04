@@ -6,8 +6,8 @@ selective security and recovery (Milestone 3), and native providers, rolling
 compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
 bounded experiments (Milestone 6), and v0.1 documentation/release readiness
-(Milestone 7) are implemented within their recorded scope. Tagging/publication
-remain pending the orchestrator. Anthropic live compatibility and live
+(Milestone 7) are implemented within their recorded scope and v0.1.0 is
+released. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
 M5 quota limit; it does not claim a live coding/tool workflow.

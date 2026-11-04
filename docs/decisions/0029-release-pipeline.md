@@ -1,7 +1,7 @@
 # 0029: Release pipeline
 
-Status: Implemented; dual-target workflow-dispatch proof passed after registration
-(M7 decision 15). Tagging/publication remain pending M7 acceptance.
+Status: Implemented; the dual-target workflow-dispatch proof passed after
+registration and `v0.1.0` was published from the protected tag (M7 decision 15).
 
 Date: 2026-11-03
 
