@@ -170,7 +170,7 @@ const KEYS: &[Binding] = &[
     binding!(
         "Dialogs",
         "Tab / Shift-Tab",
-        "recovery: cycle resolution",
+        "recovery: cycle resolution; undo resolution: switch between the file list and the note",
         (Tab, M::NONE),
         (BackTab, M::SHIFT),
         (BackTab, M::NONE)
@@ -179,7 +179,7 @@ const KEYS: &[Binding] = &[
     Binding {
         area: "Dialogs",
         label: "Text / paste",
-        description: "edit only; approval a allow, d deny, r remember, v raw arguments; undo y or n/Esc (Enter cancels); recovery r/x/o/u per file, ←→ choice; quit y/Enter or n/Esc; help Esc/F1 closes",
+        description: "edit only; approval a allow, d deny, r remember, v raw arguments; undo y or n/Esc (Enter cancels); undo resolution: the note takes every printable character, Tab reaches the list where r/x/o/u set a row and a accepts unknown, ←→ choice; recovery r/x/o/u per file, ←→ choice (a captured write states the file change); quit y/Enter or n/Esc; help Esc/F1 closes",
         chords: &[],
     },
 ];

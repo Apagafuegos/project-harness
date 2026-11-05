@@ -1118,22 +1118,13 @@ async fn diagnostics_and_faults_render_with_their_codes() {
     recorded.shutdown().await;
 }
 
-#[tokio::test]
-async fn uncertain_modal_offers_the_core_resolutions() {
-    let fixture = Fixture::new(false);
-    let mut recorded = fixture
-        .create([
-            proposal("write", json!({"path": "note.txt", "text": "hello"})),
-            reply("done"),
-        ])
-        .await;
-    let turn = recorded.start("write").await;
-    let ticket = recorded.wait_approval().await;
-    recorded.submit(&ticket, Decision::Allow, false).await;
-    recorded.wait_finished(&turn).await;
-
-    // The snapshot is real; resolution itself needs a crash between intent and
-    // result, so the awaiting list is attached to the recorded view.
+/// A recorded view with `awaiting` attached: resolution itself needs a crash
+/// between intent and result, which the app-level tests do not simulate.
+async fn awaiting_view(
+    recorded: &Recorded,
+    turn: &TurnId,
+    entries: &[(&str, bool)],
+) -> RuntimeView {
     let mut view = recorded.handle.view().await.unwrap();
     let call = view
         .snapshot
@@ -1151,35 +1142,120 @@ async fn uncertain_modal_offers_the_core_resolutions() {
             _ => None,
         })
         .expect("recorded tool call");
-    let invocation_id = InvocationId::new();
     view.phase = Phase::AwaitingResolution;
-    view.awaiting = vec![UncertainInvocation {
-        invocation_id: invocation_id.clone(),
-        turn_id: turn.clone(),
-        call,
-        tool: "write".into(),
-        plan_digest: Digest::of(b"plan"),
-        intent_at: Timestamp::now(),
-        hint: Some(harness_core::tools::RecoveryHint::MatchesPostImage),
-    }];
+    view.awaiting = entries
+        .iter()
+        .map(|(tool, captured)| UncertainInvocation {
+            invocation_id: InvocationId::new(),
+            turn_id: turn.clone(),
+            call: call.clone(),
+            tool: (*tool).into(),
+            plan_digest: Digest::of(b"plan"),
+            intent_at: Timestamp::now(),
+            hint: Some(harness_core::tools::RecoveryHint::MatchesPostImage),
+            file_effect_required: *captured,
+        })
+        .collect();
+    view
+}
+
+/// v0.2.1 review finding 2: a captured mutation is resolved by stating what
+/// happened to the file, and that statement is what is sent.
+#[tokio::test]
+async fn uncertain_modal_states_a_captured_mutations_file_effect() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([
+            proposal("write", json!({"path": "note.txt", "text": "hello"})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("write").await;
+    let ticket = recorded.wait_approval().await;
+    recorded.submit(&ticket, Decision::Allow, false).await;
+    recorded.wait_finished(&turn).await;
+    let view = awaiting_view(&recorded, &turn, &[("write", true)]).await;
+    let invocation_id = view.awaiting[0].invocation_id.clone();
     let mut app = App::new(recorded.info.clone());
     app.on_subscription(SubscriptionItem::Reset(ClientView::from(view)));
     let screen = text(&render(&mut app, 80, 24));
     assert!(screen.contains("uncertain invocation"), "{screen}");
-    assert!(screen.contains("matches the post-image"), "{screen}");
+    assert!(
+        screen.contains("observed: the file change was applied"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("observed: the file change was not applied"),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("observed: succeeded"),
+        "a captured mutation is never resolved by status alone: {screen}"
+    );
 
+    // Observed applied: the user's file statement and the call's status.
+    app.on_key(key(KeyCode::Right));
+    type_text(&mut app, "the file has the new text");
     let actions = app.on_key(key(KeyCode::Enter));
-    assert_eq!(actions.len(), 1);
     assert!(matches!(
         &actions[0],
         Action::Command(Command::ResolveUncertain {
             invocation_id: chosen,
-            resolution: UserResolution::AcknowledgedUnknown,
-        }) if chosen == &invocation_id
+            resolution: UserResolution::Observed {
+                status: ToolStatus::Succeeded,
+                text,
+                file_effect: Some(FileEffect::Applied),
+            },
+        }) if chosen == &invocation_id && text == "the file has the new text"
     ));
 
+    // Observed not applied: the same dialog, the other statement.
     app.on_key(key(KeyCode::Right));
-    type_text(&mut app, "file written");
+    let actions = app.on_key(key(KeyCode::Enter));
+    assert!(matches!(
+        &actions[0],
+        Action::Command(Command::ResolveUncertain {
+            invocation_id: chosen,
+            resolution: UserResolution::Observed {
+                status: ToolStatus::Failed,
+                file_effect: Some(FileEffect::NotApplied),
+                ..
+            },
+        }) if chosen == &invocation_id
+    ));
+    recorded.shutdown().await;
+}
+
+/// Another call keeps the status choices and sends no file effect, and moving
+/// between a captured and an uncaptured invocation never keeps an answer the
+/// new question cannot express.
+#[tokio::test]
+async fn uncertain_modal_keeps_file_effect_none_for_other_calls() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([
+            proposal("write", json!({"path": "note.txt", "text": "hello"})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("write").await;
+    let ticket = recorded.wait_approval().await;
+    recorded.submit(&ticket, Decision::Allow, false).await;
+    recorded.wait_finished(&turn).await;
+    let view = awaiting_view(&recorded, &turn, &[("write", true), ("bash", false)]).await;
+    let selected = view.awaiting[1].invocation_id.clone();
+    let mut app = App::new(recorded.info.clone());
+    app.on_subscription(SubscriptionItem::Reset(ClientView::from(view)));
+    // The captured call is selected first: switch to the executed bash call.
+    app.on_key(key(KeyCode::Down));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("observed: succeeded"), "{screen}");
+    assert!(
+        !screen.contains("the file change was"),
+        "an uncaptured call is never asked about a file: {screen}"
+    );
+    app.on_key(key(KeyCode::Right));
+    type_text(&mut app, "the command ran");
     let actions = app.on_key(key(KeyCode::Enter));
     assert!(matches!(
         &actions[0],
@@ -1190,7 +1266,7 @@ async fn uncertain_modal_offers_the_core_resolutions() {
                 text,
                 file_effect: None,
             },
-        }) if chosen == &invocation_id && text == "file written"
+        }) if chosen == &selected && text == "the command ran"
     ));
     recorded.shutdown().await;
 }
@@ -2470,10 +2546,9 @@ async fn a_refused_undo_resolution_keeps_the_dialog_and_draft() {
         .pump(|view| view.phase == Phase::AwaitingResolution && view.undo.is_some())
         .await;
     let mut app = reopened.app();
-    // The recovery dialog opens by itself, then the user types a note. The
-    // dialog's own row keys (r/x/o/u/a) stay commands, so the draft uses
-    // capitals: those never change a row.
-    type_text(&mut app, "NOTE");
+    // The recovery dialog opens on the note, so a lower-case note that spells
+    // the list's command keys is recorded exactly as typed (finding 1).
+    type_text(&mut app, "restored unknown ax");
     let actions = app.on_key(key(KeyCode::Enter));
     assert!(
         actions
@@ -2485,11 +2560,81 @@ async fn a_refused_undo_resolution_keeps_the_dialog_and_draft() {
     assert!(app.undo_reply(&Err(Rejection::Invalid("resolution_note_too_large"))));
     let screen = text(&render(&mut app, 80, 24));
     assert!(screen.contains("resolve interrupted undo"), "{screen}");
-    assert!(screen.contains("note: NOTE"), "{screen}");
+    assert!(screen.contains("note: restored unknown ax"), "{screen}");
     assert!(
         screen.contains("error: command rejected: resolution_note_too_large"),
         "{screen}"
     );
+    reopened.shutdown().await;
+}
+
+/// v0.2.1 review finding 1: the note pane owns every printable character, so
+/// typing a note can never change what the dialog would record; the row
+/// commands work only while the file list has focus.
+#[tokio::test]
+async fn typing_a_note_never_changes_a_recorded_observation() {
+    let fixture = Fixture::new(false);
+    fs::write(fixture.workspace.join("a"), "before").unwrap();
+    let mut recorded = fixture
+        .create([
+            proposal("write", json!({"path":"a","text":"after","overwrite":true})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("write it").await;
+    let ticket = recorded.wait_approval().await;
+    recorded.submit(&ticket, Decision::Allow, false).await;
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+    fixture.inject_pending_undo();
+    let mut reopened = fixture.open(Arc::new(ScriptedProvider::new([]))).await;
+    reopened
+        .pump(|view| view.phase == Phase::AwaitingResolution && view.undo.is_some())
+        .await;
+    let mut app = reopened.app();
+    let screen = text(&render(&mut app, 80, 80));
+    assert!(screen.contains("[note] note: (type a note)"), "{screen}");
+    assert!(screen.contains("state: unknown"), "{screen}");
+
+    // Every one of these letters is a row command when the list is focused.
+    type_text(&mut app, "restored unknown ax");
+    let screen = text(&render(&mut app, 80, 80));
+    assert!(screen.contains("note: restored unknown ax"), "{screen}");
+    assert!(
+        screen.contains("(●) accept that which files changed is unknown"),
+        "the mode never changed: {screen}"
+    );
+    assert!(
+        screen.contains("state: unknown"),
+        "no row took a new state: {screen}"
+    );
+
+    // Tab reaches the list, where the row commands do their job.
+    app.on_key(key(KeyCode::Tab));
+    let screen = text(&render(&mut app, 80, 80));
+    assert!(screen.contains("[files]"), "{screen}");
+    app.on_key(key(KeyCode::Right));
+    app.on_key(key(KeyCode::Char('r')));
+    let screen = text(&render(&mut app, 80, 80));
+    assert!(
+        screen.contains("observed: state each file now"),
+        "←→ still switches the mode: {screen}"
+    );
+    assert!(
+        screen.contains("state: observed_restored"),
+        "r still sets the selected row: {screen}"
+    );
+    // The note kept what was typed before the list had focus.
+    assert!(screen.contains("note: restored unknown ax"), "{screen}");
+    // And focus returns to the note without changing anything else.
+    app.on_key(key(KeyCode::Tab));
+    app.on_key(key(KeyCode::Char('x')));
+    let screen = text(&render(&mut app, 80, 80));
+    assert!(
+        screen.contains("note: restored unknown axx"),
+        "a command letter typed in the note is text: {screen}"
+    );
+    assert!(screen.contains("state: observed_restored"), "{screen}");
     reopened.shutdown().await;
 }
 

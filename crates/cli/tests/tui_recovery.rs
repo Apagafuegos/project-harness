@@ -1,7 +1,7 @@
 //! Crash fixture isolated from other targets' lock/spawn windows.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use harness::{
-    tui::{App, SessionInfo, runtime},
+    tui::{Action, App, SessionInfo, runtime},
     wiring::{self, SessionOptions},
 };
 use harness_core::{
@@ -258,4 +258,142 @@ async fn actual_crash_uncertain_resolution_then_next_turn() {
             .diagnostic
             .is_none()
     );
+}
+
+/// Kill a real mid-execution write and reopen it: the invocation is a genuine
+/// uncertain **captured** mutation, not a hand-written view.
+async fn crashed_write() -> (tempfile::TempDir, SessionOptions, wiring::WiredSession) {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("work")).unwrap();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "crash_child", "--nocapture"])
+            .env("HARNESS_TUI_CRASH_ROOT", temp.path())
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !temp.path().join("ready").exists() {
+            assert!(child.0.try_wait().unwrap().is_none());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    let mut options = options(temp.path());
+    options.session = Some(
+        std::fs::read_to_string(temp.path().join("session"))
+            .unwrap()
+            .parse()
+            .unwrap(),
+    );
+    let opened = wiring::open_session(&options, Arc::new(ScriptedProvider::new([])))
+        .await
+        .unwrap();
+    wait(&opened.handle, |v| v.phase == Phase::AwaitingResolution).await;
+    (temp, options, opened)
+}
+
+fn recovery_screen(app: &mut App) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(80, 32)).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// v0.2.1 review finding 2, end to end: the dialog states the file effect for a
+/// captured write, the journal records exactly that, and ADR 0032's undo rule
+/// follows from it (applied leaves a target, not_applied leaves no file work).
+#[tokio::test]
+async fn an_interrupted_captured_write_resolves_with_the_stated_file_effect() {
+    for applied in [true, false] {
+        let (_temp, options, opened) = crashed_write().await;
+        let handle = opened.handle.clone();
+        let view = handle.view().await.unwrap();
+        assert_eq!(view.awaiting.len(), 1, "one interrupted call");
+        assert_eq!(view.awaiting[0].tool, "write");
+        assert!(
+            view.awaiting[0].file_effect_required,
+            "a captured write must be resolved by a statement about the file"
+        );
+        let mut app = App::new(SessionInfo {
+            workspace: options.workspace.clone(),
+            model: options.model.clone(),
+            context_limit: Some(128_000),
+        });
+        app.on_subscription(SubscriptionItem::Reset(ClientView::from(view)));
+        // The dialog offers the file statements, not the bare statuses.
+        let screen = recovery_screen(&mut app);
+        assert!(screen.contains("the file change was applied"), "{screen}");
+        assert!(!screen.contains("observed: succeeded"), "{screen}");
+        // Observed applied, or one further choice for not applied.
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        if !applied {
+            app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+        for ch in "I checked the file".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        let actions = app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let [Action::Command(command)] = actions.as_slice() else {
+            panic!("no resolution command: {actions:?}")
+        };
+        let reply = tokio::time::timeout(Duration::from_secs(20), handle.command(command.clone()))
+            .await
+            .expect("resolution deadline");
+        assert!(
+            matches!(reply, Ok(Accepted::Resolved { .. })),
+            "unexpected reply: {reply:?}"
+        );
+        wait(&handle, |v| {
+            v.phase == Phase::Durable(RuntimeState::Idle) && v.active_turn.is_none()
+        })
+        .await;
+        // The journal records the user's statement, not an inferred one.
+        let snapshot = handle.view().await.unwrap().snapshot;
+        let result = snapshot
+            .entries()
+            .find_map(|(_, entry)| match &entry.entry.payload {
+                EntryPayload::ToolResult(result) => Some(result.result.clone()),
+                _ => None,
+            })
+            .expect("the resolved result");
+        assert_eq!(result.metadata.provenance, Provenance::UserObserved);
+        assert_eq!(
+            result.metadata.file_effect,
+            Some(if applied {
+                FileEffect::Applied
+            } else {
+                FileEffect::NotApplied
+            })
+        );
+        // ADR 0032: an applied mutation leaves a target; a not_applied one
+        // leaves a candidate with no file work to do.
+        match handle.command(Command::PreviewUndo).await {
+            Ok(Accepted::UndoPreviewed { preview }) => {
+                assert_eq!(
+                    preview.targets.len(),
+                    usize::from(applied),
+                    "targets follow the stated effect"
+                );
+                if applied {
+                    assert!(
+                        !preview.targets[0].restores,
+                        "the agent created the file, so undo removes it"
+                    );
+                }
+            }
+            other => panic!("unexpected preview: {other:?}"),
+        }
+        handle.shutdown().await;
+    }
 }

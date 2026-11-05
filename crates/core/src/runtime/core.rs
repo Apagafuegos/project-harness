@@ -3563,6 +3563,7 @@ fn uncertain_invocation(
         plan_digest: intent.plan_digest.clone(),
         intent_at: unresolved.at.clone(),
         hint: None,
+        file_effect_required: intent.file_image.is_some(),
     }
 }
 

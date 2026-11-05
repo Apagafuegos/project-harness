@@ -404,6 +404,10 @@ pub struct UncertainInvocation {
     pub intent_at: Timestamp,
     /// Ephemeral current-file evidence, never a journal fact.
     pub hint: Option<RecoveryHint>,
+    /// Whether this call is a captured trusted mutation: its intent records a
+    /// `file_image`, so an observed resolution must state what happened to the
+    /// file (ADR 0032 §2). The dialogs ask for it; nothing infers it.
+    pub file_effect_required: bool,
 }
 
 /// The user's statement about one interrupted undo, covering every target.

@@ -308,6 +308,11 @@ Execution intent is durable before dispatch and results before dependent
 inference. An interrupted mutation with no durable result is uncertain, not
 silently retried. The recovery dialog requires your observed result or explicit
 acknowledgement of unknown effects; file-image hints are advisory, not proof.
+For an interrupted `write` or `edit`, whose pre-image was captured, the
+observation choices state what happened to the **file** — the change was applied
+or it was not — because only you can say that; the recorded result carries your
+statement and the undo rules follow from it. For any other call the choices
+state the tool's status. Nothing is guessed from the evidence hints.
 Choosing another branch cannot bypass uncertainty. Resolution never reruns a
 tool; any later rerun is a fresh authorized operation. Read-only restart closure
 is a narrow special case, not an observed success. Torn journal tails require
@@ -454,7 +459,13 @@ An undo is one durable intent and one durable result, so an interrupted undo is
 reported as uncertain rather than guessed at. The command still answers:
 `harness sessions undo` exits 2 with `undo_interrupted` and says the undo is
 resolved in the TUI, where you state per-file observations and a note or
-acknowledge that the outcome is unknown. A resolution that storage would reject
+acknowledge that the outcome is unknown. That dialog has two panes: the note
+takes every printable character, and **Tab** switches to the file list, where
+`r` restored, `x` removed, `o` other and `u` unknown set the selected row, `a`
+accepts that all are unknown, and `←`/`→` switch between observing and accepting
+unknown. Typing a note therefore never changes an observation.
+
+A resolution that storage would reject
 is refused in the dialog instead of faulting the session — a note over 64 KiB
 (`resolution_note_too_large`) or a row that is not an observation
 (`undo_rows_mismatch`) — and the dialog keeps your note. An undo whose records
@@ -463,6 +474,12 @@ would exceed the 8 MiB journal limit is refused before anything is staged
 the session refuses new turns. History is append-only, and the model's context
 records the undo through a user note, so it never assumes the reverted edits are
 present. There is no redo.
+
+**Do not downgrade after using undo.** v0.2.1 records the corrected list of calls
+an undo does not reverse, and a v0.2.0 binary refuses that intent with
+`undo_binding`. A session in which v0.2.1 recorded an undo may not open in
+v0.2.0; every other v0.2.1 journal still does. Upgrade to v0.2.1 and stay there
+once you have used `Ctrl-Z` or `harness sessions undo`.
 
 ## Export, delete and reclaim space
 

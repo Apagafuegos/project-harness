@@ -435,3 +435,83 @@ async fn a_first_target_recheck_refusal_is_not_applied_and_a_later_one_is_uncert
     assert_eq!(fixture.temporaries(), 0, "staging is never left behind");
     within("the session to shut down", fixture.handle.shutdown()).await;
 }
+
+/// v0.2.1 review finding 3: when the terminal note/result commit fails, the
+/// undo command is still answered (with `Faulted`) instead of being dropped.
+#[tokio::test]
+async fn a_failed_terminal_undo_commit_answers_its_command() {
+    let fixture = Fixture::turn(false).await;
+    let preview = fixture.preview().await;
+    let (entered, wait) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let _guard = GateGuard(fixture.root.clone(), release.clone());
+    fixture.root.io.test.lock().unwrap().gate = Some(Gate {
+        point: Point::Written,
+        entered,
+        release: resume,
+    });
+    let handle = fixture.handle.clone();
+    let command = tokio::spawn(async move { handle.command(Fixture::command(preview)).await });
+    within("commit A to be written", async {
+        wait.await
+            .unwrap_or_else(|_| panic!("the undo finished before commit A was written"))
+    })
+    .await;
+    // Commit A is written but not acknowledged. The next append is the
+    // terminal note/result commit, and it fails.
+    fixture.root.io.test.lock().unwrap().fail = Some(Point::BeforeWrite);
+    release.send(()).unwrap();
+    let reply = within(
+        "the undo command to be answered after its terminal commit failed",
+        async { command.await.unwrap() },
+    )
+    .await;
+    assert!(
+        matches!(reply, Err(Rejection::Faulted)),
+        "a failed terminal commit answers Faulted: {reply:?}"
+    );
+    // The restoration itself had happened before the result was lost.
+    assert_eq!(fs::read(fixture.workspace.join("a")).unwrap(), b"before");
+    assert_eq!(fs::read(fixture.workspace.join("b")).unwrap(), b"before");
+    within("the session to shut down", fixture.handle.shutdown()).await;
+}
+
+/// The same answer when the *uncertainty* commit cannot be written: the request
+/// is never dropped because its commit never landed.
+#[tokio::test]
+async fn a_failed_uncertainty_commit_answers_its_command() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::turn(false).await;
+    let preview = fixture.preview().await;
+    let (entered, wait) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let _guard = GateGuard(fixture.root.clone(), release.clone());
+    fixture.root.io.test.lock().unwrap().gate = Some(Gate {
+        point: Point::Written,
+        entered,
+        release: resume,
+    });
+    let handle = fixture.handle.clone();
+    let command = tokio::spawn(async move { handle.command(Fixture::command(preview)).await });
+    within("commit A to be written", async {
+        wait.await
+            .unwrap_or_else(|_| panic!("the undo finished before commit A was written"))
+    })
+    .await;
+    // A read-only workspace makes the first rename fail, so the undo becomes
+    // uncertain; the appended uncertainty record then fails too.
+    fs::set_permissions(&fixture.workspace, PermissionsExt::from_mode(0o555)).unwrap();
+    fixture.root.io.test.lock().unwrap().fail = Some(Point::BeforeWrite);
+    release.send(()).unwrap();
+    let reply = within(
+        "the undo command to be answered after its uncertainty commit failed",
+        async { command.await.unwrap() },
+    )
+    .await;
+    fs::set_permissions(&fixture.workspace, PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(reply, Err(Rejection::Faulted)),
+        "a failed uncertainty commit answers Faulted: {reply:?}"
+    );
+    within("the session to shut down", fixture.handle.shutdown()).await;
+}

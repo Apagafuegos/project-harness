@@ -95,6 +95,12 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
         let hints = match app.modal {
             Modal::Approval { .. } => "v raw · a allow · d deny · r remember · Esc deny",
             Modal::Uncertain { .. } => "↑↓ invocation · ←→ choice · Enter submit · PgUp/PgDn",
+            Modal::UndoResolve { focus, .. } => match focus {
+                super::UndoFocus::Note => "typing goes to the note · Tab files · Enter submit",
+                super::UndoFocus::Files => {
+                    "↑↓ file · r x o u set · a unknown · ←→ choice · Tab note"
+                }
+            },
             _ => "y / Enter quit · n / Esc cancel",
         };
         let inner = draw_modal(
@@ -449,11 +455,14 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
                 )));
             }
             lines.push(Line::raw(""));
-            for choice in [
-                ResolutionMode::AcknowledgedUnknown,
-                ResolutionMode::ObservedSucceeded,
-                ResolutionMode::ObservedFailed,
-            ] {
+            // A captured mutation asks what happened to the file; another call
+            // asks for the tool's status. The two sets never mix.
+            let required = view
+                .awaiting
+                .get(*index)
+                .is_some_and(|invocation| invocation.file_effect_required);
+            for choice in ResolutionMode::choices(required) {
+                let choice = *choice;
                 lines.push(Line::styled(
                     format!(
                         " ({}) {}",
@@ -525,6 +534,7 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             mode,
             files,
             input,
+            focus,
         } => {
             let view = app.view()?;
             let undo = view.undo.as_ref()?;
@@ -532,6 +542,16 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             if pending.intent.undo_id != undo.undo_id {
                 return None;
             }
+            let files_marker = if *focus == super::UndoFocus::Files {
+                "[files]"
+            } else {
+                " files "
+            };
+            let note_marker = if *focus == super::UndoFocus::Note {
+                "[note]"
+            } else {
+                " note "
+            };
             let mut lines = vec![Line::raw(format!(
                 "Interrupted undo of turn {}",
                 undo.target_turn_id
@@ -549,7 +569,7 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
                     .map(|(_, hint)| undo_hint_text(hint))
                     .unwrap_or("no evidence");
                 lines.push(Line::raw(format!(
-                    "{marker} {} · now: {hint} · state: {observed}",
+                    "{files_marker} {marker} {} · now: {hint} · state: {observed}",
                     bounded(&target.path, 60)
                 )));
             }
@@ -577,9 +597,9 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
             } else {
                 bounded(input, 160)
             };
-            lines.push(Line::raw(format!("note: {note}")));
+            lines.push(Line::raw(format!("{note_marker} note: {note}")));
             lines.push(Line::styled(
-                "↑↓ file · r restored · x removed · o other · u unknown · ←→ choice · Enter submit",
+                "Tab switches files/note · Enter submits · Esc keeps the answer",
                 dim,
             ));
             Some(("resolve interrupted undo".into(), lines))

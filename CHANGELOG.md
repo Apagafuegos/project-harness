@@ -9,6 +9,12 @@ Fixes from the v0.2.0 post-release review, plus the two measurement defects it
 found. No new capability and no journal migration: every v1–v4 journal,
 including one a v0.2.0 binary wrote, still opens.
 
+**Do not downgrade after using undo.** v0.2.1 writes the corrected
+`omitted_calls` on an undo intent, which v0.2.0's stricter equality check
+refuses with `undo_binding`. A journal where v0.2.1 recorded an undo may
+therefore not open in v0.2.0. Upgrade first and stay on v0.2.1 once you have
+used `Ctrl-Z` or `harness sessions undo` in a session.
+
 ### Fixed
 
 - `harness sessions undo` no longer hangs when a restoration stops partway. An

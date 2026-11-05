@@ -38,8 +38,9 @@ use harness_core::{
         UserResolution,
     },
     session::{
-        ApprovalId, CommandId, ContentBlock, ContextMode, Decision, EntryPayload, FileOutcome,
-        InvocationId, ModelRef, RuntimeState, StoredEntry, ToolStatus, TurnId, UndoFileOutcome,
+        ApprovalId, CommandId, ContentBlock, ContextMode, Decision, EntryPayload, FileEffect,
+        FileOutcome, InvocationId, ModelRef, RuntimeState, StoredEntry, ToolStatus, TurnId,
+        UndoFileOutcome,
     },
 };
 use ratatui::{Frame, text::Line};
@@ -187,6 +188,9 @@ enum Modal {
         files: Vec<FileOutcome>,
         /// The user's note; required when observing.
         input: String,
+        /// Which part of the dialog receives the keys. Row commands act only
+        /// on the file list; the note receives every printable character.
+        focus: UndoFocus,
     },
     /// A refusal with no choice to make, shown in the same dialog frame.
     Notice {
@@ -195,6 +199,25 @@ enum Modal {
         /// Short explanation lines.
         message: String,
     },
+}
+
+/// Which half of the undo-resolution dialog captures the keys. Typing a note
+/// must never change a recorded observation, so the two never share keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UndoFocus {
+    /// The file list: row commands and the unknown-all shortcut.
+    Files,
+    /// The note: every printable character is text.
+    Note,
+}
+
+impl UndoFocus {
+    fn toggled(self) -> Self {
+        match self {
+            Self::Files => Self::Note,
+            Self::Note => Self::Files,
+        }
+    }
 }
 
 /// How the user answers an interrupted undo.
@@ -208,6 +231,12 @@ enum UndoResolveMode {
 
 impl UndoResolveMode {
     fn next(self) -> Self {
+        match self {
+            Self::AcknowledgedUnknown => Self::Observed,
+            Self::Observed => Self::AcknowledgedUnknown,
+        }
+    }
+    fn previous(self) -> Self {
         match self {
             Self::AcknowledgedUnknown => Self::Observed,
             Self::Observed => Self::AcknowledgedUnknown,
@@ -230,23 +259,44 @@ enum ResolutionMode {
     ObservedSucceeded,
     /// The user checked and the call failed.
     ObservedFailed,
+    /// A captured mutation: the file change happened. The status is the same
+    /// statement read the other way; the two are one answer here.
+    ObservedApplied,
+    /// A captured mutation: the file did not change.
+    ObservedNotApplied,
 }
 
 impl ResolutionMode {
-    fn next(self) -> Self {
-        match self {
-            Self::AcknowledgedUnknown => Self::ObservedSucceeded,
-            Self::ObservedSucceeded => Self::ObservedFailed,
-            Self::ObservedFailed => Self::AcknowledgedUnknown,
+    /// The choices a terminal offers for one invocation. A captured trusted
+    /// mutation needs a statement about the *file*, which only the user can
+    /// make (ADR 0032 §2); another call needs the tool's status. Neither set
+    /// is inferred from the outcome or from the evidence hints.
+    fn choices(file_effect_required: bool) -> &'static [Self] {
+        if file_effect_required {
+            &[
+                Self::AcknowledgedUnknown,
+                Self::ObservedApplied,
+                Self::ObservedNotApplied,
+            ]
+        } else {
+            &[
+                Self::AcknowledgedUnknown,
+                Self::ObservedSucceeded,
+                Self::ObservedFailed,
+            ]
         }
     }
 
-    fn previous(self) -> Self {
-        match self {
-            Self::AcknowledgedUnknown => Self::ObservedFailed,
-            Self::ObservedSucceeded => Self::AcknowledgedUnknown,
-            Self::ObservedFailed => Self::ObservedSucceeded,
-        }
+    /// The next choice, wrapping, and always inside the given set.
+    fn next(self, choices: &[Self]) -> Self {
+        let index = choices.iter().position(|choice| *choice == self);
+        choices[index.map_or(0, |at| (at + 1) % choices.len())]
+    }
+
+    /// The previous choice, wrapping, and always inside the given set.
+    fn previous(self, choices: &[Self]) -> Self {
+        let index = choices.iter().position(|choice| *choice == self);
+        choices[index.map_or(0, |at| (at + choices.len() - 1) % choices.len())]
     }
 
     fn label(self) -> &'static str {
@@ -254,7 +304,45 @@ impl ResolutionMode {
             Self::AcknowledgedUnknown => "accept that the outcome is unknown",
             Self::ObservedSucceeded => "observed: succeeded",
             Self::ObservedFailed => "observed: failed",
+            Self::ObservedApplied => "observed: the file change was applied",
+            Self::ObservedNotApplied => "observed: the file change was not applied",
         }
+    }
+
+    /// The statement this choice sends, or none when it needs a note first.
+    fn resolution(self, note: &str) -> Option<UserResolution> {
+        // Acknowledged-unknown needs no note: the core records its own text.
+        if self == Self::AcknowledgedUnknown {
+            return Some(UserResolution::AcknowledgedUnknown);
+        }
+        if note.is_empty() {
+            return None;
+        }
+        Some(match self {
+            // Returned above; listed so the statement is total.
+            Self::AcknowledgedUnknown => UserResolution::AcknowledgedUnknown,
+            Self::ObservedSucceeded | Self::ObservedFailed => UserResolution::Observed {
+                status: if self == Self::ObservedSucceeded {
+                    ToolStatus::Succeeded
+                } else {
+                    ToolStatus::Failed
+                },
+                text: note.to_owned(),
+                file_effect: None,
+            },
+            // The user's statement about the file is what is recorded; the
+            // status is the same answer in the call's terms.
+            Self::ObservedApplied => UserResolution::Observed {
+                status: ToolStatus::Succeeded,
+                text: note.to_owned(),
+                file_effect: Some(FileEffect::Applied),
+            },
+            Self::ObservedNotApplied => UserResolution::Observed {
+                status: ToolStatus::Failed,
+                text: note.to_owned(),
+                file_effect: Some(FileEffect::NotApplied),
+            },
+        })
     }
 }
 
@@ -417,8 +505,10 @@ impl App {
                 self.prompt.insert_str(at, &text);
                 self.cursor += text.chars().count();
             }
-            Modal::Uncertain { input, .. } | Modal::UndoResolve { input, .. } => {
-                input.push_str(&text)
+            Modal::Uncertain { input, .. } => input.push_str(&text),
+            Modal::UndoResolve { input, focus, .. } => {
+                input.push_str(&text);
+                *focus = UndoFocus::Note;
             }
             Modal::ExportPath { input, .. } => {
                 input.extend(text.chars().filter(|c| !c.is_control() || *c == '\n'));
@@ -697,6 +787,9 @@ impl App {
                         mode: UndoResolveMode::AcknowledgedUnknown,
                         files: vec![FileOutcome::Unknown; targets],
                         input: String::new(),
+                        // The note has focus first: typing must never change a
+                        // recorded observation, and Tab reaches the list.
+                        focus: UndoFocus::Note,
                     }
                 }
             }
@@ -1077,11 +1170,30 @@ impl App {
             return Vec::new();
         }
         *index = (*index).min(awaiting.len() - 1);
+        // Which question this invocation needs: a captured mutation asks what
+        // happened to the file, any other call asks for the tool's status.
+        let choices = ResolutionMode::choices(awaiting[*index].file_effect_required);
+        if !choices.contains(mode) {
+            *mode = choices[0];
+        }
         match key.code {
-            KeyCode::Up => *index = index.saturating_sub(1),
-            KeyCode::Down => *index = (*index + 1).min(awaiting.len() - 1),
-            KeyCode::Left | KeyCode::BackTab => *mode = mode.previous(),
-            KeyCode::Right | KeyCode::Tab => *mode = mode.next(),
+            KeyCode::Up => {
+                *index = index.saturating_sub(1);
+                // The selection can change the question, never the answer.
+                let choices = ResolutionMode::choices(awaiting[*index].file_effect_required);
+                if !choices.contains(mode) {
+                    *mode = choices[0];
+                }
+            }
+            KeyCode::Down => {
+                *index = (*index + 1).min(awaiting.len() - 1);
+                let choices = ResolutionMode::choices(awaiting[*index].file_effect_required);
+                if !choices.contains(mode) {
+                    *mode = choices[0];
+                }
+            }
+            KeyCode::Left | KeyCode::BackTab => *mode = mode.previous(choices),
+            KeyCode::Right | KeyCode::Tab => *mode = mode.next(choices),
             KeyCode::Backspace => {
                 input.pop();
             }
@@ -1091,28 +1203,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let resolution = match *mode {
-                    ResolutionMode::AcknowledgedUnknown => {
-                        Some(UserResolution::AcknowledgedUnknown)
-                    }
-                    ResolutionMode::ObservedSucceeded | ResolutionMode::ObservedFailed
-                        if !input.is_empty() =>
-                    {
-                        Some(UserResolution::Observed {
-                            status: if *mode == ResolutionMode::ObservedSucceeded {
-                                ToolStatus::Succeeded
-                            } else {
-                                ToolStatus::Failed
-                            },
-                            text: input.clone(),
-                            // A terminal cannot classify a captured rename; the
-                            // dialog refuses that case rather than guessing.
-                            file_effect: None,
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some(resolution) = resolution {
+                if let Some(resolution) = mode.resolution(input) {
                     let invocation_id: InvocationId = awaiting[*index].invocation_id.clone();
                     return vec![Action::Command(Command::ResolveUncertain {
                         invocation_id,
@@ -1185,6 +1276,7 @@ impl App {
             mode,
             files,
             input,
+            focus,
         } = &mut self.modal
         else {
             return Vec::new();
@@ -1193,12 +1285,45 @@ impl App {
             return Vec::new();
         }
         *index = (*index).min(paths.len() - 1);
+        // The note pane owns every printable character. Row commands exist only
+        // while the file list has focus, so typing "restored" can never change
+        // a recorded observation (v0.2.1 review finding 1).
+        if *focus == UndoFocus::Note {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab => *focus = focus.toggled(),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) if !control && !alt => {
+                    if !c.is_control() {
+                        input.push(c);
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(resolution) = Self::observed_resolution(*mode, &paths, files, input)
+                    {
+                        let undo_id = undo.undo_id.clone();
+                        return vec![Action::Command(Command::ResolveUndo {
+                            undo_id,
+                            resolution,
+                        })];
+                    }
+                }
+                // Nothing is discarded by answering nothing: Esc returns to the
+                // file list and keeps the draft.
+                KeyCode::Esc => *focus = UndoFocus::Files,
+                _ => {}
+            }
+            return Vec::new();
+        }
         match key.code {
+            // Tab switches which half of the dialog receives keys; the mode is
+            // switched with ←/→, never with a printable key.
+            KeyCode::Tab | KeyCode::BackTab => *focus = focus.toggled(),
             KeyCode::Up => *index = index.saturating_sub(1),
             KeyCode::Down => *index = (*index + 1).min(paths.len() - 1),
-            KeyCode::Left | KeyCode::BackTab | KeyCode::Right | KeyCode::Tab => {
-                *mode = mode.next();
-            }
+            KeyCode::Left => *mode = mode.previous(),
+            KeyCode::Right => *mode = mode.next(),
             KeyCode::Char('r') if !control && !alt => {
                 *mode = UndoResolveMode::Observed;
                 files[*index] = FileOutcome::ObservedRestored;
@@ -1220,41 +1345,56 @@ impl App {
                 input.pop();
             }
             KeyCode::Char(c) if !control && !alt => {
+                // The list is focused: printable text still belongs to the note
+                // and moves focus there, so nothing is silently dropped.
                 if !c.is_control() {
                     input.push(c);
+                    *focus = UndoFocus::Note;
                 }
             }
             KeyCode::Enter => {
-                if input.is_empty() {
-                    return Vec::new();
+                if let Some(resolution) = Self::observed_resolution(*mode, &paths, files, input) {
+                    let undo_id = undo.undo_id.clone();
+                    return vec![Action::Command(Command::ResolveUndo {
+                        undo_id,
+                        resolution,
+                    })];
                 }
-                let resolution = match *mode {
-                    UndoResolveMode::AcknowledgedUnknown => UndoResolution::AcknowledgedUnknown {
-                        note: input.clone(),
-                    },
-                    UndoResolveMode::Observed => UndoResolution::Observed {
-                        files: paths
-                            .iter()
-                            .zip(files.iter())
-                            .map(|(path, outcome)| UndoFileOutcome {
-                                path: path.clone(),
-                                outcome: *outcome,
-                            })
-                            .collect(),
-                        note: input.clone(),
-                    },
-                };
-                let undo_id = undo.undo_id.clone();
-                return vec![Action::Command(Command::ResolveUndo {
-                    undo_id,
-                    resolution,
-                })];
             }
             // There is no safe default resolution; Esc keeps the dialog open.
             KeyCode::Esc => {}
             _ => {}
         }
         Vec::new()
+    }
+
+    /// The statement the undo dialog sends, or none while it is incomplete
+    /// (an observed resolution needs a note). One builder for both panes.
+    fn observed_resolution(
+        mode: UndoResolveMode,
+        paths: &[String],
+        files: &[FileOutcome],
+        note: &str,
+    ) -> Option<UndoResolution> {
+        if note.is_empty() {
+            return None;
+        }
+        Some(match mode {
+            UndoResolveMode::AcknowledgedUnknown => UndoResolution::AcknowledgedUnknown {
+                note: note.to_owned(),
+            },
+            UndoResolveMode::Observed => UndoResolution::Observed {
+                files: paths
+                    .iter()
+                    .zip(files)
+                    .map(|(path, outcome)| UndoFileOutcome {
+                        path: path.clone(),
+                        outcome: *outcome,
+                    })
+                    .collect(),
+                note: note.to_owned(),
+            },
+        })
     }
 
     fn confirm_quit_key(&mut self, key: KeyEvent) -> Vec<Action> {
