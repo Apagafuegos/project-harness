@@ -17,7 +17,8 @@ use super::{
 };
 use crate::{
     session::{
-        ContentBlock, Digest, ExecutionBackend, FileEffect, FileImage, ResultCode, ToolStatus,
+        ContentBlock, Digest, ExecutionBackend, FileEffect, FileImage, FilePathEffect, ResultCode,
+        ToolStatus,
     },
     tools::{
         Plan, Refusal, WorkspacePath,
@@ -39,12 +40,40 @@ pub(super) struct Binding {
     pub(super) workspace: String,
     pub(super) timeout_ms: u64,
     pub(super) target: Option<Target>,
+    pub(super) targets: Option<Vec<Target>>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Target {
     pub(super) path: String,
     pub(super) pre_image: String,
     pub(super) content_sha256: Option<crate::session::Digest>,
+}
+
+struct PreparedEdit {
+    path: WorkspacePath,
+    target_name: String,
+    target: Target,
+    parent: OwnedFd,
+    parent_id: ObjectId,
+    object_id: ObjectId,
+    mode: Mode,
+    bytes: Vec<u8>,
+    digest: Digest,
+    temporary: Option<MultiTemporary>,
+}
+
+struct MultiTemporary {
+    parent: OwnedFd,
+    name: String,
+    armed: bool,
+}
+
+impl Drop for MultiTemporary {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::unlinkat(&self.parent, self.name.as_str(), AtFlags::empty());
+        }
+    }
 }
 
 impl Executor for FsWorkspace {
@@ -95,6 +124,7 @@ impl FsWorkspace {
             .mutation()
             .then_some(FileEffect::NotApplied);
         let mut rename_attempted = false;
+        let mut file_paths = Vec::new();
         let mut commit = || {
             if let Some(effect) = effect.as_mut() {
                 *effect = FileEffect::Applied;
@@ -114,18 +144,10 @@ impl FsWorkspace {
                 )
             })?;
             let operation = plan.operation();
-            let target = binding.target.as_ref().ok_or_else(|| {
-                Refusal::new(
-                    ResultCode::InfrastructureFailure,
-                    "unsupported file executor plan",
-                )
-            })?;
-            if binding.workspace != self.identity.0
-                || operation.path().map(WorkspacePath::as_str) != Some(target.path.as_str())
-            {
+            if binding.workspace != self.identity.0 {
                 return Err(Refusal::new(
                     ResultCode::InfrastructureFailure,
-                    "plan workspace or target mismatch",
+                    "plan workspace mismatch",
                 ));
             }
             let mut control = Control {
@@ -134,7 +156,33 @@ impl FsWorkspace {
                 cancellation: Some(cancellation),
                 hook,
             };
-            match operation {
+            if let Operation::MultiEdit { files } = operation {
+                self.execute_multi_edit(
+                    files,
+                    binding.targets.as_deref().ok_or_else(|| {
+                        Refusal::new(
+                            ResultCode::InfrastructureFailure,
+                            "multi_edit targets missing from plan",
+                        )
+                    })?,
+                    image,
+                    &mut control,
+                    &mut file_paths,
+                )
+            } else {
+                let target = binding.target.as_ref().ok_or_else(|| {
+                    Refusal::new(
+                        ResultCode::InfrastructureFailure,
+                        "unsupported file executor plan",
+                    )
+                })?;
+                if operation.path().map(WorkspacePath::as_str) != Some(target.path.as_str()) {
+                    return Err(Refusal::new(
+                        ResultCode::InfrastructureFailure,
+                        "plan target mismatch",
+                    ));
+                }
+                match operation {
                 Operation::Read {
                     path,
                     offset_bytes,
@@ -163,16 +211,18 @@ impl FsWorkspace {
                     &mut rename_attempted,
                 ),
                 Operation::Bash { .. }
+                | Operation::MultiEdit { .. }
                 | Operation::List { .. }
                 | Operation::Glob { .. }
                 | Operation::Grep { .. } => Err(Refusal::new(
                     ResultCode::InfrastructureFailure,
                     "unsupported file executor plan",
                 )),
+                }
             }
         })();
         let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
-        let (status, code, text, output_truncated) = match result {
+        let (status, code, mut text, output_truncated) = match result {
             Ok((text, truncated)) => (ToolStatus::Succeeded, None, text, truncated),
             Err(error) => {
                 // Decision 22: never inherit Refusal::status at execution time.
@@ -190,6 +240,29 @@ impl FsWorkspace {
                 (status, Some(error.code), error.text(), false)
             }
         };
+        if matches!(plan.operation(), Operation::MultiEdit { .. }) {
+            effect = Some(if file_paths
+                .iter()
+                .any(|file: &FilePathEffect| file.effect == FileEffect::Unknown)
+            {
+                FileEffect::Unknown
+            } else if file_paths
+                .iter()
+                .any(|file| file.effect == FileEffect::Applied)
+            {
+                FileEffect::Applied
+            } else {
+                FileEffect::NotApplied
+            });
+            if code.is_some() {
+                let outcomes = file_paths
+                    .iter()
+                    .map(|file| format!("{}={:?}", file.path, file.effect).to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                text.push_str(&format!("\nper-file effects: {outcomes}"));
+            }
+        }
         ExecutionOutcome {
             status,
             code,
@@ -199,7 +272,184 @@ impl FsWorkspace {
             output_truncated,
             artifacts: Vec::new(),
             file_effect: effect,
+            file_paths,
         }
+    }
+
+    fn execute_multi_edit(
+        &self,
+        files: &[super::super::builtin::MultiEditFile],
+        targets: &[Target],
+        image: Option<&FileImage>,
+        control: &mut Control<'_>,
+        outcomes: &mut Vec<FilePathEffect>,
+    ) -> Result<(String, bool), Refusal> {
+        if files.is_empty() || files.len() != targets.len() {
+            return Err(Refusal::new(
+                ResultCode::InfrastructureFailure,
+                "multi_edit target count mismatch",
+            ));
+        }
+        let image_targets: Vec<_> = image.map(FileImage::targets).into_iter().flatten().collect();
+        if image.is_some() && image_targets.len() != files.len() {
+            return Err(Refusal::new(
+                ResultCode::InfrastructureFailure,
+                "multi_edit image count mismatch",
+            ));
+        }
+        let mut prepared = Vec::with_capacity(files.len());
+        for (index, (file, target)) in files.iter().zip(targets).enumerate() {
+            control.check(Step::Resolve)?;
+            if target.path != file.path.as_str() {
+                return Err(Refusal::new(
+                    ResultCode::InfrastructureFailure,
+                    "multi_edit target order mismatch",
+                ));
+            }
+            let resolved = self.resolve(&file.path, control)?;
+            refuse_protection(resolved.protection, true)?;
+            if !resolved.complete {
+                return Err(Refusal::new(ResultCode::NotFound, "parent does not exist"));
+            }
+            let parent = open_relative(
+                self.root.as_fd(),
+                file.path.parent().as_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY,
+                Mode::empty(),
+                control,
+                Step::Resolve,
+            )?;
+            let parent_id = ObjectId::of(&fs::fstat(&parent).map_err(errno)?);
+            if parent_id != ObjectId::of(&fs::fstat(&resolved.parent).map_err(errno)?) {
+                return Err(stale());
+            }
+            let (source, stat) = self
+                .pre_image(&resolved, target, control)?
+                .ok_or_else(stale)?;
+            if stat.st_size as u64 > MIB {
+                return Err(Refusal::new(ResultCode::TooLarge, "file exceeds 1 MiB"));
+            }
+            let bytes = read_bounded(&source, &stat, MIB, control)?;
+            let mut text = std::str::from_utf8(&bytes)
+                .map_err(|_| Refusal::new(ResultCode::NotUtf8, "file is not UTF-8"))?
+                .to_owned();
+            for edit in &file.edits {
+                text = edited_bytes(&text, &edit.old_text, &edit.new_text)?;
+            }
+            let digest = Digest::of(text.as_bytes());
+            if let Some(captured) = image_targets.get(index)
+                && (captured.path != file.path.as_str()
+                    || captured.post_image != &digest
+                    || captured.pre_image.as_ref().map(|pre| pre.sha256.as_str())
+                        != Some(target.pre_image.as_str())
+                    || captured.pre_mode != Some(stat.st_mode & 0o777))
+            {
+                return Err(stale());
+            }
+            prepared.push(PreparedEdit {
+                path: file.path.clone(),
+                target_name: resolved.name,
+                target: target.clone(),
+                parent,
+                parent_id,
+                object_id: ObjectId::of(&stat),
+                mode: Mode::from_raw_mode(stat.st_mode & 0o777),
+                bytes: text.into_bytes(),
+                digest,
+                temporary: None,
+            });
+        }
+
+        // Stage every replacement before rechecking or committing any target.
+        for item in &mut prepared {
+            control.check(Step::CreateTemp)?;
+            let name = format!(".harness-{}.tmp", uuid::Uuid::now_v7().simple());
+            let file = open_relative(
+                item.parent.as_fd(),
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+                Mode::from_raw_mode(0o600),
+                control,
+                Step::CreateTemp,
+            )?;
+            let mut temp = MultiTemporary {
+                parent: item
+                    .parent
+                    .try_clone()
+                    .map_err(|_| Refusal::new(ResultCode::InfrastructureFailure, "cannot pin temporary parent"))?,
+                name,
+                armed: true,
+            };
+            let mut written = 0;
+            while written < item.bytes.len() {
+                control.check(Step::WriteTemp)?;
+                let count = io::write(&file, &item.bytes[written..]).map_err(errno)?;
+                if count == 0 {
+                    return Err(Refusal::new(
+                        ResultCode::InfrastructureFailure,
+                        "temporary file write made no progress",
+                    ));
+                }
+                written += count;
+            }
+            control.check(Step::ChmodTemp)?;
+            fs::fchmod(&file, item.mode).map_err(errno)?;
+            control.check(Step::SyncTemp)?;
+            fs::fsync(&file).map_err(errno)?;
+            item.temporary = Some(temp);
+        }
+
+        // Recheck the complete set after staging and before the first rename.
+        for item in &prepared {
+            control.check(Step::Recheck)?;
+            let latest = self.resolve(&item.path, control)?;
+            refuse_protection(latest.protection, true)?;
+            if !latest.complete
+                || ObjectId::of(&fs::fstat(&latest.parent).map_err(errno)?) != item.parent_id
+            {
+                return Err(stale());
+            }
+            let Some((_, stat)) = self.pre_image(&latest, &item.target, control)? else {
+                return Err(stale());
+            };
+            if ObjectId::of(&stat) != item.object_id {
+                return Err(stale());
+            }
+        }
+
+        outcomes.extend(prepared.iter().map(|item| FilePathEffect {
+            path: item.path.as_str().to_owned(),
+            effect: FileEffect::NotApplied,
+        }));
+        let mut descriptions = Vec::with_capacity(prepared.len());
+        for (index, item) in prepared.iter_mut().enumerate() {
+            control.check(Step::Rename)?;
+            let temp = item.temporary.as_mut().expect("every target staged");
+            match fs::renameat_with(
+                &item.parent,
+                temp.name.as_str(),
+                &item.parent,
+                item.target_name.as_str(),
+                RenameFlags::empty(),
+            ) {
+                Ok(()) => {
+                    temp.armed = false;
+                    outcomes[index].effect = FileEffect::Applied;
+                }
+                Err(error) => {
+                    outcomes[index].effect = FileEffect::Unknown;
+                    return Err(errno(error));
+                }
+            }
+            // A rename committed; a later sync error must retain this fact.
+            (control.hook)(Step::SyncParent)?;
+            fs::fsync(&item.parent).map_err(errno)?;
+            descriptions.push(format!(
+                "{} sha256={} bytes={}",
+                item.path.as_str(), item.digest, item.bytes.len()
+            ));
+        }
+        Ok((descriptions.join("\n"), false))
     }
 
     fn execute_read(
