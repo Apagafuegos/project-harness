@@ -654,7 +654,11 @@ in the existing environment variables or Codex login, never in TOML.
 
 At creation both clients record, in order:
 
-1. Built-in factual system prose naming the workspace and available tools.
+1. Built-in factual system prose naming the workspace and available tools,
+   sequential calls and approval, no unchanged retry of a denied call, and no
+   repeat of a call whose identical result is already known (change the
+   approach or report the failure instead), plus workspace-relative paths and
+   subprocess network denial.
 2. Optional user `$XDG_CONFIG_HOME/harness/AGENTS.md` (or
    `$HOME/.config/harness/AGENTS.md`) at developer level, framed
    `User instructions from ~/.config/harness/AGENTS.md:` (real path, HOME

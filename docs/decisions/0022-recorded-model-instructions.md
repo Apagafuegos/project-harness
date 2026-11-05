@@ -15,8 +15,11 @@ for their estimated tokens; no core/context or journal-format change is needed.
 The short factual base lives in `crates/cli/src/base-instruction.txt`, included
 at compile time. It identifies the absolute workspace, names actual registry
 tools filtered by backend availability (or `none`), states sequential calls and
-possible approval, forbids unchanged retries of denied calls, and describes
-workspace-relative paths and subprocess network denial. It contains no persona,
+possible approval, forbids unchanged retries of denied calls, tells the model
+not to repeat a call whose identical result it already has (and to change the
+approach or report the failure instead), and describes workspace-relative paths
+and subprocess network denial. The no-repeat sentence is M8 step 05's F04b fix;
+it reaches new sessions only, because recorded instructions are never re-read. It contains no persona,
 provider-specific text, credentials or environment dumps. `bash` is named only
 when the sandbox backend is available.
 

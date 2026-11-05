@@ -184,7 +184,9 @@ allowances: a TUI `r` remembered grant can prevent reopening through either
 client. Do not edit history or weaken checks to bypass this limitation; the
 read-only catalog/inspection/export still provide access.
 
-New sessions record, in order: built-in system instructions; optional user
+New sessions record, in order: built-in system instructions (workspace, actual
+tools, one call at a time with approval, no unchanged retry of a denied call, and
+no repeat of a call whose identical result is already known); optional user
 `$XDG_CONFIG_HOME/harness/AGENTS.md` (fallback `~/.config/harness/AGENTS.md`);
 root project AGENTS.md; and nested project AGENTS.md files in lexicographic path
 order, framed with their directory scope. All but the base are developer

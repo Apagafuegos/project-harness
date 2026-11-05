@@ -1182,6 +1182,30 @@ async fn new_session_records_base_and_root_agents_and_sends_instructions_first()
     assert!(!err.contains("warning:"));
 }
 
+/// F04b: one recorded sentence against repeating a call whose result is known.
+#[tokio::test]
+async fn base_instruction_forbids_repeating_an_identical_call() {
+    let f = Fixture::new();
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("done")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    let configuration = recorded_configuration(&f, &err);
+    let base = configuration["instructions"][0]["text"]
+        .as_str()
+        .expect("base instruction");
+    const SENTENCE: &str = "Do not repeat a tool call whose identical result you \
+                            already have; after a failure, change the approach or \
+                            report it.";
+    assert!(base.contains(SENTENCE), "{base}");
+    assert_eq!(base.matches(SENTENCE).count(), 1, "{base}");
+    // The pre-existing denial rule is still there: this adds one sentence.
+    assert!(
+        base.contains("Do not retry a denied call unchanged"),
+        "{base}"
+    );
+}
+
 #[tokio::test]
 async fn missing_agents_gets_base_only_and_unavailable_sandbox_never_mentions_shell() {
     let f = Fixture::new();
