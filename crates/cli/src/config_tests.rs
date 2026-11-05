@@ -394,6 +394,7 @@ async fn resolved_config_reaches_both_clients_recorded_fields_and_continuation_c
                     stderr_is_tty: false,
                     terminal: None,
                     interrupts: rx,
+                    stdout_open_line: false,
                 },
             )
             .await;

@@ -120,6 +120,7 @@ async fn wired(args: &ArgMatches, interrupts: tokio::sync::mpsc::UnboundedReceiv
             stderr_is_tty: io::stderr().is_terminal(),
             terminal: terminal.as_mut().map(|t| t as &mut dyn ask::Terminal),
             interrupts,
+            stdout_open_line: false,
         },
     )
     .await

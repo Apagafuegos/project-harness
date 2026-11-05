@@ -131,18 +131,43 @@ pub struct Io<'a, 't> {
     pub terminal: Option<&'t mut dyn Terminal>,
     /// Injected signal channel, independent of terminal input.
     pub interrupts: mpsc::UnboundedReceiver<()>,
+    /// Renderer-owned: the last byte written to stdout is not a newline, so the
+    /// assistant's last line is still open. Clients never set this.
+    pub stdout_open_line: bool,
+}
+
+impl Io<'_, '_> {
+    /// Terminate an unterminated assistant line before a diagnostic or at exit.
+    ///
+    /// Stdout carries assistant text only, so the newline is written to stdout:
+    /// a merged terminal then never glues a diagnostic to the answer. Nothing is
+    /// written when stdout is empty or already ends with a newline, so stdout
+    /// gains at most that single byte.
+    fn end_stdout_line(&mut self) -> io::Result<()> {
+        if self.stdout_open_line {
+            self.stdout.write_all(b"\n")?;
+            self.stdout.flush()?;
+            self.stdout_open_line = false;
+        }
+        Ok(())
+    }
 }
 
 /// Run one turn with an injected provider, returning the documented process code.
 /// No provider error message or opaque state is formatted by this client.
 pub async fn run(options: Options, provider: Arc<dyn ModelProvider>, mut io: Io<'_, '_>) -> u8 {
-    match execute(options, provider, &mut io).await {
+    let result = match execute(options, provider, &mut io).await {
         Ok(code) => code,
         Err((code, message)) => {
+            // A diagnostic must never share stdout's last line (F05).
+            let _ = io.end_stdout_line();
             let _ = writeln!(io.stderr, "error: {}", line(&message));
             code
         }
-    }
+    };
+    // At exit: assistant text that never ended in a newline still ends a line.
+    let _ = io.end_stdout_line();
+    result
 }
 
 type Failure = (u8, String);
@@ -366,6 +391,8 @@ async fn drive(
             let outcome = finished.outcome;
             let code = finished.code.as_deref().unwrap_or("completed");
             let usage: Vec<_> = render.usage.values().collect();
+            // The usage line is the first diagnostic after the answer (F05).
+            io.end_stdout_line().map_err(|_| infrastructure())?;
             writeln!(
                 io.stderr,
                 "usage: {}",
@@ -474,12 +501,15 @@ fn update(
                 EventKind::CompactionCommitted { .. } => {
                     writeln!(io.stderr, "compaction: committed").map_err(|_| infrastructure())?
                 }
-                EventKind::Fault(cause) => writeln!(
-                    io.stderr,
-                    "error: runtime_fault {}",
-                    line(&format!("{cause:?}"))
-                )
-                .map_err(|_| infrastructure())?,
+                EventKind::Fault(cause) => {
+                    let _ = io.end_stdout_line();
+                    writeln!(
+                        io.stderr,
+                        "error: runtime_fault {}",
+                        line(&format!("{cause:?}"))
+                    )
+                    .map_err(|_| infrastructure())?
+                }
                 _ => {}
             }
             client.apply(&e);
@@ -574,6 +604,7 @@ impl Renderer {
                 .write_all(delta.as_bytes())
                 .and_then(|()| io.stdout.flush())
                 .map_err(|_| infrastructure())?;
+            io.stdout_open_line = !delta.ends_with('\n');
         }
         *offset = text.len();
         Ok(())

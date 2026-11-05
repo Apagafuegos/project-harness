@@ -590,6 +590,12 @@ Exit codes: **0** completed; **1** turn/provider/budget/infrastructure failure;
 **130** cancelled. Errors include stable codes, and Codex authentication prints
 `run \`codex login\``.
 
+Stdout carries assistant text only. Before the first diagnostic (the `usage:`
+summary, a runtime fault, a refusal or exit) the client terminates an
+unterminated assistant line with exactly one `\n` on stdout, so stdout and
+stderr never share a line in a merged PTY; an answer that already ends a line,
+and a refusal that wrote no stdout, gain no byte.
+
 Offline tests inject `ScriptedProvider` and fake I/O into the client module.
 `scripts/live-check.sh ask` is an explicit, quota-spending Codex smoke in a temporary
 workspace; it checks exit 0 and stdout containing `pong`, printing only a sanitized

@@ -114,6 +114,7 @@ async fn run(
                 stderr_is_tty: false,
                 terminal,
                 interrupts: tx.unwrap_or(receiver),
+                stdout_open_line: false,
             },
         ),
     )
@@ -208,6 +209,50 @@ async fn exact_stdout_streamed_answer_and_reasoning_only_on_stderr() {
     assert_eq!(err.matches("shell unavailable:").count(), 1);
 }
 
+/// F05: stdout ends its line before the first diagnostic, and only when needed.
+#[tokio::test]
+async fn stdout_ends_with_one_newline_before_diagnostics_and_only_when_missing() {
+    for (text, expected) in [
+        ("no trailing newline", &b"no trailing newline\n"[..]),
+        ("already\n", &b"already\n"[..]),
+    ] {
+        let f = Fixture::new();
+        let (code, out, err) = f
+            .run(Arc::new(ScriptedProvider::new([reply(text)])), None)
+            .await;
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(out.as_slice(), expected, "{text:?} stdout bytes");
+        assert!(out.ends_with(b"\n"), "{text:?} must end a line");
+        // Diagnostics are whole lines of their own and never echo the answer.
+        assert!(!err.contains(text.trim()), "{err}");
+        assert!(err.lines().any(|line| line.starts_with("usage: ")), "{err}");
+        assert!(err.lines().any(|line| line.starts_with("turn: ")), "{err}");
+    }
+
+    // An error diagnostic also waits for the line to end.
+    let mut f = Fixture::new();
+    f.options.prompt = String::new();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let (_, rx) = tokio::sync::mpsc::unbounded_channel();
+    let code = ask::run(
+        f.options.clone(),
+        Arc::new(ScriptedProvider::new([])),
+        Io {
+            stdin: &mut io::empty(),
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+            stderr_is_tty: false,
+            terminal: None,
+            interrupts: rx,
+            stdout_open_line: false,
+        },
+    )
+    .await;
+    assert_eq!(code, 2);
+    assert!(stdout.is_empty(), "a refusal writes no stdout: {stdout:?}");
+}
+
 #[tokio::test]
 async fn tool_proposal_approved_via_fake_terminal() {
     let f = Fixture::new();
@@ -218,7 +263,7 @@ async fn tool_proposal_approved_via_fake_terminal() {
     let mut tty = FakeTerminal::new(true);
     let (code, out, err) = f.run(p, Some(&mut tty)).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"done");
+    assert_eq!(out, b"done\n");
     assert_eq!(tty.proposals.len(), 1);
     assert!(tty.proposals[0].contains("write") && tty.proposals[0].contains("new"));
     assert_eq!(
@@ -325,13 +370,13 @@ async fn continue_session_preserves_history_without_reprinting_old_answer() {
         .run(Arc::new(ScriptedProvider::new([reply("first")])), None)
         .await;
     assert_eq!(code, 0);
-    assert_eq!(out, b"first");
+    assert_eq!(out, b"first\n");
     let before = f.snapshot(&err);
     f.options.session = Some(before.session_id().clone());
     let p = Arc::new(ScriptedProvider::new([reply("second")]));
     let (code, out, err) = f.run(p.clone(), None).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"second");
+    assert_eq!(out, b"second\n");
     assert!(f.snapshot(&err).sequence() > before.sequence());
     assert!(format!("{:?}", p.streams()[0].request.input.items).contains("first"));
 }
@@ -354,7 +399,7 @@ async fn stdin_dash_is_prompt_not_approval_input() {
     )
     .await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"stdin reply");
+    assert_eq!(out, b"stdin reply\n");
     assert!(format!("{:?}", p.streams()[0].request.input.items).contains("piped prompt"));
     assert_eq!(tty.proposals.len(), 1);
     assert_eq!(result_status(&f.snapshot(&err)), ToolStatus::Denied);
@@ -403,13 +448,14 @@ async fn cancellation_returns_130_and_durable_cancelled_turn() {
                 stderr_is_tty: false,
                 terminal: None,
                 interrupts: rx,
+                stdout_open_line: false,
             },
         ),
     )
     .await
     .expect("Ctrl-C was ignored");
     assert_eq!(code, 130);
-    assert_eq!(out.bytes, b"partial");
+    assert_eq!(out.bytes, b"partial\n");
     let snapshot = f.snapshot(&String::from_utf8(err).unwrap());
     assert!(snapshot.events().any(|(_,_, e)| matches!(e, JournalEvent::TurnFinished(f) if f.outcome == TurnOutcome::Cancelled)));
     assert!(p.streams()[0].cancelled && p.streams()[0].dropped);
@@ -567,7 +613,7 @@ async fn continuation_switch_is_rejected_by_default_with_the_portability_report(
         )
         .await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"first");
+    assert_eq!(out, b"first\n");
     let before = f.snapshot(&err);
     f.options.session = Some(before.session_id().clone());
     f.options.model = ModelRef {
@@ -626,7 +672,7 @@ async fn continuation_switch_omits_with_an_explicit_policy_and_runs_the_turn() {
     let provider = Arc::new(ScriptedProvider::new([reply("second")]));
     let (code, out, err) = f.run(provider.clone(), None).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"second");
+    assert_eq!(out, b"second\n");
     assert!(
         err.contains("switch: switched from test-codex/scripted to other/cheap"),
         "{err}"
@@ -670,7 +716,7 @@ async fn continuation_without_an_override_keeps_the_saved_model() {
     let provider = Arc::new(ScriptedProvider::new([reply("second")]));
     let (code, out, err) = f.run(provider.clone(), None).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, b"second");
+    assert_eq!(out, b"second\n");
     assert!(!err.contains("switch:"), "{err}");
     assert_eq!(
         provider.streams()[0].request.input.model,
@@ -802,7 +848,7 @@ async fn lag_resets_preserve_exact_stdout_without_duplicates() {
         .run(Arc::new(ScriptedProvider::new([Script::new(steps)])), None)
         .await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(out, "é".repeat(256).as_bytes());
+    assert_eq!(out, format!("{}\n", "é".repeat(256)).as_bytes());
 }
 
 #[tokio::test]

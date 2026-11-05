@@ -105,7 +105,9 @@ harness
 ```
 
 `ask` writes assistant text only to stdout and diagnostics/session identity to
-stderr. `-` reads the prompt from stdin, never an approval. Exit statuses:
+stderr. If the answer does not end with a newline, `ask` writes exactly one
+newline to stdout before its first diagnostic (the `usage:` summary, an error or
+exit), so a merged terminal never glues both streams onto one line. `-` reads the prompt from stdin, never an approval. Exit statuses:
 0 completed, 1 turn failure, 2 usage/configuration/refused switch,
 3 authentication, 130 cancelled. There is no automatic inference retry.
 
