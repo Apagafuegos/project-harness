@@ -146,7 +146,8 @@ impl Allowance {
             Operation::Read { .. }
             | Operation::List { .. }
             | Operation::Glob { .. }
-            | Operation::Grep { .. } => None,
+            | Operation::Grep { .. }
+            | Operation::MultiEdit { .. } => None,
         }
     }
 
