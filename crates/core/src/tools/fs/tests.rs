@@ -381,6 +381,12 @@ fn s01_created_target_at_rename_requires_noreplace() {
         None,
         None,
     );
+    // NOREPLACE EEXIST proves no replacement happened, so the effect is not
+    // merely "unknown": it is provably not applied.
+    assert_eq!(
+        outcome.file_effect,
+        Some(crate::session::FileEffect::NotApplied)
+    );
     assert_code(outcome, ResultCode::StalePlan);
     assert_eq!(
         fs::read_to_string(root.path().join("new")).unwrap(),

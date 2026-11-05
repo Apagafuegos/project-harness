@@ -211,6 +211,13 @@ pub enum Input {
         /// The bound image, or the refusal that stopped the call.
         result: Result<FileImage, Refusal>,
     },
+    /// Preflight, artifact verification and staging completed before commit A.
+    UndoPrepared {
+        /// Executor staging identity.
+        token: UndoToken,
+        /// Refusals append nothing.
+        result: Result<(), Vec<crate::session::UndoConflict>>,
+    },
     /// The sequential executor finished one undo restoration.
     UndoFinished {
         /// Token of the restoration in flight.
@@ -660,6 +667,15 @@ pub enum Effect {
         token: CaptureToken,
         /// The immutable plan whose target is captured.
         plan: Plan,
+    },
+    /// Stage one undo before writing its intent.
+    UndoPrepare {
+        /// Executor staging identity.
+        token: UndoToken,
+        /// Recorded workspace identity.
+        workspace: String,
+        /// Entire selected set.
+        targets: Vec<UndoTarget>,
     },
     /// Restore one undo's targets on the sequential executor, after commit A.
     UndoRestore {

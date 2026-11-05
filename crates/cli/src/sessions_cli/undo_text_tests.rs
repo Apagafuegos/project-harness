@@ -46,9 +46,9 @@ fn the_preview_names_restores_removals_and_omitted_calls() {
         )],
     };
     let text = preview_text(&preview);
-    assert!(text.contains("restore: src/a.rs"), "{text}");
+    assert!(text.contains("restore: \"src/a.rs\""), "{text}");
     assert!(
-        text.contains("remove (created by the agent): src/b.rs"),
+        text.contains("remove (created by the agent): \"src/b.rs\""),
         "{text}"
     );
     assert!(text.contains("Not reversible: bash"), "{text}");
@@ -98,7 +98,59 @@ fn a_not_executed_call_is_labelled_and_a_conflict_lists_its_rows() {
         omitted: Vec::new(),
     });
     match refusal {
-        Failure::Refusal(text) => assert_eq!(text, "undo_conflict\n  changed src/a.rs"),
+        Failure::Refusal(text) => assert_eq!(text, "undo_conflict\n  changed \"src/a.rs\""),
         Failure::Storage(_) => panic!("a conflict is a refusal"),
+    }
+}
+
+#[test]
+fn every_undo_path_escapes_terminal_controls() {
+    use harness_core::{
+        runtime::UndoPreviewTarget,
+        session::{Digest, FileOutcome, UndoConflict, UndoFileOutcome, UndoId},
+    };
+    let path = "file\x1b[31m\nname";
+    let preview = UndoPreview {
+        undo_id: UndoId::new(),
+        target_turn_id: TurnId::new(),
+        head: None,
+        sequence: 1,
+        configuration: Digest::of(b"configuration"),
+        targets: vec![
+            UndoPreviewTarget {
+                path: path.into(),
+                restores: true,
+                bytes: Some(1),
+            },
+            UndoPreviewTarget {
+                path: path.into(),
+                restores: false,
+                bytes: None,
+            },
+        ],
+        omitted: Vec::new(),
+    };
+    let Failure::Refusal(conflict) = refusal(Rejection::Undo {
+        code: "undo_conflict",
+        detail: String::new(),
+        conflicts: vec![UndoConflict {
+            path: path.into(),
+            reason: "changed",
+        }],
+        omitted: Vec::new(),
+    }) else {
+        panic!("expected refusal");
+    };
+    let rows = [
+        preview_text(&preview),
+        result_row(&UndoFileOutcome {
+            path: path.into(),
+            outcome: FileOutcome::Restored,
+        }),
+        conflict,
+    ];
+    for row in rows {
+        assert!(!row.contains('\x1b'), "terminal escape leaked: {row:?}");
+        assert!(row.contains(&format!("{path:?}")), "{row}");
     }
 }

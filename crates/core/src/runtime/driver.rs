@@ -847,8 +847,18 @@ impl<E: Env + Send + 'static> Driver<E> {
     }
 
     fn step(&mut self, input: Input) {
+        let epoch = self.runtime.epoch().clone();
         #[allow(unused_mut)]
         let mut effects = self.runtime.step(input, &mut self.env);
+        if (epoch != *self.runtime.epoch()
+            || matches!(
+                self.runtime.phase(),
+                Phase::Faulted | Phase::RecoveryRequired
+            ))
+            && let Some(worker) = &self.tool_worker
+        {
+            let _ = worker.send.send(Job::UndoDiscard);
+        }
         // Check immediately after an applied configuration, before dispatching
         // any of its effects (especially Execute following a remembered grant).
         if self.host_is_stale() && self.runtime.phase() != Phase::Faulted {
@@ -1102,6 +1112,43 @@ impl<E: Env + Send + 'static> Driver<E> {
                                 crate::session::ResultCode::InfrastructureFailure,
                                 "the trusted workspace is unavailable",
                             )),
+                        });
+                    }
+                }
+                Effect::UndoPrepare {
+                    token,
+                    workspace,
+                    targets,
+                } => {
+                    let epoch = self.runtime.epoch().clone();
+                    let job = Job::UndoPrepare {
+                        epoch: epoch.clone(),
+                        token,
+                        workspace,
+                        targets: targets.clone(),
+                        artifacts: self.root.clone(),
+                    };
+                    if self
+                        .send_tool(
+                            job,
+                            PendingJob {
+                                epoch,
+                                token: JobToken::Undo(token),
+                                cancel: None,
+                            },
+                        )
+                        .is_err()
+                    {
+                        // No executor means no staging, so nothing was prepared.
+                        self.step(Input::UndoPrepared {
+                            token,
+                            result: Err(targets
+                                .into_iter()
+                                .map(|target| crate::session::UndoConflict {
+                                    path: target.path,
+                                    reason: "workspace_unavailable",
+                                })
+                                .collect()),
                         });
                     }
                 }
@@ -1454,6 +1501,9 @@ impl<E: Env + Send + 'static> Driver<E> {
     /// Stop the faulted runtime's worker and attach a new runtime over the
     /// journal `opening` yields, with a new epoch, then let it recover.
     async fn replace(&mut self, opening: Opening) -> Result<RuntimeView, PersistError> {
+        if let Some(worker) = &self.tool_worker {
+            let _ = worker.send.send(Job::UndoDiscard);
+        }
         self.compaction = None;
         // Drop advisory worker senders before draining the storage worker.
         self.hint_load = None;

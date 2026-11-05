@@ -48,26 +48,24 @@ impl ToolHost {
         self.workspace.capture(plan, artifacts)
     }
 
-    /// Restore one undo's whole target set.
-    pub(super) fn restore_undo(
+    /// Prepare one undo without journal or target mutations.
+    pub(super) fn prepare_undo(
         &self,
         workspace: &str,
         targets: &[UndoTarget],
         artifacts: &DataRoot,
-    ) -> crate::tools::UndoExecution {
+    ) -> Result<crate::tools::fs::PreparedUndo, Vec<crate::session::UndoConflict>> {
         match &self.files {
             Some(files) => {
-                files.restore_undo(&WorkspaceIdentity(workspace.to_owned()), targets, artifacts)
+                files.prepare_undo(&WorkspaceIdentity(workspace.to_owned()), targets, artifacts)
             }
-            None => crate::tools::UndoExecution::Refused(
-                targets
-                    .iter()
-                    .map(|target| crate::session::UndoConflict {
-                        path: target.path.clone(),
-                        reason: "workspace_unavailable",
-                    })
-                    .collect(),
-            ),
+            None => Err(targets
+                .iter()
+                .map(|target| crate::session::UndoConflict {
+                    path: target.path.clone(),
+                    reason: "workspace_unavailable",
+                })
+                .collect()),
         }
     }
 
@@ -131,6 +129,16 @@ fn unavailable() -> Refusal {
 }
 
 pub(super) enum Job {
+    /// Drop executor-owned staging when its runtime is invalidated.
+    UndoDiscard,
+    /// Verify and stage before commit A.
+    UndoPrepare {
+        epoch: RuntimeEpoch,
+        token: UndoToken,
+        workspace: String,
+        targets: Vec<UndoTarget>,
+        artifacts: Arc<DataRoot>,
+    },
     /// Capture a trusted write/edit pre-image through the workspace.
     Capture {
         epoch: RuntimeEpoch,
@@ -209,8 +217,43 @@ impl ToolWorker {
             .name("harness-tools".into())
             .spawn(move || {
                 let registry = Registry::builtin();
+                let mut staged = None;
                 while let Ok(job) = jobs.recv() {
                     let answer = match job {
+                        Job::UndoDiscard => {
+                            staged = None;
+                            continue;
+                        }
+                        Job::UndoPrepare {
+                            epoch,
+                            token,
+                            workspace,
+                            targets,
+                            artifacts,
+                        } => {
+                            // One staging owner, keyed by both epoch and undo token.
+                            staged = None;
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                host.prepare_undo(&workspace, &targets, &artifacts)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err(targets
+                                    .iter()
+                                    .map(|target| crate::session::UndoConflict {
+                                        path: target.path.clone(),
+                                        reason: "staging_failed",
+                                    })
+                                    .collect())
+                            });
+                            let result = result.map(|prepared| {
+                                staged = Some((epoch.clone(), token, prepared));
+                            });
+                            Answer {
+                                epoch,
+                                token: JobToken::Undo(token),
+                                input: Some(Input::UndoPrepared { token, result }),
+                            }
+                        }
                         Job::Capture {
                             epoch,
                             token,
@@ -239,9 +282,21 @@ impl ToolWorker {
                             targets,
                             artifacts,
                         } => {
-                            let result = catch_unwind(AssertUnwindSafe(|| {
-                                host.restore_undo(&workspace, &targets, artifacts.as_ref())
-                            }));
+                            let prepared =
+                                staged.take().filter(|(e, t, _)| e == &epoch && *t == token);
+                            let result =
+                                catch_unwind(AssertUnwindSafe(|| match (prepared, &host.files) {
+                                    (Some((_, _, prepared)), Some(files)) => files.apply_undo(
+                                        prepared,
+                                        &WorkspaceIdentity(workspace),
+                                        &targets,
+                                        &artifacts,
+                                    ),
+                                    _ => crate::tools::UndoExecution::Done {
+                                        files: Vec::new(),
+                                        complete: false,
+                                    },
+                                }));
                             Answer {
                                 epoch,
                                 token: JobToken::Undo(token),

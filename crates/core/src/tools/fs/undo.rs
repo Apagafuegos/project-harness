@@ -77,6 +77,12 @@ struct PreImage {
     text: Option<String>,
 }
 
+/// Executor-owned staging; dropping it removes every uncommitted temporary.
+pub(crate) struct PreparedUndo {
+    targets: Vec<UndoTarget>,
+    staged: Vec<Option<Temporary>>,
+}
+
 /// One armed same-directory temporary, removed unless its rename committed.
 struct Temporary {
     parent: OwnedFd,
@@ -239,26 +245,25 @@ impl FsWorkspace {
         })
     }
 
-    /// Restore every target, or change none. A complete preflight refusal is
-    /// reported before any target is touched; a failure after a mutation is
-    /// reported as incomplete and never retried.
-    pub fn restore_undo(
+    /// Preflight every target, verify its pre-image artifact, stage and sync
+    /// the replacement temporaries, then recheck the whole set. A refusal
+    /// changes no target and appends no journal record; the returned staging
+    /// removes its temporaries on drop.
+    pub(crate) fn prepare_undo(
         &self,
         workspace: &WorkspaceIdentity,
         targets: &[UndoTarget],
         artifacts: &DataRoot,
-    ) -> UndoExecution {
+    ) -> Result<PreparedUndo, Vec<UndoConflict>> {
         let started = Instant::now();
         if self.identity.0 != workspace.0 {
-            return UndoExecution::Refused(
-                targets
-                    .iter()
-                    .map(|target| UndoConflict {
-                        path: target.path.clone(),
-                        reason: "workspace_mismatch",
-                    })
-                    .collect(),
-            );
+            return Err(targets
+                .iter()
+                .map(|target| UndoConflict {
+                    path: target.path.clone(),
+                    reason: "workspace_mismatch",
+                })
+                .collect());
         }
         let mut hook = |_: Step| Ok(());
         let mut control = Control {
@@ -267,9 +272,9 @@ impl FsWorkspace {
             cancellation: None,
             hook: &mut hook,
         };
-        if let Err(conflicts) = self.undo_preflight(targets, artifacts, &mut control) {
-            return UndoExecution::Refused(conflicts);
-        }
+        // Before staging: a content or protection conflict must be named as
+        // such, never as a staging failure.
+        self.undo_preflight(targets, artifacts, &mut control)?;
         // Stage the replacement temporaries for present pre-images. Staging is
         // not a target mutation, and its failure still changes nothing.
         let mut staged: Vec<Option<Temporary>> = Vec::new();
@@ -281,15 +286,54 @@ impl FsWorkspace {
             match self.stage(target, pre_image, artifacts, &mut control) {
                 Ok(temporary) => staged.push(Some(temporary)),
                 Err(_) => {
-                    return UndoExecution::Refused(vec![UndoConflict {
+                    return Err(vec![UndoConflict {
                         path: target.path.clone(),
                         reason: "staging_failed",
                     }]);
                 }
             }
         }
-        // Recheck the whole target set after staging, before the first mutation.
-        if let Err(conflicts) = self.undo_preflight(targets, artifacts, &mut control) {
+        // Still before commit A: staging and the whole-set recheck change no
+        // target and append no journal record on refusal.
+        self.undo_preflight(targets, artifacts, &mut control)?;
+        Ok(PreparedUndo {
+            targets: targets.to_vec(),
+            staged,
+        })
+    }
+
+    /// Only after commit A's acknowledgement. Consume, never recreate, staging.
+    pub(crate) fn apply_undo(
+        &self,
+        prepared: PreparedUndo,
+        workspace: &WorkspaceIdentity,
+        targets: &[UndoTarget],
+        artifacts: &DataRoot,
+    ) -> UndoExecution {
+        if self.identity != *workspace || prepared.targets != targets {
+            return UndoExecution::Refused(
+                targets
+                    .iter()
+                    .map(|target| UndoConflict {
+                        path: target.path.clone(),
+                        reason: "workspace_mismatch",
+                    })
+                    .collect(),
+            );
+        }
+        let PreparedUndo {
+            targets,
+            mut staged,
+        } = prepared;
+        let mut hook = |_: Step| Ok(());
+        let mut control = Control {
+            started: Instant::now(),
+            timeout: Some(DEADLINE),
+            cancellation: None,
+            hook: &mut hook,
+        };
+        // A conflict arising after preparation is durable not_applied evidence.
+        if let Err(conflicts) = self.undo_preflight(&targets, artifacts, &mut control) {
             return UndoExecution::Refused(conflicts);
         }
         let mut files: Vec<UndoFileOutcome> = Vec::new();

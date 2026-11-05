@@ -94,6 +94,7 @@ impl FsWorkspace {
             .operation()
             .mutation()
             .then_some(FileEffect::NotApplied);
+        let mut rename_attempted = false;
         let mut commit = || {
             if let Some(effect) = effect.as_mut() {
                 *effect = FileEffect::Applied;
@@ -146,6 +147,7 @@ impl FsWorkspace {
                     &mut control,
                     image,
                     &mut commit,
+                    &mut rename_attempted,
                 ),
                 Operation::Edit {
                     path,
@@ -158,6 +160,7 @@ impl FsWorkspace {
                     &mut control,
                     image,
                     &mut commit,
+                    &mut rename_attempted,
                 ),
                 Operation::Bash { .. }
                 | Operation::List { .. }
@@ -179,14 +182,9 @@ impl FsWorkspace {
                     ResultCode::InfrastructureFailure => ToolStatus::InfrastructureFailure,
                     _ => ToolStatus::Failed,
                 };
-                // A failing syscall in the replacement path is ambiguous: the
-                // rename is not a compare-and-swap, so an unclassifiable
-                // outcome is recorded as unknown rather than as "not applied".
-                if effect == Some(FileEffect::NotApplied)
-                    && error.code != ResultCode::StalePlan
-                    && error.code != ResultCode::Cancelled
-                    && error.code != ResultCode::Timeout
-                {
+                // Only an attempted rename can have an ambiguous effect.
+                // NOREPLACE EEXIST resets the marker: it proves no replacement.
+                if effect == Some(FileEffect::NotApplied) && rename_attempted {
                     effect = Some(FileEffect::Unknown);
                 }
                 (status, Some(error.code), error.text(), false)
@@ -258,6 +256,7 @@ impl FsWorkspace {
         control: &mut Control<'_>,
         image: Option<&FileImage>,
         commit: &mut dyn FnMut(),
+        rename_attempted: &mut bool,
     ) -> Result<(String, bool), Refusal> {
         let resolved = self.resolve(path, control)?;
         refuse_protection(resolved.protection, true)?;
@@ -365,8 +364,10 @@ impl FsWorkspace {
             } else {
                 RenameFlags::empty()
             };
+            *rename_attempted = true;
             fs::renameat_with(&parent, &name, &parent, &resolved.name, flags).map_err(|e| {
                 if e == io::Errno::EXIST && target.pre_image == "absent" {
+                    *rename_attempted = false;
                     stale()
                 } else {
                     errno(e)

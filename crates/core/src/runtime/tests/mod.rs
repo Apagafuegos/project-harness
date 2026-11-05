@@ -338,6 +338,7 @@ impl Driver {
     fn observe(&mut self, effect: &Effect) {
         match effect {
             Effect::InspectUncertain { .. }
+            | Effect::UndoPrepare { .. }
             | Effect::UndoRestore { .. }
             | Effect::InspectUndo { .. } => {}
             Effect::CaptureImage { token, plan } => {

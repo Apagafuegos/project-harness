@@ -192,9 +192,9 @@ fn undo_restores_the_file_and_prints_the_report() {
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("Undo agent turn"), "{text}");
-    assert!(text.contains("restore: a"), "{text}");
+    assert!(text.contains("restore: \"a\""), "{text}");
     assert!(text.contains("undo succeeded"), "{text}");
-    assert!(text.contains("restored a"), "{text}");
+    assert!(text.contains("restored \"a\""), "{text}");
     assert!(
         text.contains("The model context records this undo through a user note."),
         "{text}"
@@ -220,11 +220,23 @@ fn a_stale_target_refuses_with_its_path_and_exit_two() {
     fs::write(fixture.workspace.join("a"), "before").unwrap();
     fixture.write_turn();
     fs::write(fixture.workspace.join("a"), "user edit").unwrap();
+    let journal = fixture
+        .state
+        .join("sessions")
+        .join(format!("{}.jsonl", fixture.session));
+    let before = fs::read(&journal).unwrap();
     let output = run(&fixture.state, &fixture.session, true);
     assert_eq!(output.status.code(), Some(2));
     let text = stderr(&output);
     assert!(text.contains("undo_conflict"), "{text}");
-    assert!(text.contains("changed a"), "{text}");
+    assert!(text.contains("changed \"a\""), "{text}");
+    let after = fs::read(&journal).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "a preflight conflict appends no record: {}",
+        String::from_utf8_lossy(&after[before.len().saturating_sub(160)..])
+    );
     assert_eq!(
         fs::read_to_string(fixture.workspace.join("a")).unwrap(),
         "user edit"

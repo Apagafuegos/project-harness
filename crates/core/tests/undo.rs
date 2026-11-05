@@ -377,6 +377,7 @@ async fn a_preflight_conflict_changes_nothing_and_consumes_nothing() {
     )
     .unwrap();
     let first = preview(&handle).await;
+    let before = fixture.journal();
     let refusal = undo(&handle, &first).await.unwrap_err();
     let Rejection::Undo {
         code, conflicts, ..
@@ -398,12 +399,27 @@ async fn a_preflight_conflict_changes_nothing_and_consumes_nothing() {
     .unwrap();
     // Nothing changed, and the turn is still the next candidate.
     assert_eq!(fs::read_to_string(fixture.path("a")).unwrap(), "user edit");
-    let records = fixture.journal();
-    let note = entry(&records, "undo_note").expect("the not-applied note");
-    assert_eq!(note["outcome"], "not_applied");
-    assert!(note["text"].as_str().unwrap().contains(r#"Unchanged: "a""#));
+    assert_eq!(
+        fixture.journal(),
+        before,
+        "preflight refusal appends nothing"
+    );
+    assert!(
+        !fs::read_dir(&fixture.host.workspace_root)
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".harness-undo-")
+            }),
+        "preflight refusal leaks no staging"
+    );
     let again = self::preview(&handle).await;
     assert_eq!(again.target_turn_id, first.target_turn_id);
+    assert_eq!(again.sequence, first.sequence);
+    handle.shutdown().await;
 }
 
 #[tokio::test]

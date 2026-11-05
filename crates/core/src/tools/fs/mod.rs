@@ -9,10 +9,13 @@ mod resolve;
 #[cfg(test)]
 mod search_tests;
 mod undo;
+pub(crate) use undo::PreparedUndo;
 mod walk;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod undo_tests;
 
 use std::{collections::BTreeMap, path::Path};
 

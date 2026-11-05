@@ -386,16 +386,25 @@ Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
 ## Undo tests
 
 Durable undo ([ADR 0032](decisions/0032-undo-agent-edits.md)) is covered at
-four levels. Run them with targeted, serial commands:
+five levels. Run them with targeted, serial commands:
 
 ```sh
 cargo test -p harness-core --lib session::tests::undo     # storage rules
 cargo test -p harness-core --lib an_undo_note             # coverage barrier
+cargo test -p harness-core --lib tools::fs::undo_tests    # pre-rename effect, staging
 cargo test -p harness-core --test undo                    # capture, restore, recovery
 cargo test -p harness --test sessions_undo                # CLI exit codes and locking
 cargo test -p harness --bin harness undo_text_tests       # report text
 cargo test -p harness --lib tui::keys                     # Ctrl-Z is documented
 ```
+
+`crates/core/src/tools/fs/undo_tests.rs` drives the runtime with a real executor
+and a real workspace: a temporary that cannot be written records
+`file_effect: not_applied` and leaves the turn undoable, both replacements are
+staged before commit A is written (a durability gate holds the acknowledgement),
+a conflict found after staging is refused rather than recorded as uncertainty,
+and a failed commit A discards the executor's staging. Every wait in that file is
+bounded and names what did not arrive, so a broken build fails instead of hanging.
 
 `crates/core/tests/undo.rs` runs a real `SessionHandle` against a real
 descriptor-rooted workspace and scripted provider: it asserts the captured

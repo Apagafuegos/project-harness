@@ -94,11 +94,21 @@ pub struct Runtime {
 /// One undo's local progress, never persisted.
 #[derive(Debug)]
 enum UndoActivity {
+    /// Workspace preparation, before any journal record.
+    Preparing {
+        request: RequestId,
+        intent: Box<UndoIntent>,
+        token: UndoToken,
+        command_id: CommandId,
+        command: serde_json::Value,
+        fingerprint: Digest,
+    },
     /// Commit A is in flight.
     Staging {
         undo_id: UndoId,
         request: RequestId,
         intent: Box<UndoIntent>,
+        token: UndoToken,
     },
     /// The sequential executor is restoring the target set.
     Restoring {
@@ -477,6 +487,7 @@ impl Runtime {
             Input::TimerFired { timer } => self.timer(timer, env),
             Input::Planned { token, result } => self.planned(token, result, env),
             Input::Captured { token, result } => self.captured(token, result, env),
+            Input::UndoPrepared { token, result } => self.undo_prepared(token, result, env),
             Input::UndoFinished { token, result } => self.undo_finished(token, result, env),
             Input::UndoHints {
                 token,
@@ -521,6 +532,14 @@ impl Runtime {
     // ----- commands -------------------------------------------------------
 
     fn command(&mut self, request: RequestId, command: Command, env: &mut dyn Env) {
+        // Preparation is ephemeral but owns the idle operation slot. Do not
+        // allow navigation/configuration or another turn to invalidate it.
+        if matches!(self.undo_activity, Some(UndoActivity::Preparing { .. }))
+            && !matches!(command, Command::Undo { .. })
+        {
+            self.reply(request, Err(Rejection::Busy));
+            return;
+        }
         let result = match command {
             Command::PreviewCompaction => self.preview_compaction(request, env),
             Command::CommitCompaction { preview_id } => {
@@ -1680,10 +1699,66 @@ impl Runtime {
             targets,
             omitted_calls,
         };
-        self.undo_activity = Some(UndoActivity::Staging {
-            undo_id: undo_id.clone(),
+        self.next_token += 1;
+        let token = UndoToken(self.next_token);
+        self.out.push(Effect::UndoPrepare {
+            token,
+            workspace: snapshot.header().workspace.clone(),
+            targets: intent.targets.clone(),
+        });
+        self.undo_activity = Some(UndoActivity::Preparing {
             request,
-            intent: Box::new(intent.clone()),
+            intent: Box::new(intent),
+            token,
+            command_id,
+            command,
+            fingerprint,
+        });
+        None
+    }
+
+    fn undo_prepared(
+        &mut self,
+        token: UndoToken,
+        result: Result<(), Vec<crate::session::UndoConflict>>,
+        env: &mut dyn Env,
+    ) {
+        if self.mode != Mode::Ready
+            || !matches!(&self.undo_activity,
+            Some(UndoActivity::Preparing { token: expected, .. }) if *expected == token)
+        {
+            return;
+        }
+        let Some(UndoActivity::Preparing {
+            request,
+            intent,
+            token,
+            command_id,
+            command,
+            fingerprint,
+        }) = self.undo_activity.take()
+        else {
+            return;
+        };
+        if let Err(mut conflicts) = result {
+            conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+            self.reply(
+                request,
+                Err(undo_refusal(
+                    "undo_conflict",
+                    String::new(),
+                    conflicts,
+                    Vec::new(),
+                )),
+            );
+            return;
+        }
+        let snapshot = self.snapshot().clone();
+        self.undo_activity = Some(UndoActivity::Staging {
+            undo_id: intent.undo_id.clone(),
+            request,
+            intent: intent.clone(),
+            token,
         });
         let commit = Commit {
             command_id: Some(command_id.clone()),
@@ -1694,10 +1769,9 @@ impl Runtime {
                 reason: HeadReason::Retain,
             },
             entries: Vec::new(),
-            events: vec![JournalEvent::UndoIntent(intent)],
+            events: vec![JournalEvent::UndoIntent(*intent)],
         };
         self.persist(commit, idle_flight(), Some((command_id, command)), env);
-        None
     }
 
     /// After commit A: hand the whole target set to the sequential executor.
@@ -1707,13 +1781,12 @@ impl Runtime {
             undo_id,
             request,
             intent,
+            token,
         }) = self.undo_activity.take()
         else {
             return;
         };
         let intent_targets = intent.targets.clone();
-        self.next_token += 1;
-        let token = UndoToken(self.next_token);
         self.undo_activity = Some(UndoActivity::Restoring {
             undo_id: undo_id.clone(),
             request,
@@ -2241,6 +2314,14 @@ impl Runtime {
         self.prepared = None;
         self.cancel_execution();
         self.clear_tool();
+        if let Some(activity) = self.undo_activity.take() {
+            let request = match activity {
+                UndoActivity::Preparing { request, .. }
+                | UndoActivity::Staging { request, .. }
+                | UndoActivity::Restoring { request, .. } => request,
+            };
+            self.reply(request, Err(Rejection::Faulted));
+        }
         if let Some(verification) = self.verifying.take() {
             for request in verification.waiters {
                 self.reply(request, Err(Rejection::Faulted));

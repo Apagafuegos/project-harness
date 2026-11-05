@@ -450,17 +450,20 @@ omitted calls, and returns an ephemeral `UndoPreview` bound to the head,
 sequence, configuration and turn. `Undo { command_id, expected_sequence,
 expected_head, expected_configuration, target_turn_id }` recomputes the same
 selection and refuses `undo_stale_preview` if any binding differs; a stale
-preview never falls back to another turn. It commits one retained
-`undo_intent`, bound to the command so a lost acknowledgement can neither
-select another turn nor dispatch twice, and only that acknowledgement starts
-the sequential restoration.
+preview never falls back to another turn. Before commit A, an executor round-trip
+preflights every target and artifact, stages and syncs same-directory temporaries,
+and rechecks the entire set. A refusal returns sorted `undo_conflict` rows,
+appends nothing, and drops all staging. The executor owns successful staging,
+keyed by runtime epoch and undo token; invalidation and shutdown drop it.
+Only then does the core commit one retained `undo_intent`, bound to the command
+so a lost acknowledgement can neither select another turn nor dispatch twice.
 
-The restoration preflights the whole target set, stages same-directory
-temporaries, rechecks the whole set, and only then mutates each target in order,
-re-resolving from the pinned root immediately before every rename or unlink. A
-complete preflight refusal commits the terminal pair as `not_applied` (which
-consumes nothing) and replies `Rejection::Undo { code: "undo_conflict" }` with
-every conflicting path and content-free reason. Full success commits the
+After that acknowledgement the executor consumes the staging, revalidates the
+whole target set once more, and only then mutates each target in order,
+re-resolving from the pinned root immediately before every rename or unlink.
+Only a conflict at this post-intent recheck commits the terminal pair as
+`not_applied` (which consumes nothing), with sorted content-free conflict rows.
+Full success commits the
 terminal note/result pair as `succeeded`. Anything that may have changed a
 target commits `undo_uncertain` instead, and the runtime enters resolution:
 `Command::ResolveUndo { undo_id, resolution }` records the user's per-file

@@ -358,7 +358,7 @@ async fn undo_session(handle: &SessionHandle, arguments: &ArgMatches) -> Result<
         Ok(Accepted::UndoCompleted { outcome, files, .. }) => {
             text.push_str(&format!("\nundo {}", outcome.as_str()));
             for row in files {
-                text.push_str(&format!("\n  {} {}", row.outcome.as_str(), row.path));
+                text.push_str(&result_row(&row));
             }
             text.push_str("\nThe model context records this undo through a user note.");
             Ok(text)
@@ -383,7 +383,7 @@ fn refusal(rejection: Rejection) -> Failure {
                 text.push_str(&detail);
             }
             for conflict in conflicts {
-                text.push_str(&format!("\n  {} {}", conflict.reason, conflict.path));
+                text.push_str(&format!("\n  {} {:?}", conflict.reason, conflict.path));
             }
             text.push_str(&omitted_text(&omitted));
             Failure::Refusal(text)
@@ -418,6 +418,10 @@ fn gc(arguments: &ArgMatches) -> Result<String, Failure> {
     Ok(report_text(&report))
 }
 
+fn result_row(row: &harness_core::session::UndoFileOutcome) -> String {
+    format!("\n  {} {:?}", row.outcome.as_str(), row.path)
+}
+
 fn preview_text(preview: &UndoPreview) -> String {
     let mut text = format!(
         "Undo agent turn {} ({} target{})",
@@ -427,10 +431,10 @@ fn preview_text(preview: &UndoPreview) -> String {
     );
     for target in &preview.targets {
         if target.restores {
-            text.push_str(&format!("\n  restore: {}", target.path));
+            text.push_str(&format!("\n  restore: {:?}", target.path));
         } else {
             text.push_str(&format!(
-                "\n  remove (created by the agent): {}",
+                "\n  remove (created by the agent): {:?}",
                 target.path
             ));
         }
