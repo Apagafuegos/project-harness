@@ -10,6 +10,14 @@ mod process;
 mod settings;
 pub use settings::{ToolchainSettings, credential_name};
 
+/// Shell semantics bound into each new bash plan. Absent in legacy plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellOptions {
+    /// Use the rightmost failing pipeline component's status.
+    pub pipefail: bool,
+}
+
 use super::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, Plan};
 use crate::session::{ContentBlock, ExecutionBackend, ResultCode, ToolStatus};
 use serde_json::Value;
