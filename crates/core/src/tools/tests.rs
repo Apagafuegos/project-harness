@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::session::{
-    ArtifactRef, CallRef, Digest, EffectClass, ExecutionBackend, FileImage, ResultCode, ToolStatus,
+    ArtifactRef, CallRef, Digest, EffectClass, ExecutionBackend, FileImage, FileImageTarget,
+    ResultCode, ToolStatus,
 };
 
 const CONFIG: &[u8] = include_bytes!(
@@ -70,6 +71,52 @@ impl FakeWorkspace {
         artifacts: &crate::session::DataRoot,
     ) -> Result<FileImage, Refusal> {
         let value: serde_json::Value = serde_json::from_slice(plan.bytes()).unwrap();
+        if value["name"] == "multi_edit" {
+            let mut targets = Vec::new();
+            for (file, target) in value["arguments"]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(value["targets"].as_array().unwrap())
+            {
+                let path = file["path"].as_str().unwrap();
+                let bytes = &self.entries.get(path).ok_or_else(|| {
+                    Refusal::new(ResultCode::StalePlan, "workspace pre-image changed")
+                })?.1;
+                let pre = target["pre_image"].as_str().unwrap();
+                if Digest::of(bytes).as_str() != pre {
+                    return Err(Refusal::new(
+                        ResultCode::StalePlan,
+                        "workspace pre-image changed",
+                    ));
+                }
+                let mut text = std::str::from_utf8(bytes)
+                    .map_err(|_| Refusal::new(ResultCode::NotUtf8, "file is not UTF-8"))?
+                    .to_owned();
+                for edit in file["edits"].as_array().unwrap() {
+                    text = super::fs::execute::edited_bytes(
+                        &text,
+                        edit["old_text"].as_str().unwrap(),
+                        edit["new_text"].as_str().unwrap(),
+                    )?;
+                }
+                targets.push(FileImageTarget {
+                    path: path.to_owned(),
+                    pre_image: Some(artifacts.put_artifact(bytes).unwrap()),
+                    pre_mode: Some(0o644),
+                    post_image: Digest::of(text.as_bytes()),
+                });
+            }
+            let mut targets = targets.into_iter();
+            let first = targets.next().unwrap();
+            return Ok(FileImage {
+                path: first.path,
+                pre_image: first.pre_image,
+                pre_mode: first.pre_mode,
+                post_image: first.post_image,
+                additional_targets: targets.collect(),
+            });
+        }
         let path = value["target"]["path"]
             .as_str()
             .expect("mutation plan target");
@@ -122,6 +169,7 @@ impl FakeWorkspace {
             pre_image,
             pre_mode,
             post_image,
+            additional_targets: Vec::new(),
         })
     }
 }
@@ -536,12 +584,14 @@ fn workspace_path_invalid_arguments_and_normalization() {
 }
 
 #[test]
-fn omitted_or_empty_sandbox_keeps_the_v01_plan_bytes() {
+fn omitted_or_empty_sandbox_keeps_identical_new_shell_plan_bytes() {
     let view = FakeWorkspace::new();
     let omitted = plan("bash", args("bash"), &view, &default_policy()).unwrap();
     assert_eq!(
         omitted.bytes(),
-        include_str!("golden/bash.json").trim_end().as_bytes()
+        include_str!("golden/bash-pipefail.json")
+            .trim_end()
+            .as_bytes()
     );
     let mut empty = config();
     empty["sandbox"] = json!({});
@@ -579,7 +629,7 @@ fn plans_golden_canonical_bytes_determinism_and_digest() {
         ("read", include_str!("golden/read.json")),
         ("write", include_str!("golden/write.json")),
         ("edit", include_str!("golden/edit.json")),
-        ("bash", include_str!("golden/bash.json")),
+        ("bash", include_str!("golden/bash-pipefail.json")),
     ] {
         let a = plan(name, args(name), &view, &p).unwrap();
         let b = plan(name, args(name), &view, &p).unwrap();
@@ -789,7 +839,7 @@ fn bash_protected_mounts_sorted_deduplicated_and_bound_to_golden_bytes() {
     let built = plan("bash", args("bash"), &view, &policy(c.clone())).unwrap();
     assert_eq!(
         built.bytes(),
-        include_str!("golden/bash-protected.json")
+        include_str!("golden/bash-protected-pipefail.json")
             .trim_end()
             .as_bytes()
     );
@@ -1644,4 +1694,20 @@ fn search_tools_follow_workspace_read_ignore_allowances_and_bind_every_argument(
             ToolStatus::Denied,
         );
     }
+}
+
+#[test]
+fn new_bash_shell_semantics_are_bound_to_the_plan_digest() {
+    let view = FakeWorkspace::new();
+    let current = plan("bash", args("bash"), &view, &default_policy()).unwrap();
+    let wire: Value = serde_json::from_slice(current.bytes()).unwrap();
+    assert_eq!(wire["shell"], json!({"pipefail":true}));
+    let legacy = include_bytes!("golden/bash.json");
+    assert_ne!(current.digest(), &Digest::of(legacy));
+    let mut changed = wire;
+    changed["shell"]["pipefail"] = json!(false);
+    assert_ne!(
+        current.digest(),
+        &Digest::of(&serde_json::to_vec(&changed).unwrap())
+    );
 }
