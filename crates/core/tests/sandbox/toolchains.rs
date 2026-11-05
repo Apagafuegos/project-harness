@@ -54,8 +54,12 @@ fn run(f: &Fixture, b: &Sandbox, settings: &ToolchainSettings, command: &str) ->
 fn s02_toolchain_credentials_present_and_absent_readonly_and_private_caches() {
     let f = Fixture::new();
     let mount = tempfile::tempdir().unwrap();
+    let registry = tempfile::tempdir().unwrap();
+    fs::create_dir_all(registry.path().join("cache")).unwrap();
+    fs::write(registry.path().join("cache/marker"), "REGISTRY_SENTINEL").unwrap();
     let settings = ToolchainSettings {
         toolchain_paths: vec![mount.path().into()],
+        cargo_registry: Some(registry.path().into()),
         env: [("BUILD_LABEL".into(), "ENV_SENTINEL_NOT_FOR_REPORTS".into())].into(),
         ..Default::default()
     };
@@ -75,7 +79,18 @@ fn s02_toolchain_credentials_present_and_absent_readonly_and_private_caches() {
         "if echo bad > '{}/new-file'; then exit 82; fi\n",
         mount.path().display()
     ));
-    command.push_str("if cat /workspace/private/token; then exit 83; fi\nif echo bad > /workspace/.git/config; then exit 84; fi\nif (echo bad > /dev/tcp/1.1.1.1/443); then exit 85; fi\ntest \"$(stat -c %a \"$CARGO_HOME\")\" = 700\ntest \"$(stat -c %u \"$CARGO_HOME\")\" = \"$(id -u)\"\ntest \"$(stat -c %a \"$CARGO_TARGET_DIR\")\" = 700\nprintf private > \"$CARGO_HOME/lock\"\nprintf target > \"$CARGO_TARGET_DIR/lock\"\ntest \"$BUILD_LABEL\" = ENV_SENTINEL_NOT_FOR_REPORTS\n");
+    command.push_str(
+        "if cat /workspace/private/token; then exit 83; fi\n\
+         if echo bad > /workspace/.git/config; then exit 84; fi\n\
+         if (echo bad > /dev/tcp/1.1.1.1/443); then exit 85; fi\n\
+         test \"$(stat -c %a \"$CARGO_HOME\")\" = 700\n\
+         test \"$(stat -c %u \"$CARGO_HOME\")\" = \"$(id -u)\"\n\
+         test \"$(cat \"$CARGO_HOME/registry/cache/marker\")\" = REGISTRY_SENTINEL\n\
+         if echo bad > \"$CARGO_HOME/registry/cache/new\"; then exit 87; fi\n\
+         if echo bad > \"$CARGO_HOME/registry/other\"; then exit 88; fi\n\
+         printf private > \"$CARGO_HOME/lock\"\n\
+         test \"$BUILD_LABEL\" = ENV_SENTINEL_NOT_FOR_REPORTS\n",
+    );
     let outcome = run(&f, &b, &settings, &command);
     succeeded(&outcome);
     assert!(!text(&outcome).contains("CREDENTIAL_SENTINEL"));
@@ -165,20 +180,23 @@ fn s02_toolchain_cargo_test_offline_with_readonly_registry() {
     fs::write(f.root().join("Cargo.toml"), format!("[package]\nname = 'sandbox-recipe'\nversion = '0.0.0'\nedition = '2024'\n[workspace]\n[dependencies]\nitoa = '={version}'\n")).unwrap();
     fs::write(f.root().join("src/lib.rs"), "#[test]\nfn offline_registry_test_ran() { assert_eq!(itoa::Buffer::new().format(42), \"42\"); println!(\"SANDBOX_RUST_TEST_BINARY_RAN\"); }\n").unwrap();
     let settings = ToolchainSettings {
-        toolchain_paths: vec![fs::canonicalize(&toolchain).unwrap(), registry.clone()],
+        toolchain_paths: vec![fs::canonicalize(&toolchain).unwrap()],
         path_prepend: vec![fs::canonicalize(toolchain.join("bin")).unwrap()],
+        cargo_registry: Some(registry.clone()),
         ..Default::default()
     };
     let b = configured_backend(&f, &settings);
-    let command = format!(
-        "set -eu\nln -s '{}' \"$CARGO_HOME/registry\"\ncargo test --offline -- --nocapture\ntest -f \"$CARGO_HOME/.package-cache\"\nif (echo bad > /dev/tcp/1.1.1.1/443); then exit 87; fi\n",
-        registry.display()
-    );
-    let outcome = run(&f, &b, &settings, &command);
+    // No per-command link: the configured registry is already bound in place.
+    let command = "set -eu\n\
+         cargo test --offline -- --nocapture\n\
+         test -f \"$CARGO_HOME/.package-cache\"\n\
+         if (echo bad > /dev/tcp/1.1.1.1/443); then exit 87; fi\n\
+         test -d /workspace/target\n";
+    let outcome = run(&f, &b, &settings, command);
     succeeded(&outcome);
     let output = text(&outcome);
     assert!(output.contains("SANDBOX_RUST_TEST_BINARY_RAN"), "{output}");
     assert!(output.contains("1 passed"), "{output}");
-    assert!(!f.root().join("target").exists());
+    // Build output is the workspace's own target/ (M8 decision 14).
     assert!(f.root().join("Cargo.lock").exists());
 }

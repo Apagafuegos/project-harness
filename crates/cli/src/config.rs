@@ -122,6 +122,10 @@ impl Settings {
                 serde_json::json!(self.sandbox.path_prepend),
             ),
             (
+                "sandbox.cargo_registry",
+                serde_json::json!(self.sandbox.cargo_registry),
+            ),
+            (
                 "sandbox.env (keys only)",
                 serde_json::json!(self.sandbox.env.keys().collect::<Vec<_>>()),
             ),
@@ -290,7 +294,10 @@ fn parse_sandbox(path: &Path, value: &toml::Value) -> Result<ToolchainSettings, 
         .as_table()
         .ok_or_else(|| invalid(path, "sandbox", "expected table"))?;
     for key in table.keys() {
-        if !matches!(key.as_str(), "toolchain_paths" | "path_prepend" | "env") {
+        if !matches!(
+            key.as_str(),
+            "toolchain_paths" | "path_prepend" | "cargo_registry" | "env"
+        ) {
             return Err(invalid(path, &format!("sandbox.{key}"), "unknown key"));
         }
     }

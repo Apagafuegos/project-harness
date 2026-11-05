@@ -133,7 +133,97 @@ fn sandbox_location_refusals_cover_roots_ancestors_descendants_and_aliases() {
     };
     assert!(
         settings
-            .validate_locations(&workspace, &data, &home, &[config])
+            .validate_locations(&workspace, &data, &home, std::slice::from_ref(&config))
             .is_err()
     );
+}
+
+#[test]
+fn cargo_registry_uses_the_same_refusal_set_and_binds_inside_cargo_home() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let workspace = home.join("projects/workspace");
+    let data = home.join("state/harness");
+    let config = home.join("xdg/harness");
+    let registry = home.join(".cargo/registry");
+    for p in [&workspace, &data, &config, &registry] {
+        fs::create_dir_all(p).unwrap();
+    }
+    let check = |value: ToolchainSettings| {
+        value.validate_locations(&workspace, &data, &home, std::slice::from_ref(&config))
+    };
+    let settings = ToolchainSettings {
+        cargo_registry: Some(registry.clone()),
+        ..Default::default()
+    };
+    check(settings.clone()).unwrap();
+    assert_eq!(
+        settings.mounts(),
+        vec![(registry.as_path(), Path::new(CARGO_REGISTRY_DEST))]
+    );
+    assert_eq!(
+        settings.report()["cargo_registry"]["sandbox_path"],
+        CARGO_REGISTRY_DEST
+    );
+    assert!(!settings.is_empty());
+    for path in [
+        PathBuf::from("/"),
+        home.clone(),
+        workspace.clone(),
+        workspace.join("child"),
+        data.clone(),
+        config.clone(),
+        home.join(".ssh"),
+        home.join(".config"),
+    ] {
+        fs::create_dir_all(&path).unwrap();
+        let error = check(ToolchainSettings {
+            cargo_registry: Some(path.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(error.contains(path.to_str().unwrap()), "{error}");
+    }
+    for spelling in [
+        PathBuf::from("registry"),
+        home.join(".cargo/registry/"),
+        home.join("missing"),
+    ] {
+        let error = check(ToolchainSettings {
+            cargo_registry: Some(spelling.clone()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(!error.is_empty());
+    }
+}
+
+#[test]
+fn doctor_mirrors_the_masks_args_installs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(root.join("credentials"), "secret").unwrap();
+    fs::create_dir(root.join("credentials.toml")).unwrap();
+    let settings = ToolchainSettings {
+        toolchain_paths: vec![root.into()],
+        ..Default::default()
+    };
+    let status = |name: &str| {
+        settings.report()["toolchain_paths"][0]["credential_masks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mask| mask["path"] == json!(root.join(name)))
+            .unwrap()["status"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(status("credentials"), "masked");
+    assert_eq!(status("credentials.toml"), "masked");
+    assert_eq!(status(".git-credentials"), "absent");
+    // A kind `args.rs` refuses is reported as refused, never as masked.
+    std::os::unix::fs::symlink(root.join("credentials"), root.join(".git-credentials")).unwrap();
+    assert_eq!(status(".git-credentials"), "refused");
 }

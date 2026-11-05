@@ -72,7 +72,7 @@ pub(super) fn validate_config(config: &SandboxConfig) -> Result<(), SandboxUnava
         return Err(fail("invalid trusted sandbox limits"));
     }
     config.toolchains.validate().map_err(fail)?;
-    for path in &config.toolchains.toolchain_paths {
+    for path in config.toolchains.mount_roots() {
         if !path.is_dir()
             || fs::canonicalize(path).ok().as_ref() != Some(path)
             || checked_path(
@@ -198,12 +198,13 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
         args.extend(["--setenv".into(), key.into(), value.into()]);
     }
     if !config.toolchains.is_empty() {
-        for (key, value) in [
-            ("CARGO_HOME", "/home/sandbox/.cargo"),
-            ("CARGO_TARGET_DIR", "/tmp/cargo-target"),
-        ] {
-            args.extend(["--setenv".into(), key.into(), value.into()]);
-        }
+        // CARGO_HOME stays private and per command. Cargo's build output is
+        // ordinary workspace output and is never redirected (M8 decision 14).
+        args.extend([
+            "--setenv".into(),
+            "CARGO_HOME".into(),
+            super::ToolchainSettings::cargo_home_dest().into(),
+        ]);
     }
     for path in &config.system_paths {
         match fs::read_link(path) {
@@ -241,49 +242,57 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
         .map(Into::into),
     );
     if !config.toolchains.is_empty() {
-        for path in ["/home/sandbox/.cargo", "/tmp/cargo-target"] {
-            args.extend(["--perms".into(), "0700".into(), "--dir".into(), path.into()]);
-        }
+        // Private, per-command cargo state only. Build output is not redirected:
+        // cargo writes the workspace's own `target/` (M8 decision 14).
+        args.extend([
+            "--perms".into(),
+            "0700".into(),
+            "--dir".into(),
+            super::ToolchainSettings::cargo_home_dest().into(),
+        ]);
     }
     // Install every read-only bind before masks, including overlapping mounts.
-    let mut toolchains: Vec<_> = config.toolchains.toolchain_paths.iter().collect();
-    toolchains.sort_by_key(|path| path.components().count());
-    for path in &toolchains {
+    let mounts = config.toolchains.mounts();
+    for (source, destination) in &mounts {
         args.extend([
             "--ro-bind".into(),
-            path.as_os_str().into(),
-            path.as_os_str().into(),
+            source.as_os_str().into(),
+            destination.as_os_str().into(),
         ]);
     }
     let mut masked_credentials = Vec::<PathBuf>::new();
-    for root in &toolchains {
-        for path in config.toolchains.credential_paths(root) {
-            if masked_credentials.iter().any(|p| path.starts_with(p)) {
-                continue;
-            }
-            let relative = path
+    for (root, destination) in &mounts {
+        for leaf in config.toolchains.credential_paths(root) {
+            let relative = leaf
                 .strip_prefix(root)
                 .map_err(|_| fail("invalid credential path"))?;
+            let target = destination.join(relative);
+            if masked_credentials
+                .iter()
+                .any(|masked| target.starts_with(masked))
+            {
+                continue;
+            }
             checked_path(
                 root,
                 relative
                     .to_str()
                     .ok_or_else(|| fail("non UTF-8 credential path"))?,
             )?;
-            match fs::symlink_metadata(&path) {
+            match fs::symlink_metadata(&leaf) {
                 Ok(m) if m.is_file() => args.extend([
                     "--ro-bind".into(),
                     "/dev/null".into(),
-                    path.into_os_string(),
+                    target.into_os_string(),
                 ]),
                 Ok(m) if m.is_dir() => {
                     args.extend([
                         "--tmpfs".into(),
-                        path.as_os_str().into(),
+                        target.as_os_str().into(),
                         "--remount-ro".into(),
-                        path.as_os_str().into(),
+                        target.as_os_str().into(),
                     ]);
-                    masked_credentials.push(path);
+                    masked_credentials.push(target);
                 }
                 // D13: absent leaves cannot be masked beneath read-only binds.
                 // Never create host placeholders or fail setup for absence.
@@ -406,11 +415,14 @@ mod tests {
         let toolchain = tempfile::tempdir().unwrap();
         fs::create_dir(toolchain.path().join("bin")).unwrap();
         fs::write(toolchain.path().join("credentials"), "secret").unwrap();
+        let registry = tempfile::tempdir().unwrap();
+        fs::create_dir(registry.path().join("cache")).unwrap();
         let config = SandboxConfig {
             system_paths: vec!["/usr".into()],
             toolchains: super::super::ToolchainSettings {
                 toolchain_paths: vec![toolchain.path().into()],
                 path_prepend: vec![toolchain.path().join("bin")],
+                cargo_registry: Some(registry.path().into()),
                 env: [("RUSTUP_TOOLCHAIN".into(), "1.99.1".into())].into(),
             },
             ..SandboxConfig::default()
@@ -423,6 +435,7 @@ mod tests {
                 s.to_str()
                     .unwrap()
                     .replace(toolchain.path().to_str().unwrap(), "<toolchain>")
+                    .replace(registry.path().to_str().unwrap(), "<registry>")
                     .replace(workspace.path().to_str().unwrap(), "<workspace>")
             })
             .collect();

@@ -14,9 +14,9 @@ with a bare "command not found".
 
 Widening the sandbox by default would contradict decision 0002's fixed mount
 set. This decision adds **opt-in, read-only toolchain mounts**, a prepended
-executable search path and a small explicit environment, configured only in
-the user's TOML file (ADR 0028), plus a documented and tested Rust recipe on
-this host.
+executable search path, an optional read-only offline registry and a small
+explicit environment, configured only in the user's TOML file (ADR 0028), plus
+a documented and tested Rust recipe on this host.
 
 ## Configuration schema
 
@@ -28,10 +28,11 @@ inside the table are refused like any other unknown key.
 ```toml
 [sandbox]
 # Absolute directories, bound read-only at the same path in every bash sandbox.
-toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
-                   "/home/you/.cargo/registry", "/home/you/.cargo/git"]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu"]
 # Absolute directories prepended before /usr/bin:/bin, in this order.
 path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+# Optional offline registry, bound read-only at $CARGO_HOME/registry.
+cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
@@ -45,6 +46,10 @@ CARGO_NET_OFFLINE = "true"
   `/usr`; a colon in a path is refused because it would split `PATH`. `PATH`
   itself is not settable and is always
   `<path_prepend…>:/usr/bin:/bin`.
+- `cargo_registry`: one absolute directory, validated with exactly the
+  `toolchain_paths` refusal set (below), and bound read-only at
+  `/home/sandbox/.cargo/registry` so cargo finds it through the private
+  `CARGO_HOME` with no per-command setup.
 - `env`: a string map. Names are refused (naming the key, never the value) if
   they are credential-shaped under ADR 0028's rule (`api_key`, `*_key`,
   `token`, `secret`, `password`, case-insensitive) or owned by the harness:
@@ -64,11 +69,15 @@ and no extra mounts. An empty table is the same as no table
 
 ### Credential masking (M8 decision 13)
 
-For each mount root the fixed leaves `credentials`, `credentials.toml` and
+For each mounted root — every `toolchain_paths` entry and a configured
+`cargo_registry` — the fixed leaves `credentials`, `credentials.toml` and
 `.git-credentials` are masked with the existing mechanism when they **exist at
 sandbox setup**: a regular file becomes a read-only `/dev/null` bind, a
-directory becomes an empty read-only tmpfs. Nothing is discovered
-recursively, and the list is fixed.
+directory becomes an empty read-only tmpfs. The mask is installed at the
+sandbox destination (so a registry's leaves are masked under
+`$CARGO_HOME/registry`). Nothing is discovered recursively, and the list is
+fixed; any other object kind at a leaf fails the sandbox rather than being
+exposed.
 
 An **absent** credential leaf is not masked and does not fail the sandbox.
 Bubblewrap cannot create a mount point beneath a read-only bind
@@ -79,41 +88,45 @@ that path fails with nothing appearing on the host. Creating the file on the
 host while a command runs is the existing L04 race, unchanged. No host
 placeholder is ever created and no mount is ever made writable to mask.
 
-### Writable cache state
+### Writable state: CARGO_HOME only, build output in the workspace
 
-A mount is never writable. When the sandbox is configured, the backend adds two
-private, empty writable directories inside the sandbox:
-`/home/sandbox/.cargo` (`CARGO_HOME`, mode 0700, owned by the sandbox user on
-a private tmpfs) and `/tmp/cargo-target` (`CARGO_TARGET_DIR`, mode 0700 on the
-existing private `/tmp` tmpfs).
+A mount is never writable. When the sandbox is configured, the backend adds one
+private, empty writable directory inside the sandbox:
+`/home/sandbox/.cargo` (`CARGO_HOME`, mode 0700, owned by the sandbox user on a
+private tmpfs).
 
-This is the **per-command** choice, not a per-session directory under the data
-root. Reasons:
+`cargo`'s build output is **not** redirected. It goes to the default
+`<workspace>/target`, which is ordinary workspace output of the same kind the
+user's own builds produce, and the sandbox already has a writable workspace.
+Forcing a per-command target directory would rebuild every dependency on every
+bash call, which a daily coding agent cannot afford (M8 decision 14). The
+earlier "no cache in the workspace" rule meant tool state such as
+`CARGO_HOME`, not a project's build artifacts.
 
-- the directories are already private mounts of the sandbox namespace, so
-  "private, 0700, owned by the sandbox user" holds by construction, with no
-  host-side ownership, mode or traversal to enforce;
+The choice for `CARGO_HOME` is **per command**, not per session under the data
+root:
+
+- it is already a private mount of the sandbox namespace, so "private, 0700,
+  owned by the sandbox user" holds by construction, with no host-side
+  ownership, mode or traversal to enforce;
 - nothing outlives the command, so there is no garbage to collect, no
-  cross-session leak of build state or cache contents, and no new path under
+  cross-session leak of registry caches or credentials, and no new path under
   the data root for GC (ADR 0030) to reason about;
-- a per-session cache would make the second command's behaviour depend on an
-  earlier command's writes — an unreviewed state channel between tool calls —
-  and would put attacker-writable files under the harness's own storage root.
+- a per-session `CARGO_HOME` would be an unreviewed state channel between tool
+  calls and attacker-writable state inside the harness's own storage root.
 
-The cost is that every command rebuilds what it needs. That is acceptable for
-the one documented recipe: an offline registry is mounted read-only, so
-dependency metadata is read from the mount and only per-command artifacts and
-cargo lock files are written.
+The cost is that cargo re-resolves the registry and re-links fingerprints for
+each command; the compiled artifacts themselves persist in the workspace
+`target/`.
 
-`CARGO_HOME` and `CARGO_TARGET_DIR` are set by the backend itself when the
-sandbox is configured; that is why `CARGO_*` is a refused `[sandbox.env]`
-namespace.
+`CARGO_HOME` is set by the backend itself when the sandbox is configured; that
+is why `CARGO_*` is a refused `[sandbox.env]` namespace.
 
 ## Refusals at config load
 
-Each `toolchain_paths` entry (and each resolved `path_prepend`) must be an
-absolute, canonical (no symlink component), existing directory. It is refused
-with exit 2, naming the path, when it is:
+Each `toolchain_paths` entry, a configured `cargo_registry`, and each resolved
+`path_prepend` must be an absolute, canonical (no symlink component), existing
+directory. It is refused with exit 2, naming the path, when it is:
 
 - `/`;
 - `$HOME` itself, or any ancestor of `$HOME` (which would expose it anyway);
@@ -121,16 +134,16 @@ with exit 2, naming the path, when it is:
   either;
 - the harness config directory, `~/.ssh`, `~/.gnupg`, `~/.codex`, `~/.aws`,
   `~/.config` as a whole, or anything inside them;
-- `/tmp`, and anything overlapping `/workspace`, `/home/sandbox`,
-  `/tmp/cargo-target`, `/proc` or `/dev` (the sandbox's own private mounts);
+- `/tmp`, and anything overlapping `/workspace`, `/home/sandbox`, `/proc` or
+  `/dev` (the sandbox's own private mounts);
 - missing, or not a directory (fail closed; no silent skip).
 
 `path_prepend` entries must also resolve inside a mounted toolchain or `/usr`;
 that is checked after resolution so a symlink cannot redirect the executable
 search path out of the approved mounts. The sandbox independently repeats the
-structural and existence checks before every spawn (`validate_config`), so a
-mount that disappears after config load fails closed instead of producing a
-different sandbox.
+structural and existence checks for every mounted root before every spawn
+(`validate_config`), so a mount that disappears after config load fails closed
+instead of producing a different sandbox.
 
 ## Plan, session record and continuation
 
@@ -139,20 +152,23 @@ artifact (the header's `configuration` artifact, i.e. the policy snapshot
 object), under a new additive `sandbox` field:
 
 ```json
-"sandbox": {"toolchain_paths": ["…"], "path_prepend": ["…"], "env": {"K": "V"}}
+"sandbox": {"toolchain_paths": ["…"], "path_prepend": ["…"],
+            "cargo_registry": "…", "env": {"K": "V"}}
 ```
 
 The field is omitted when nothing is configured, so v0.1 journals are
-byte-identical and old readers see what they saw before. **No journal schema or
+byte-identical and old readers see what they saw before. `cargo_registry` is
+part of that object and therefore of the comparison. **No journal schema or
 record-version change is needed**: the artifact is an opaque content-addressed
 configuration document whose unknown fields are already preserved, and the
 field is only read by the new code.
 
 `bash` plans carry the same object in a new trailing `sandbox` field, omitted
-when empty, so the exact approved bytes bind the mount set, the search path and
-the environment. `Sandbox::build` refuses a plan whose `sandbox` differs from
-the configured one (`plan sandbox configuration mismatch`) before spawning. The
-`read`, `write`, `edit`, `list`, `glob` and `grep` plans are unchanged.
+when empty, so the exact approved bytes bind the mount set, the search path,
+the registry and the environment. `Sandbox::build` refuses a plan whose
+`sandbox` differs from the configured one (`plan sandbox configuration
+mismatch`) before spawning. The `read`, `write`, `edit`, `list`, `glob` and
+`grep` plans are unchanged.
 
 The continuation rule is the existing one from ADR 0028/0012:
 `wiring::open_session` compares the live configuration's `workspace_read`,
@@ -178,23 +194,26 @@ Golden argv for a configured sandbox (see
 ```text
 --info-fd 10 --json-status-fd 11 --unshare-all --unshare-user --die-with-parent
 --new-session --clearenv
---setenv PATH <mount>/bin:/usr/bin:/bin --setenv HOME /home/sandbox
+--setenv PATH <toolchain>/bin:/usr/bin:/bin --setenv HOME /home/sandbox
 --setenv TMPDIR /tmp --setenv LANG C.UTF-8 --setenv TERM dumb
---setenv RUSTUP_TOOLCHAIN 1.99.1
---setenv CARGO_HOME /home/sandbox/.cargo --setenv CARGO_TARGET_DIR /tmp/cargo-target
+--setenv RUSTUP_TOOLCHAIN 1.99.1 --setenv CARGO_HOME /home/sandbox/.cargo
 --ro-bind /usr /usr --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home/sandbox
---perms 0700 --dir /home/sandbox/.cargo --perms 0700 --dir /tmp/cargo-target
---ro-bind <toolchain> <toolchain> --ro-bind /dev/null <toolchain>/credentials
+--perms 0700 --dir /home/sandbox/.cargo
+--ro-bind <toolchain> <toolchain>
+--ro-bind <registry> /home/sandbox/.cargo/registry
+--ro-bind /dev/null <toolchain>/credentials
 --bind <workspace> /workspace --chdir /workspace /bin/bash --noprofile --norc -c :
 ```
 
+No `CARGO_TARGET_DIR` is present: cargo writes the workspace's own `target/`.
 The unconfigured case is byte-for-byte the v0.1 golden: no extra `--setenv`,
-no `--perms`/`--dir`, no toolchain binds, `PATH=/usr/bin:/bin`.
+no `--perms`/`--dir`, no toolchain or registry binds, `PATH=/usr/bin:/bin`.
 
-Ordering rule: every toolchain bind is installed **before** the credential
-masks, and before the workspace's own ancestor binds and protected-path masks,
-so a mask can never be covered again by a later mount. Overlapping mounts are
-sorted by component count, as the workspace mounts already are.
+Ordering rule: every read-only bind is installed **before** any credential
+mask, and before the workspace's own ancestor binds and protected-path masks,
+so a mask can never be covered again by a later mount. Toolchain roots are
+sorted by component count, then the registry bind follows (its destination is
+already created by the private `CARGO_HOME` directory).
 
 ## The Rust recipe for this host
 
@@ -203,56 +222,50 @@ Tested on Ubuntu ARM64, Bubblewrap 0.11.1, rustup toolchain
 
 ```toml
 [sandbox]
-toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
-                   "/home/you/.cargo/registry"]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu"]
 path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
 CARGO_NET_OFFLINE = "true"
 ```
 
-and, once per command, the registry is linked into the writable
-`CARGO_HOME` because cargo resolves the registry through `CARGO_HOME`:
+Then, with no preparation step:
 
 ```sh
-ln -s /home/you/.cargo/registry "$CARGO_HOME/registry"
 cargo test --offline
 ```
 
-Mount the **toolchain's** `bin` (the real `cargo`/`rustc` binaries), not
-`~/.cargo/bin` (rustup proxy shims that need `~/.rustup` settings and would
-require mounting the whole home). Mount `~/.cargo/registry` (and optionally
-`~/.cargo/git`) read-only instead of `~/.cargo` itself: it is the cache
-subdirectory, it holds no credential file, and it avoids the
-`~/.cargo/credentials` masking case entirely. Cargo writes only
-`$CARGO_HOME/.package-cache`, `$CARGO_HOME/registry/cache` and
-`$CARGO_TARGET_DIR`, all inside the private writable directories.
-
-The dependency must already be in the mounted offline registry. The S02 test
-uses `itoa` from this repository's own dependency tree and asserts that
-`cargo test --offline` really ran the test binary (`SANDBOX_RUST_TEST_BINARY_RAN`
-and `1 passed`), that the workspace gained only `Cargo.lock` (no `target/`),
-that `$CARGO_HOME` is 0700 and owned by the sandbox user, and that an external
-TCP connection is still refused. The suite skips, with a printed `SKIPPED:`
-line, when no 1.99.1 toolchain or offline registry is present on the host,
-rather than pretending.
+The configured registry is already visible at `$CARGO_HOME/registry`, cargo
+writes its lock files to the private `CARGO_HOME`, and build output lands in
+the workspace's `target/` (so repeated commands reuse it). Mount the
+**toolchain's** `bin` (the real `cargo`/`rustc` binaries), not `~/.cargo/bin`
+(rustup proxy shims that need `~/.rustup` settings and would require mounting
+the whole home). The dependency must already be in the mounted offline
+registry; the S02 test uses `itoa` from this repository's own dependency tree.
+Network is still denied: the same test asserts that an external TCP connection
+is refused inside the sandbox.
 
 ## Doctor and clients
 
 `harness doctor` gains a `sandbox` section:
 
 ```json
-{"toolchain_paths":[{"path":"…","mode":"ro","exists":true,"readable":true,
-  "credential_masks":[{"path":"…/credentials","status":"masked"},
-                      {"path":"…/credentials.toml","status":"absent"}]}],
+{"toolchain_paths":[{"path":"…","sandbox_path":"…","mode":"ro","exists":true,
+  "readable":true,
+  "credential_masks":[{"path":"…/credentials","sandbox_path":"…","status":"masked"},
+                      {"path":"…/credentials.toml","sandbox_path":"…","status":"absent"}]}],
+ "cargo_registry":{"path":"…","sandbox_path":"/home/sandbox/.cargo/registry",
+  "mode":"ro","exists":true,"readable":true,"credential_masks":[…]},
  "path_prepend":["…"],"env_keys":["RUSTUP_TOOLCHAIN"]}
 ```
 
-It reports existence and readability per mount, `masked` versus `absent` per
-fixed credential leaf, the prepends and environment **key names**. It never
-reports an environment value or a credential's content, and it does not create
-anything.
+A mask status mirrors exactly what the backend does: a regular file is
+`masked`, a directory is `masked` (tmpfs), an absent leaf is `absent`, and any
+other kind (which the backend refuses) is `refused`. It reports existence and
+readability per mount, prepends and environment **key names**, never a value or
+file content, and creates nothing.
 
 `harness config show` labels the effective `[sandbox]` values with
 `[config]` or `[default]` (flags cannot set them) and prints environment key
@@ -280,7 +293,7 @@ host fallback.
 - No writable toolchain mounts, and no `rw` option in the schema.
 - No project, workspace or per-session config file; user TOML only.
 - No automatic discovery of toolchains, caches or credential files.
-- No per-session cache and no cross-session cache sharing.
+- No cross-session cache sharing, and no forced build-output redirection.
 - No new dependency, no new crates, no journal schema or record-version change.
 - No `elevated` mode, no extra capabilities, no seccomp filter.
 
@@ -297,13 +310,16 @@ host fallback.
   is the L04 race.
 - **Hard-link aliases** of a masked file inside the mount are not protected,
   exactly like the workspace masks (ADR 0012).
-- **Caches are not shared across commands or sessions**, so a mounted toolchain
-  cannot reuse build artifacts between turns. `CARGO_HOME`/`CARGO_TARGET_DIR`
-  are fixed by the backend and cannot be redirected.
-- **Host toolchain drift:** the recipe names an exact toolchain directory and
-  exact paths. A rustup update, a moved home or a missing offline registry
-  makes the mount refused at load (missing) or the build fail; the harness
-  never guesses a replacement path.
+- **Build output is shared with the host.** `target/` is written by the
+  sandboxed command and is the same directory the user's builds use, so
+  sandboxed artifacts can influence later host builds and stale artifacts
+  survive the command. This is normal project output, not isolated cache state.
+- **`CARGO_HOME` is per command and not shared across commands or sessions**, so
+  registry re-resolution repeats each time even though compiled artifacts
+  persist.
+- **Host toolchain drift:** the recipe names exact paths. A rustup update, a
+  moved home or a missing offline registry makes the mount refused at load
+  (missing) or the build fail; the harness never guesses a replacement path.
 - The mounted registry must contain every dependency; `--offline` is required
   because the network is denied, and a missing crate is a normal build error.
 - Toolchains whose executables are proxy shims (rustup proxies in
@@ -315,32 +331,37 @@ host fallback.
 
 - `tools::sandbox::settings::tests`: environment-name refusals (including that
   the value is never echoed), path spelling/duplicate/prepend refusals, the
-  exact `PATH` string, and the full refusal matrix for `/`, `$HOME`, home
-  ancestors, workspace/data-root ancestors and descendants, the config
-  directory, `~/.ssh`, `~/.gnupg`, `~/.codex`, `~/.aws`, `~/.config`, a
-  file, a missing path and a symlinked mount.
+  exact `PATH` string, the `cargo_registry` destination and its use of the same
+  refusal set, doctor's `masked`/`absent`/`refused` statuses, and the full
+  refusal matrix for `/`, `$HOME`, home ancestors, workspace/data-root
+  ancestors and descendants, the config directory, `~/.ssh`, `~/.gnupg`,
+  `~/.codex`, `~/.aws`, `~/.config`, a file, a missing path and a symlinked
+  mount.
 - `tools::sandbox::args::tests::toolchain_arguments_golden_and_configuration_binding`:
-  the configured argv above, plus refusal of a plan bound to different
-  settings.
+  the configured argv above (including the registry bind), plus refusal of a
+  plan bound to different settings.
 - `tools::tests::omitted_or_empty_sandbox_keeps_the_v01_plan_bytes`: the
   unchanged v0.1 golden plan, empty-equals-omitted, configured bash plans
   differ, and trusted file plans stay identical.
 - `crates/cli/src/config_sandbox_tests.rs`: strict table types and unknown
   keys, credential-shaped and harness-owned environment refusals without value
-  echo, `config show` labels and key-name-only rendering, load-time path
-  refusals, and both clients' recorded `sandbox` field with continuation
-  refusal (and an untouched journal) for a changed mount, prepend, environment
-  or removal.
+  echo, `cargo_registry` parsing/value/refusal, `config show` labels and
+  key-name-only rendering, load-time path refusals, and both clients' recorded
+  `sandbox` field with continuation refusal (and an untouched journal) for a
+  changed mount, prepend, registry, environment or removal.
 - `crates/core/tests/sandbox/toolchains.rs` (real S02, exact-head CI): masked
   credentials cannot be read (present), absent leaves cannot be created inside
-  and leave no host file, the mount stays read-only, private protected paths
-  and `.git` stay protected, network stays denied, the private caches are 0700
-  and owned by the sandbox user and start empty, and the plan-mismatch refusal.
-  The second test runs `cargo test --offline` through the production sandbox
-  with a read-only toolchain and registry and asserts the test binary ran.
-- `crates/cli/tests/doctor.rs`: per-mount existence/readability and
-  masked/absent credentials, prepends, environment key names, and no value in
-  the rendered report.
+  and leave no host file, the mount stays read-only, the registry is readable
+  read-only at `$CARGO_HOME/registry` and cannot be written, private protected
+  paths and `.git` stay protected, network stays denied, `CARGO_HOME` is 0700
+  and owned by the sandbox user and starts empty, and the plan-mismatch
+  refusal. The second test runs a plain `cargo test --offline` (no link step)
+  through the production sandbox with a read-only toolchain and configured
+  registry, asserts the test binary ran, that `target/` appears in the
+  workspace, and that network is still denied.
+- `crates/cli/tests/doctor.rs`: per-mount existence/readability, `masked`,
+  `absent` and `refused` credential statuses, the registry mount report,
+  prepends, environment key names, and no value in the rendered report.
 - `crates/cli/src/tui/tools.rs`: the approval preview shows the bound mounts,
   sandbox `PATH` and environment key names and no values, and non-bash plans
   render nothing.
@@ -352,11 +373,12 @@ restored before the final runs:
 
 | Mutation | Regression test | Observed failure |
 | --- | --- | --- |
-| Toolchain bind made writable (`--bind`) | `sandbox/toolchains.rs` (S02) | the in-sandbox write to the mount succeeded: `nonzero_exit: exit status 82` |
+| Toolchain bind made writable (`--bind`) | S02 `s02_toolchain_credentials_present_…` | the in-sandbox write to the mount succeeded: `nonzero_exit: exit status 82` |
 | Same, against the golden argv | `toolchain_arguments_golden_and_configuration_binding` | argv mismatch, exit 101 |
 | `path_prepend` check removed | `sandbox_paths_refuse_invalid_spellings_duplicates_and_unmounted_prepends` | an outside-`/usr` prepend was accepted |
 | Credential-name rule removed from `env` | `sandbox_env_names_are_refused_without_values` | `api_key` was accepted |
 | Protected/refused mount paths skipped | `sandbox_location_refusals_cover_roots_ancestors_descendants_and_aliases` | `~/.ssh` and a config-dir mount were accepted |
-| Fixed credential mask list emptied | `sandbox/toolchains.rs` (S02) | the present credential was readable: `nonzero_exit: exit status 81` |
+| Fixed credential mask list emptied | S02 `s02_toolchain_credentials_present_…` | the present credential was readable: `nonzero_exit: exit status 81` |
 | Same, against the golden argv | `toolchain_arguments_golden_and_configuration_binding` | the `--ro-bind /dev/null` mask disappeared |
+| Registry bind removed | S02 `s02_toolchain_cargo_test_offline_with_readonly_registry` | "error: no matching package named `itoa` found"; `nonzero_exit: exit status 101` |
 | `sandbox` dropped from the continuation comparison | `sandbox_both_clients_record_settings_and_refuse_continuation_changes` | a changed mount continued instead of refusing |

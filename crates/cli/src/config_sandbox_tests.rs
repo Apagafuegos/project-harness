@@ -10,6 +10,8 @@ fn sandbox_table_strict_types_keys_redaction_and_sources() {
         "[sandbox]\nenv=[]",
         "[sandbox]\ntoolchain_paths='wrong'",
         "[sandbox]\npath_prepend=['/outside']",
+        "[sandbox]\ncargo_registry=7",
+        "[sandbox]\ncargo_registry='relative/registry'",
     ] {
         fs::write(&path, text).unwrap();
         let error = load(&path, true).unwrap_err();
@@ -39,8 +41,20 @@ fn sandbox_table_strict_types_keys_redaction_and_sources() {
     let show = settings.show();
     assert!(show.contains("sandbox.toolchain_paths = [\"/tools\"] [config]"));
     assert!(show.contains("sandbox.path_prepend = [\"/tools/bin\"] [config]"));
+    assert!(show.contains("sandbox.cargo_registry = null [config]"));
     assert!(show.contains("BUILD_LABEL"));
     assert!(!show.contains("DO_NOT_PRINT_ENV_SENTINEL"));
+    fs::write(&path, "[sandbox]\ncargo_registry='/tools'\n").unwrap();
+    let settings = resolve_values(&matches(false, &[]), load(&path, true).unwrap()).unwrap();
+    assert!(
+        settings
+            .show()
+            .contains("sandbox.cargo_registry = \"/tools\" [config]")
+    );
+    assert_eq!(
+        settings.sandbox_config().toolchains.cargo_registry,
+        Some("/tools".into())
+    );
     let settings = resolve_values(&matches(false, &[]), BTreeMap::new()).unwrap();
     assert!(
         settings
@@ -66,9 +80,12 @@ async fn sandbox_both_clients_record_settings_and_refuse_continuation_changes() 
         let state = temp.path().join("state");
         let mount = temp.path().join("tools");
         fs::create_dir(&mount).unwrap();
+        let registry = temp.path().join("registry");
+        fs::create_dir(&registry).unwrap();
         let sandbox = ToolchainSettings {
             toolchain_paths: vec![mount.clone()],
             path_prepend: vec![mount.clone()],
+            cargo_registry: Some(registry.clone()),
             env: [("BUILD_LABEL".into(), "recorded".into())].into(),
         };
         let args = matches(tui, &[]);
@@ -120,12 +137,13 @@ async fn sandbox_both_clients_record_settings_and_refuse_continuation_changes() 
         let original = options.sandbox.clone();
         let journal = state.join("sessions").join(format!("{id}.jsonl"));
         let before = fs::read(&journal).unwrap();
-        for change in ["mount", "prepend", "env", "removed"] {
+        for change in ["mount", "prepend", "registry", "env", "removed"] {
             options.sandbox = original.clone();
             let settings = &mut options.sandbox.as_mut().unwrap().toolchains;
             match change {
                 "mount" => settings.toolchain_paths.push(temp.path().join("different")),
                 "prepend" => settings.path_prepend.clear(),
+                "registry" => settings.cargo_registry = Some(temp.path().join("other-registry")),
                 "env" => {
                     settings.env.insert("BUILD_LABEL".into(), "changed".into());
                 }

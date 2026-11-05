@@ -34,12 +34,13 @@ shells, installers, and all other external programs always use the process backe
   temporary/home space. A writable shell workspace is not per-file containment.
   `elevated` is not offered in v0.1; any future expansion needs a new decision.
 - Opt-in user toolchains are read-only binds at the same absolute path, with a
-  fixed executable search path and an explicit environment allowlist; see
+  fixed executable search path, an explicit environment allowlist and an
+  optional read-only offline registry bound inside the private cargo home; see
   [ADR 0033](../decisions/0033-sandbox-toolchains.md). A configured mount cannot
   be writable, cannot widen workspace access and cannot set a harness-owned
-  variable. Cargo's writable state lives in sandbox-private per-command
-  directories (0700, owned by the sandbox user), never in a mount or the
-  workspace.
+  variable. Cargo's tool state (`CARGO_HOME`) lives in a sandbox-private
+  per-command directory (0700, owned by the sandbox user); project build output
+  is ordinary workspace output (`target/`) and is not redirected.
 - Subprocess network access is always denied in v0.1. A requested exception is
   `network_unsupported`; approval cannot supply a missing enforcement backend.
 - Provider credentials, trusted policy, and session storage are not exposed to
@@ -72,8 +73,9 @@ claiming stronger isolation or redaction.
 
 A `[sandbox]` table in the user TOML only may add `toolchain_paths`
 (read-only binds at the same path), `path_prepend` (each inside a mounted
-root or `/usr`, before the fixed `/usr/bin:/bin`) and `env` (explicit settings
-with a fixed name allowlist). Refusals happen at config load, exit 2 and name
+root or `/usr`, before the fixed `/usr/bin:/bin`), `cargo_registry` (bound
+read-only at `$CARGO_HOME/registry`) and `env` (explicit settings with a fixed
+name allowlist). Refusals happen at config load, exit 2 and name
 the path: `/`, `$HOME` and its ancestors, the workspace and data root and their
 ancestors and descendants, the harness config directory, `~/.ssh`, `~/.gnupg`,
 `~/.codex`, `~/.aws`, `~/.config`, the sandbox's own private mounts, and any
@@ -83,16 +85,17 @@ host environment is still cleared, network stays denied, and every bash call
 still requires approval whose preview states the bound mounts, sandbox `PATH`
 and environment key names.
 
-Inside each mount the fixed leaves `credentials`, `credentials.toml` and
-`.git-credentials` are masked with the existing mechanism **when present at
-setup**. An absent leaf is not masked and does not fail the sandbox: Bubblewrap
+Inside each mounted root — toolchain paths and the registry alike — the fixed
+leaves `credentials`, `credentials.toml` and `.git-credentials` are masked with
+the existing mechanism **when present at setup**; any other object kind at a
+leaf fails the sandbox instead of being exposed. An absent leaf is not masked and does not fail the sandbox: Bubblewrap
 cannot create a mount point beneath a read-only bind (ADR 0012's absent-path
 limitation). Because the mount is read-only, a sandboxed process cannot create
 it either, and a test proves the write fails with nothing appearing on the
 host. Creating it on the host while a command runs is the documented L04 race.
 No placeholder is created and no mount is ever made writable to mask
-a credential. `doctor` reports, per mount, which leaves were masked and which
-were absent.
+a credential. `doctor` reports, per mount, which leaves were masked, absent or
+refused.
 
 The effective settings are recorded in the existing session configuration
 artifact and in the approved bash plan bytes; a later change is refused on
@@ -104,9 +107,10 @@ to the journal.
 A mounted toolchain is trusted user code: it can read every mount and the
 workspace and can echo what it reads. Masking covers the fixed credential
 leaves only, not every secret-shaped file, and hard-link aliases of a masked
-file inside the mount are not protected. Caches are per command and never
-shared across commands or sessions, so nothing persists and nothing needs
-collection. The recipe names exact paths; host toolchain drift makes a mount
+file inside the mount are not protected. `CARGO_HOME` is per command and never
+shared across commands or sessions, so nothing there persists and nothing needs
+collection; the workspace `target/` is shared with the user's own builds, so
+sandboxed artifacts can influence later host builds. The recipe names exact paths; host toolchain drift makes a mount
 missing (refused at load) or the build fail, never silently substituted.
 
 `crates/core/tests/sandbox.rs`, `crates/core/tests/tool_host.rs` and

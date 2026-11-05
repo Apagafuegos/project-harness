@@ -123,31 +123,35 @@ can run a project's tests (ADR 0033). With no table nothing changes.
 
 ```toml
 [sandbox]
-toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
-                   "/home/you/.cargo/registry"]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu"]
 path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
 CARGO_NET_OFFLINE = "true"
 ```
 
-Each mount is a read-only bind at the same absolute path, installed before any
-credential mask and before the workspace's ancestor binds. `PATH` becomes the
-prepends followed by `/usr/bin:/bin`; a prepend must resolve inside a mount or
-`/usr`. The fixed leaves `credentials`, `credentials.toml` and
-`.git-credentials` are masked when they exist at setup; absent ones are not
-masked (they cannot be, beneath a read-only bind), cannot be created from
-inside the sandbox, and do not fail it. The backend also creates two private
-0700 directories for cargo, `$CARGO_HOME=/home/sandbox/.cargo` and
-`$CARGO_TARGET_DIR=/tmp/cargo-target`, which vanish with the command.
+Each toolchain mount is a read-only bind at the same absolute path; a configured
+`cargo_registry` is a read-only bind at `$CARGO_HOME/registry`, so cargo finds
+it with no per-command setup. All binds are installed before any credential mask
+and before the workspace's ancestor binds. `PATH` becomes the prepends followed
+by `/usr/bin:/bin`; a prepend must resolve inside a mount or `/usr`. The fixed
+leaves `credentials`, `credentials.toml` and `.git-credentials` are masked when
+they exist at setup, for toolchain roots and the registry alike; absent ones are
+not masked (they cannot be, beneath a read-only bind), cannot be created from
+inside the sandbox, and do not fail it. The backend also creates one private
+0700 directory, `$CARGO_HOME=/home/sandbox/.cargo`, which vanishes with the
+command. Build output is not redirected: cargo writes the workspace's own
+`target/` (M8 decision 14).
 
 The plan for `bash` carries the same object in a trailing `sandbox` field, so
-the approved bytes bind the mounts, the search path and the environment; a plan
-bound to other settings is refused before spawn. The approval preview and
-`harness doctor` report the mounts, prepends and environment key names (never
-values), and doctor additionally reports each mount's existence, readability
-and whether each fixed credential leaf was masked or absent.
+the approved bytes bind the mounts, the search path, the registry and the
+environment; a plan bound to other settings is refused before spawn. The
+approval preview and `harness doctor` report the mounts, prepends and
+environment key names (never values), and doctor additionally reports each
+mount's existence, readability and, per fixed credential leaf, whether it was
+`masked`, `absent` or `refused`.
 
 ## Planned separately
 

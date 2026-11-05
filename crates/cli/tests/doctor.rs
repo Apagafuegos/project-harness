@@ -162,14 +162,23 @@ fn sandbox_table_is_reported_with_masked_and_absent_credentials() {
     let tools = temp.path().join("tools");
     fs::create_dir_all(tools.join("bin")).unwrap();
     fs::write(tools.join("credentials"), "CREDENTIAL_SENTINEL").unwrap();
+    // A kind `args.rs` refuses to mask, reported as refused rather than masked.
+    std::os::unix::fs::symlink(tools.join("credentials"), tools.join(".git-credentials")).unwrap();
+    let dirs = temp.path().join("dir-credentials");
+    fs::create_dir_all(dirs.join("credentials")).unwrap();
+    let registry = temp.path().join("registry");
+    fs::create_dir_all(registry.join("cache")).unwrap();
+    fs::write(registry.join("credentials"), "REGISTRY_SENTINEL").unwrap();
     let config = temp.path().join("config.toml");
     fs::write(
         &config,
         format!(
-            "data_root = {:?}\n[sandbox]\ntoolchain_paths = [{:?}]\npath_prepend = [{:?}]\n[sandbox.env]\nBUILD_LABEL = \"DOCTOR_ENV_SENTINEL\"\n",
+            "data_root = {:?}\n[sandbox]\ntoolchain_paths = [{:?}, {:?}]\npath_prepend = [{:?}]\ncargo_registry = {:?}\n[sandbox.env]\nBUILD_LABEL = \"DOCTOR_ENV_SENTINEL\"\n",
             temp.path().join("state").to_str().unwrap(),
             tools.to_str().unwrap(),
+            dirs.to_str().unwrap(),
             tools.join("bin").to_str().unwrap(),
+            registry.to_str().unwrap(),
         ),
     )
     .unwrap();
@@ -202,7 +211,29 @@ fn sandbox_table_is_reported_with_masked_and_absent_credentials() {
         .collect();
     assert!(masks.contains(&(tools.join("credentials").to_str().unwrap(), "masked")));
     assert!(masks.contains(&(tools.join("credentials.toml").to_str().unwrap(), "absent")));
-    assert!(masks.contains(&(tools.join(".git-credentials").to_str().unwrap(), "absent")));
+    assert!(masks.contains(&(tools.join(".git-credentials").to_str().unwrap(), "refused")));
+    // A directory leaf is the tmpfs mask, and the registry mount is reported too.
+    let dir_masks = sandbox["toolchain_paths"][1]["credential_masks"]
+        .as_array()
+        .unwrap();
+    assert!(dir_masks.iter().any(|mask| {
+        mask["path"] == serde_json::json!(dirs.join("credentials")) && mask["status"] == "masked"
+    }));
+    let registry_report = &sandbox["cargo_registry"];
+    assert_eq!(registry_report["path"], registry.to_str().unwrap());
+    assert_eq!(
+        registry_report["sandbox_path"],
+        "/home/sandbox/.cargo/registry"
+    );
+    assert_eq!(registry_report["mode"], "ro");
+    assert!(
+        registry_report["credential_masks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|mask| mask["status"] == "masked"
+                && mask["path"] == serde_json::json!(registry.join("credentials")))
+    );
     assert_eq!(
         sandbox["path_prepend"][0],
         tools.join("bin").to_str().unwrap()
@@ -211,6 +242,7 @@ fn sandbox_table_is_reported_with_masked_and_absent_credentials() {
     let rendered = report.to_string();
     assert!(!rendered.contains("CREDENTIAL_SENTINEL"));
     assert!(!rendered.contains("DOCTOR_ENV_SENTINEL"));
+    assert!(!rendered.contains("REGISTRY_SENTINEL"));
 }
 
 #[test]

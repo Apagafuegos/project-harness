@@ -226,17 +226,17 @@ Assistant text is GitHub-flavoured Markdown and user text is plain.
 Typography does the work: H1 is bold accent and underlined, H2 bold, deeper
 headings bold and dim, emphasis italic, strong bold, strikethrough crossed out,
 inline code a distinct dim yellow with no backticks, link text underlined with a
-dim ` (url)` suffix unless the text is the URL. Lists hang their continuation
+dim `(url)` suffix unless the text is the URL. Lists hang their continuation
 lines under the item text and use `•`/`◦`/`▪` (ASCII `-`/`*`/`+`) by depth,
 keeping ordered start numbers and `[x]`/`[ ]` task marks. Block quotes nest a
-dim `│ ` gutter, rules span the pane, images show `[image: alt]`, raw HTML stays
+dim `│` gutter, rules span the pane, images show `[image: alt]`, raw HTML stays
 literal, and footnote references `[^n]` list their definitions at the end. GFM
 tables use the delimiter row's alignment, a bold header and single-rule
 separators; a table wider than the pane hard-wraps rather than reflowing into a
 different shape. User messages keep their newlines and leading spaces, wrap
 instead of truncating, and treat fenced blocks as code.
 
-Fenced code is a dim language label (`code` when untagged) over a dim `│ `
+Fenced code is a dim language label (`code` when untagged) over a dim `│`
 gutter, never reflowed: an overlong row hard-wraps with `↪`. Highlighting is
 `syntect` with bundled grammars and the pure-Rust `fancy-regex` backend, mapped
 to the theme's ANSI roles (keyword magenta, string green, number/constant cyan,
@@ -251,7 +251,7 @@ path and byte range for `read`, the path and byte count for `write`, the path
 plus a small red/green diff for `edit` — with the exit code or failure code
 always visible. Result bodies collapse to three lines plus `… +N lines`; Ctrl-E
 shows everything. Recorded approvals stay as one dim line under the call.
-Reasoning is dim italic behind `│ `, collapsed to a line until Ctrl-R. Model
+Reasoning is dim italic behind `│`, collapsed to a line until Ctrl-R. Model
 errors show their stable code and message, and provider state is one dim line.
 
 The approval dialog asks in human terms: `bash` shows the command, its
@@ -774,9 +774,9 @@ host, with rustup's `1.99.1` toolchain in the home directory, is:
 
 ```toml
 [sandbox]
-toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
-                   "/home/you/.cargo/registry"]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu"]
 path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
@@ -784,32 +784,38 @@ CARGO_NET_OFFLINE = "true"
 ```
 
 Mount the toolchain's own `bin` (real binaries) rather than `~/.cargo/bin`
-(rustup proxy shims), and mount `~/.cargo/registry` rather than `~/.cargo` so
-no credential file is inside a mount. The mount and the workspace are
-read-only in the sense that matters here only for directories, so cargo writes
-its lock files and artifacts to `$CARGO_HOME=/home/sandbox/.cargo` and
-`$CARGO_TARGET_DIR=/tmp/cargo-target`, private 0700 directories created for
-each command and destroyed with it. Cargo resolves the registry through
-`CARGO_HOME`, so link it once per command:
+(rustup proxy shims), and give the offline registry as `cargo_registry` rather
+than mounting `~/.cargo` so no credential file is inside a mount. The
+configured registry is bound read-only at `$CARGO_HOME/registry`, so no manual
+link is needed:
 
 ```sh
-ln -s /home/you/.cargo/registry "$CARGO_HOME/registry"
 cargo test --offline
 ```
+
+`CARGO_HOME=/home/sandbox/.cargo` is a private 0700 directory created per
+command and destroyed with it, so nothing from the registry or cargo's lock
+files survives. Build output is **not** redirected: cargo writes the
+workspace's own `target/`, the same place your builds do, so repeated commands
+reuse compiled dependencies. The mounts themselves stay read-only.
 
 `harness doctor` reports the configured mounts, prepends and environment key
 names, whether each mount exists and is readable, and, per mount, which of the
 fixed credential leaves (`credentials`, `credentials.toml`, `.git-credentials`)
-were masked and which were absent. A present leaf is masked read-only; an
-absent one cannot be masked beneath a read-only bind, cannot be created from
-inside the sandbox, and does not fail the sandbox. Changing the mounts, the
-prepends or the environment later is refused on continuation with
-`session_policy_mismatch`, exactly like other recorded policy fields.
+were masked (`masked`), absent (`absent`) or an object kind the backend refuses
+(`refused`), including for the configured registry. A present leaf is masked
+read-only; an absent one cannot be masked beneath a read-only bind, cannot be
+created from inside the sandbox, and does not fail the sandbox. Changing the
+mounts, the prepends, the registry or the environment later is refused on
+continuation with `session_policy_mismatch`, exactly like other recorded policy
+fields.
 
-Two S02 cases cover it in `crates/core/tests/sandbox/toolchains.rs`: masking and
-absent-leaf behavior with private caches, and a real `cargo test --offline` run
-with a read-only toolchain and registry that asserts the test binary ran and
-that network is still denied. Run them with the suite:
+Two S02 cases cover it in `crates/core/tests/sandbox/toolchains.rs`: masking,
+absent-leaf behavior and read-only registry binding with a private `CARGO_HOME`,
+and a real plain `cargo test --offline` run (no link step) with a read-only
+toolchain and configured registry that asserts the test binary ran, that
+`target/` appears in the workspace, and that network is still denied. Run them
+with the suite:
 
 ```sh
 ./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1 toolchains
