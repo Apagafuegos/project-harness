@@ -39,7 +39,7 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--self-test"] {
         let result = self_test(&suite, &scratch)
-            .and_then(|()| journal_selftest(&scratch))
+            .and_then(|()| journal_selftest(&scratch, &root.join("target/debug/harness")))
             .and_then(|()| config_selftest(&scratch))
             .and_then(|()| tty_selftest());
         clean_scratch(&scratch);
@@ -79,7 +79,7 @@ fn run() -> Result<()> {
         }
     }
     if !["all", "openai", "deepseek"].contains(&provider)
-        || !["all", "T1", "T2", "T3", "T4", "T5"].contains(&task)
+        || !["all", "T1", "T2", "T3", "T4", "T5", "T6"].contains(&task)
     {
         return Err("usage".into());
     }
@@ -101,13 +101,16 @@ fn run() -> Result<()> {
             p == "deepseek" && std::env::var_os("DEEPSEEK_API_KEY").is_none_or(|k| k.is_empty());
         skipped |= missing;
         let mut blocked = missing;
-        for t in ["T1", "T2", "T3", "T4", "T5"]
+        for t in ["T1", "T2", "T3", "T4", "T5", "T6"]
             .into_iter()
             .filter(|t| task == "all" || task == *t)
         {
             let dir = out.join(format!("{p}-{t}"));
             fs::create_dir(&dir)?; // Never overwrite a measurement or silently retry.
             let mut record = skeleton(p, t, &commit);
+            if t == "T6" {
+                record["undo"] = json!({"attempted":false,"result":"not_run"});
+            }
             record["config"] = json!(if config.is_some() {
                 "file"
             } else {
@@ -158,6 +161,14 @@ fn run() -> Result<()> {
                     Ok(value) => value,
                     Err(_) => json!({"pass":false,"error":"oracle_failed"}),
                 };
+                if t == "T6" {
+                    record["undo"] = undo_metrics(
+                        &binary,
+                        &data,
+                        &ws,
+                        &suite.join("fixture"),
+                    )?;
+                }
                 let clean = sanitize(&execution.transcript, &ws, &data, &sandbox_paths);
                 let lines: Vec<_> = clean
                     .lines()
@@ -703,7 +714,7 @@ fn clean_scratch(scratch: &Path) {
 }
 
 fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
-    for task in ["T1", "T2", "T3", "T4", "T5"] {
+    for task in ["T1", "T2", "T3", "T4", "T5", "T6"] {
         let temp = tempfile::Builder::new()
             .prefix("oracle-")
             .tempdir_in(scratch)?;
@@ -729,6 +740,33 @@ fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
             true,
             "reference {task}"
         );
+        if task == "T6" {
+            let display_path = ws.join("src/display.rs");
+            let display = fs::read_to_string(&display_path)?;
+            fs::write(&display_path, display.replacen("product", "item", 1))?;
+            assert_eq!(
+                oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],
+                false,
+                "incomplete rename T6"
+            );
+            let original = fs::read_to_string(suite.join("fixture/src/display.rs"))?;
+            let (reference, _) = rename_fixture_words(&original);
+            fs::write(&display_path, reference)?;
+            let display = fs::read_to_string(&display_path)?;
+            let unsafe_change = display.replace(
+                "text.push_str(&format!(\"{product}: {quantity}\\n\"));",
+                "text.push_str(&format!(\"unsafe {product}: {quantity}\\n\"));",
+            );
+            fs::write(&display_path, unsafe_change)?;
+            assert_eq!(
+                oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],
+                false,
+                "behavior change T6"
+            );
+            println!("T6: pristine fails; reference passes; incomplete and unsafe edits fail");
+            temp.close()?;
+            continue;
+        }
         if matches!(task, "T1" | "T5") {
             // F06 self-test: a created lockfile is build output, not a change,
             // so the read-only oracle still passes on it.
@@ -757,7 +795,7 @@ fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
 /// Offline proof that the durable-timestamp extraction matches what the runtime
 /// actually writes. It runs two trusted reads in one inference through a real
 /// journal, then checks the counts, the result code and the read-only segment.
-fn journal_selftest(scratch: &Path) -> Result<()> {
+fn journal_selftest(scratch: &Path, binary: &Path) -> Result<()> {
     use harness_core::{
         context::ModelLimits,
         model::{
@@ -776,11 +814,17 @@ fn journal_selftest(scratch: &Path) -> Result<()> {
     let data = temp.path().join("data");
     fs::create_dir(&ws)?;
     fs::write(ws.join("note"), "hello")?;
+    fs::create_dir(ws.join("src"))?;
+    for name in ["display.rs", "ledger.rs", "lib.rs"] {
+        fs::write(ws.join("src").join(name), "item\n")?;
+    }
+    let pristine = temp.path().join("pristine");
+    oracle::copy(&ws, &pristine)?;
     let model = ModelRef {
         provider_instance: "mock".into(),
         model: "scripted".into(),
     };
-    let policy = json!({"policy_revision":"p1","enabled_tools":["read"],
+    let policy = json!({"policy_revision":"p1","enabled_tools":["read","multi_edit"],
         "workspace_read":"ask","workspace_mutation":"ask","process":"ask",
         "network":"deny","protected_paths":[],"allowances":[]});
     let root = Arc::new(DataRoot::open(&data, true)?);
@@ -790,16 +834,16 @@ fn journal_selftest(scratch: &Path) -> Result<()> {
         policy_revision: "p1".into(),
         configuration: root.put_artifact(&serde_json::to_vec(&policy)?)?,
     };
-    let call = |index: u32, path: &str| {
+    let call = |index: u32, name: &str, arguments: Value| {
         [
             Step::Event(ProviderEvent::ToolCallStarted {
                 block_index: index,
-                name: "read".into(),
+                name: name.into(),
                 provider_call_id: None,
             }),
             Step::Event(ProviderEvent::ToolArgumentsDelta {
                 block_index: index,
-                fragment: json!({"path": path}).to_string(),
+                fragment: arguments.to_string(),
             }),
             Step::Event(ProviderEvent::ToolCallReady { block_index: index }),
         ]
@@ -808,8 +852,17 @@ fn journal_selftest(scratch: &Path) -> Result<()> {
         Script::new(
             [Step::Event(ProviderEvent::Started)]
                 .into_iter()
-                .chain(call(0, "note"))
-                .chain(call(1, "note"))
+                .chain(call(0, "read", json!({"path":"note"})))
+                .chain(call(1, "read", json!({"path":"note"})))
+                .chain(call(
+                    2,
+                    "multi_edit",
+                    json!({"edits":[
+                        {"path":"src/display.rs","old_text":"item","new_text":"product"},
+                        {"path":"src/ledger.rs","old_text":"item","new_text":"product"},
+                        {"path":"src/lib.rs","old_text":"item","new_text":"product"}
+                    ]}),
+                ))
                 .chain([Step::completed(FinishReason::ToolCalls)])
                 .collect::<Vec<_>>(),
         ),
