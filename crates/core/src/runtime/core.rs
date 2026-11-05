@@ -3498,6 +3498,7 @@ fn metadata(provenance: Provenance, code: Option<ResultCode>) -> ToolMetadata {
         artifacts: Vec::new(),
         code: code.map(|code| code.as_str().to_owned()),
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
