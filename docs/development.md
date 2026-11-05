@@ -115,12 +115,19 @@ milestone.
   nonempty prompt it does nothing. In a quit confirmation, Enter/y confirms;
   n/Esc returns to editing.
 - Approval captures the keyboard: `a` allows once, `d` denies, `r` allows and
-  remembers, and Esc dismisses **by denying**. There is no automatic approval.
+  remembers, and Esc dismisses **by denying**. With `--approve-read-only` (or
+  `approve_read_only = true`) the app answers a pending ticket for a registry
+  tool whose effects are exactly `[Read]` on the trusted filesystem through the
+  same `Command::SubmitApproval` a key press would send — allow once, never
+  remembered, bound to the ticket's approval id and plan digest — and says so in
+  the transcript. Shell, mutation, unknown and non-registry tools still ask;
+  nothing else is automatic.
   `v` switches the preview between the readable summary and the raw JSON
   arguments; it never answers. F1 opens help and Up/Down or PgUp/PgDn scrolls
   the frame; no other key answers a ticket, and a paste never answers one.
-  Remembered mutation grants follow the existing continuation policy checks;
-  a session with changed allowances may be refused on reopen.
+  A remembered grant is recorded in the session's configuration, so the TUI
+  resumes it on reopen (`SessionOptions::inherit_remembered_grants`); `ask`
+  never inherits it and refuses with `session_has_remembered_grants`.
 - On uncertain recovery, Up/Down selects an invocation, Left/Right or Tab
   selects a resolution, and Enter submits the user's statement. Observed
   success/failure needs text. Nothing reruns the uncertain operation.
@@ -363,9 +370,10 @@ Live results are recorded in [M5 acceptance](milestone-5-acceptance.md).
 
 #### TUI known limits
 
-- User-only config defaults (ADR 0028); no workspace/project config. Ask-only
-  approval and startup-switch settings never automate TUI approval or change its
-  existing model-dialog policy.
+- User-only config defaults (ADR 0028); no workspace/project config. The
+  startup-switch setting stays ask-only and never changes the TUI's
+  model-dialog policy; `approve_read_only` does reach the TUI and auto-approves
+  only registry-declared trusted read-only tools.
 - The new-session strategy default is `observation_masking`. It is lossy for tool
   observations, does not guarantee a smaller projection, and provides no
   workspace rollback. Old and continued sessions keep their recorded strategy;
@@ -567,7 +575,9 @@ to reject; `--switch-policy omit-optional` permits reported native-state loss,
 never required media/tool incompatibilities. `--provider anthropic` uses
 `ANTHROPIC_API_KEY` and `--provider deepseek` uses `DEEPSEEK_API_KEY`, never
 consumer subscription credentials.
-Imported policies with remembered grants or different approval defaults are refused.
+A continuation that recorded remembered grants is refused with
+`session_has_remembered_grants` (ask never inherits grants; the TUI resumes
+them); any other recorded policy difference keeps `session_policy_mismatch`.
 Uncertain side effects require explicit resolution through the runtime API; this
 minimal client never guesses, replays tools or automatically repairs a torn tail.
 
