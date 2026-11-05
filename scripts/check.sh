@@ -15,7 +15,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 # Debug-only real-binary PTY fixture, isolated from the other lock/spawn targets.
 cargo clippy -p harness --all-targets --features test-provider --locked -- -D warnings
-cargo test -p harness --features test-provider --test tui_pty --locked -- --nocapture
+cargo test -p harness --features test-provider --test tui_pty --test m9_tui_pty --locked -- --nocapture
 # Public adapter fixture contract must also build and run for downstream users.
 cargo clippy -p harness-core --all-targets --features conformance --locked -- -D warnings
 cargo test -p harness-core --features conformance --locked
