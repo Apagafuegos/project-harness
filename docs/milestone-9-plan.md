@@ -1,9 +1,11 @@
 # Milestone 9 plan — proposed
 
-**Status: proposal, not accepted.** Nothing here is implemented. The steps,
-the decisions marked *open* and the release target need the owner's acceptance
-before any code changes. When it is accepted, the settled decisions get numbers
-and the M9 acceptance document maps them to tests, as M8 did.
+**Status: implementation authorized, in progress.** The owner requested
+implementation on 2026-11-05 and continued work until milestone acceptance.
+The recommended options are the implementation baseline: A1, B1+B2, C1+C2,
+D (no headline capability), E (v0.3.0) and F (opt-in live runs with the M8 budget).
+Authorization to run is not evidence that credentials or live results exist.
+No release or milestone-completion claim is made here.
 
 ## Starting point
 
