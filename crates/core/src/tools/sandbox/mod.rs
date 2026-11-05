@@ -10,6 +10,14 @@ mod process;
 mod settings;
 pub use settings::{ToolchainSettings, credential_name};
 
+/// Shell semantics bound into each new bash plan. Absent in legacy plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellOptions {
+    /// Use the rightmost failing pipeline component's status.
+    pub pipefail: bool,
+}
+
 use super::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, Plan};
 use crate::session::{ContentBlock, ExecutionBackend, ResultCode, ToolStatus};
 use serde_json::Value;
@@ -117,6 +125,7 @@ pub(super) fn unavailable(start: Instant, reason: &str, cap: usize) -> Execution
         output_truncated,
         artifacts: Vec::new(),
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
@@ -243,6 +252,7 @@ impl Sandbox {
                 output_truncated: false,
                 artifacts: Vec::new(),
                 file_effect: None,
+                file_paths: Vec::new(),
             };
         }
         let spec = match args::build(&self.config, plan, workspace_root) {
