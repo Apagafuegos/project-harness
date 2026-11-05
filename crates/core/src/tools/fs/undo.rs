@@ -183,6 +183,7 @@ impl FsWorkspace {
             pre_image: pre.image,
             pre_mode: pre.mode,
             post_image,
+            additional_targets: Vec::new(),
         })
     }
 
