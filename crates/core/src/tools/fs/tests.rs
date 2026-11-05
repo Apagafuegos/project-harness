@@ -29,6 +29,7 @@ fn workspace(root: &TempDir) -> FsWorkspace {
 fn policy() -> PolicySnapshot {
     let mut config: Value = serde_json::from_slice(include_bytes!("../../../../../docs/rfcs/001/examples/artifacts/7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea")).unwrap();
     config["protected_paths"] = json!([]);
+    config["enabled_tools"].as_array_mut().unwrap().push(json!("multi_edit"));
     let bytes = serde_json::to_vec(&config).unwrap();
     PolicySnapshot::parse(
         ArtifactRef {
