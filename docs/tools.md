@@ -312,3 +312,13 @@ Tests that spawn run in separate integration targets, not the core unit binary.
 The single probe unit test that spawns takes the test-only spawn gate that also
 guards every journal lock acquisition, so a child cannot hold an inherited
 journal lock across another test's reopen (ADR 0012).
+
+### Bash pipelines (M9)
+
+New bash plans explicitly bind `shell.pipefail = true`. An output filter such
+as `cargo test --offline | tail` no longer hides a failing producer: bash uses
+the rightmost failing pipeline status. Approval shows this option from the
+bound plan. `errexit` is not enabled, so later commands or explicit status
+handling can still change the final shell status; an exit code is not a parsed
+test report. Legacy plan artifacts are unchanged. See
+[ADR 0036](decisions/0036-bash-pipeline-status.md).
