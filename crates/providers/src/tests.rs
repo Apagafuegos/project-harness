@@ -108,9 +108,12 @@ async fn matching_request(socket: &mut tokio::net::TcpStream, path: &str, probe:
         if input.len() < end + 4 + length {
             continue;
         }
+        // The transport sends `harness/<crate version>` (transport.rs); derive it
+        // so a version bump cannot silently weaken this assertion.
+        let user_agent = concat!("user-agent: harness/", env!("CARGO_PKG_VERSION"));
         probe.headers_ok.store(
             header.contains("authorization: bearer sentinel-do-not-disclose-987654321")
-                && header.contains("user-agent: harness/0.1.0"),
+                && header.contains(user_agent),
             Ordering::SeqCst,
         );
         *probe.submitted.lock().unwrap() =

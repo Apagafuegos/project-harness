@@ -147,6 +147,14 @@ defect (`CARGO_NET_OFFLINE`, corrected in ADR 0033's amendment, `docs/tools.md`,
   sends `--no-config`; the PTY exposes `/dev/tty`.
 - `cargo fmt --all -- --check` and Clippy on the touched crates; the driver is
   an example, so it is compiled and linted with the workspace.
+- The version bump exposed one test that pinned the client's user-agent string to
+  `harness/0.1.0` (`crates/providers/src/tests.rs`, the fake server's
+  `headers_ok` probe behind `captured_secret_outputs` and
+  `http_error_taxonomy_retry_and_redaction`). It now derives
+  `harness/<CARGO_PKG_VERSION>` from the crate version, so the assertion stays
+exact for the built version and a future bump cannot silently weaken it. This is
+a test expectation, not product behaviour; `cargo test -p harness-providers
+--lib` passes (90 tests).
 - Every changed Markdown link and anchor, and every guide example's CLI syntax,
   was checked against `--help` from the current build.
 - No product test, journal format or runtime path changed in this step, so the
