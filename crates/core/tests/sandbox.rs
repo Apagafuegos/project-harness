@@ -1007,3 +1007,17 @@ fn s02_setup_failures_never_fall_back_to_host() {
     );
     assert!(!f.root().join("command-ran").exists());
 }
+
+#[test]
+#[ignore = "S02 real Linux sandbox"]
+fn s02_pipeline_failure_survives_output_filtering() {
+    let fixture = Fixture::new();
+    for (command, code) in [
+        ("(exit 7) | cat", 7),
+        ("true | cat", 0),
+        ("(exit 7) | (exit 4) | cat", 4),
+    ] {
+        let outcome = fixture.run(command);
+        assert_eq!(outcome.exit_code, Some(code), "{outcome:?}");
+    }
+}
