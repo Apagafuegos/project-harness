@@ -180,11 +180,7 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
     ]
     .map(Into::into)
     .into();
-    let path = if config.toolchains.is_empty() {
-        config.path.clone()
-    } else {
-        config.toolchains.path()
-    };
+    let path = config.sandbox_path();
     for (key, value) in [
         ("PATH", path.as_str()),
         ("HOME", "/home/sandbox"),

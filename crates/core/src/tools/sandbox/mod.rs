@@ -75,6 +75,20 @@ impl Default for SandboxConfig {
         }
     }
 }
+impl SandboxConfig {
+    /// The PATH the sandbox actually exports, independent of the host's.
+    ///
+    /// This is the single source for the `--setenv PATH` argument and for the
+    /// exit-127 note printed in a tool result, so an opt-in toolchain
+    /// `path_prepend` is visible to the model as it really is.
+    pub fn sandbox_path(&self) -> String {
+        if self.toolchains.is_empty() {
+            self.path.clone()
+        } else {
+            self.toolchains.path()
+        }
+    }
+}
 
 /// Failure to establish the required isolation; never permits a host fallback.
 #[derive(Clone, Debug, thiserror::Error)]

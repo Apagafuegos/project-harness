@@ -224,6 +224,14 @@ never overrides protected paths or sandbox enforcement and has the continuation
 limitation above. Tickets bind an exact plan/revision and expire after five
 minutes.
 
+Every `bash` call runs in a Bubblewrap sandbox with network denied. When a
+sandboxed command exits **127**, its result text ends with one fixed line:
+`note: exit 127 — the command was not found inside the sandbox (PATH=…);
+repeating the same command will fail the same way.` The PATH shown is the
+sandbox's own, including any `[sandbox] path_prepend` entries, so an absent
+toolchain is visible instead of guessed. Only exit 127 gets the note; the
+status, result code and exit status are unchanged.
+
 Execution intent is durable before dispatch and results before dependent
 inference. An interrupted mutation with no durable result is uncertain, not
 silently retried. The recovery dialog requires your observed result or explicit

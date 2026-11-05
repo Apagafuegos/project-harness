@@ -30,6 +30,20 @@ use std::{
 // No unsafe pre_exec hook and no raw-fd borrowing is needed.
 static SPAWN: Mutex<()> = Mutex::new(());
 
+/// Exit status a shell returns for a command it could not find in `PATH`.
+const EXIT_NOT_FOUND: i32 = 127;
+
+/// The fixed, model-facing note for a sandboxed command that exited 127.
+///
+/// It names the sandbox's own PATH, so an opt-in toolchain `path_prepend` reads
+/// exactly as the sandbox exports it. Deterministic text, no host paths.
+fn missing_executable_note(path: &str) -> String {
+    format!(
+        "note: exit 127 — the command was not found inside the sandbox (PATH={path}); \
+         repeating the same command will fail the same way."
+    )
+}
+
 struct Channel {
     socket: UnixStream,
     bytes: Vec<u8>,
@@ -450,6 +464,18 @@ pub(super) fn run(
     if !detail.is_empty() {
         combined.extend_from_slice(format!("\n{detail}\n").as_bytes());
     }
+    // F04a: a missing executable inside the sandbox is terminal for that exact
+    // command. The note is part of the stored result text, so the journal, the
+    // transcript and the model's next request all show the same fact. It is
+    // appended last, so head/tail truncation keeps it and reports truncation.
+    if exit_code == Some(EXIT_NOT_FOUND) {
+        if !combined.ends_with(b"\n") {
+            combined.push(b'\n');
+        }
+        combined
+            .extend_from_slice(missing_executable_note(&sandbox.config.sandbox_path()).as_bytes());
+        combined.push(b'\n');
+    }
     let (content, elided) = content(&combined, sandbox.config.model_text_limit);
     ExecutionOutcome {
         status: outcome_status,
@@ -466,6 +492,20 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_127_note_is_the_pinned_text_with_the_actual_sandbox_path() {
+        assert_eq!(
+            missing_executable_note("/usr/bin:/bin"),
+            "note: exit 127 — the command was not found inside the sandbox \
+             (PATH=/usr/bin:/bin); repeating the same command will fail the same way."
+        );
+        // An opt-in toolchain path is reported exactly as the sandbox exports it.
+        assert!(
+            missing_executable_note("/home/me/.cargo/bin:/usr/bin:/bin")
+                .contains("(PATH=/home/me/.cargo/bin:/usr/bin:/bin);")
+        );
+    }
 
     #[test]
     fn init_proc_teardown_requires_retired_pidfd() {

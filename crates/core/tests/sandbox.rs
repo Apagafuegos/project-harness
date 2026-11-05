@@ -660,6 +660,50 @@ fn s02_exit_status_signal_and_bounded_output() {
 }
 #[test]
 #[ignore = "S02 real Linux sandbox"]
+fn s02_exit_127_names_the_missing_executable_and_the_sandbox_path() {
+    let f = Fixture::new();
+    // The note is part of the stored result text: journal, transcript and the
+    // model's next request all see it.
+    let outcome = f.run("nonexistent-cmd-xyz");
+    failed(&outcome, ToolStatus::Failed, ResultCode::NonzeroExit);
+    assert_eq!(outcome.exit_code, Some(127));
+    let rendered = text(&outcome);
+    assert!(
+        rendered.contains(
+            "note: exit 127 — the command was not found inside the sandbox (PATH=/usr/bin:/bin); \
+             repeating the same command will fail the same way."
+        ),
+        "{rendered}"
+    );
+    // The shell's own diagnostic and the existing status line are unchanged.
+    assert!(rendered.contains("command not found"), "{rendered}");
+    assert!(
+        rendered.contains("nonzero_exit: exit status 127"),
+        "{rendered}"
+    );
+    // Output past the bound elides in the middle; the note is in the kept tail
+    // and the result says it was truncated, so it is never lost silently.
+    let outcome = f.run("head -c 200000 /dev/zero | tr '\\0' x; nonexistent-cmd-xyz");
+    assert_eq!(outcome.exit_code, Some(127));
+    assert!(outcome.output_truncated);
+    let rendered = text(&outcome);
+    assert!(
+        rendered.contains("[... output truncated ...]"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("note: exit 127"), "{rendered}");
+    // No other exit code gets the hint.
+    for command in ["exit 1", "exit 0", "true"] {
+        let outcome = f.run(command);
+        assert!(
+            !text(&outcome).contains("note: exit 127"),
+            "{command} must not carry the note: {}",
+            text(&outcome)
+        );
+    }
+}
+#[test]
+#[ignore = "S02 real Linux sandbox"]
 fn s02_fail_closed_missing_relative_and_fake_bwrap() {
     use std::os::unix::fs::PermissionsExt;
     for path in ["bwrap", "/nonexistent/bwrap"] {

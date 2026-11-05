@@ -153,6 +153,24 @@ environment key names (never values), and doctor additionally reports each
 mount's existence, readability and, per fixed credential leaf, whether it was
 `masked`, `absent` or `refused`.
 
+### The exit-127 note
+
+A sandboxed command that exits **127** gets one fixed line appended to its
+model-facing result text, after the existing status line:
+
+```text
+note: exit 127 — the command was not found inside the sandbox (PATH=<the sandbox PATH>); repeating the same command will fail the same way.
+```
+
+`<the sandbox PATH>` is the value the sandbox actually exported —
+`/usr/bin:/bin`, or that list preceded by the opt-in `[sandbox] path_prepend`
+entries (M8 decision 10) — never a hard-coded copy and never the host's own
+PATH or another host path. The line is part of the stored result text, so the
+journal, the transcript and the next model request show the same thing; it
+counts against the existing output bound, and a truncated result still reports
+truncation. Status (`failed`), result code (`nonzero_exit`) and the recorded
+exit status do not change, and no other exit code gets the note.
+
 ## Planned separately
 
 Native provider adapters and a CLI chat command remain separate work.
