@@ -392,6 +392,7 @@ fn resolution(d: &Driver, rng: &mut Rng) -> Command {
             ]),
             text: rng.pick(&["it ran", "nothing changed", ""]).to_string(),
             file_effect: None,
+            file_paths: Vec::new(),
         }
     };
     Command::ResolveUncertain {
