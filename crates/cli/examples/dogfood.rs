@@ -40,6 +40,7 @@ fn run() -> Result<()> {
     if args == ["--self-test"] {
         let result = self_test(&suite, &scratch)
             .and_then(|()| journal_selftest(&scratch))
+            .and_then(|()| config_selftest(&scratch))
             .and_then(|()| tty_selftest());
         fs::remove_dir(&scratch)?;
         return result;
@@ -62,6 +63,9 @@ fn run() -> Result<()> {
     let mut provider = "all";
     let mut task = "all";
     let mut out = None;
+    // Opt-in user config for the measured harness invocation (decision 15).
+    // Absent means `--no-config`, so the baseline method still reproduces.
+    let mut config: Option<PathBuf> = None;
     for pair in args.chunks(2) {
         if pair.len() != 2 {
             return Err("usage".into());
@@ -70,6 +74,7 @@ fn run() -> Result<()> {
             "--provider" => provider = &pair[1],
             "--task" => task = &pair[1],
             "--out" => out = Some(PathBuf::from(&pair[1])),
+            "--config" => config = Some(PathBuf::from(&pair[1])),
             _ => return Err("usage".into()),
         }
     }
@@ -103,6 +108,11 @@ fn run() -> Result<()> {
             let dir = out.join(format!("{p}-{t}"));
             fs::create_dir(&dir)?; // Never overwrite a measurement or silently retry.
             let mut record = skeleton(p, t, &commit);
+            record["config"] = json!(if config.is_some() {
+                "file"
+            } else {
+                "no_config"
+            });
             if blocked {
                 // Decision 4 and the DeepSeek ruling: an unrun cell is data.
                 record["status"] = json!("not_run");
@@ -127,7 +137,7 @@ fn run() -> Result<()> {
                 let data = temp.path().join("data");
                 oracle::copy(&suite.join("fixture"), &ws)?;
                 let prompt = fs::read_to_string(suite.join(format!("tasks/{t}/prompt.md")))?;
-                let execution = ask(&binary, p, &prompt, &ws, &data)?;
+                let execution = ask(&binary, p, &prompt, &ws, &data, config.as_deref())?;
                 record["status"] = json!(if execution.deadline {
                     "deadline"
                 } else {
@@ -136,7 +146,9 @@ fn run() -> Result<()> {
                 record["exit_code"] = json!(execution.exit);
                 record["wall_ms"] = json!(execution.wall_ms);
                 record["approvals"] = json!(execution.approvals);
-                let answer = journal(&data, &mut record)?;
+                let mut sandbox_paths = Vec::new();
+                let answer = journal(&data, &mut record, &mut sandbox_paths)?;
+                approval_split(&mut record, &execution.transcript);
                 if execution.deadline {
                     record["result_code"] = json!("deadline");
                 }
@@ -146,7 +158,7 @@ fn run() -> Result<()> {
                     Ok(value) => value,
                     Err(_) => json!({"pass":false,"error":"oracle_failed"}),
                 };
-                let clean = sanitize(&execution.transcript, &ws, &data);
+                let clean = sanitize(&execution.transcript, &ws, &data, &sandbox_paths);
                 let lines: Vec<_> = clean
                     .lines()
                     .filter(|line| !line.starts_with("session:") && !line.starts_with("usage:"))
@@ -191,6 +203,7 @@ fn run() -> Result<()> {
 /// rebuilt from committed cells without spending provider quota again.
 fn write_summary(out: &Path, records: &[Value]) -> Result<()> {
     let mut decision = BTreeMap::new();
+    let mut approvals_by_provider = BTreeMap::new();
     for provider in ["openai", "deepseek"] {
         let cells: Vec<_> = records
             .iter()
@@ -214,6 +227,25 @@ fn write_summary(out: &Path, records: &[Value]) -> Result<()> {
             + 0.0;
         let tool = sum("readonly_segment_tool_ms").max(0.0);
         let percent = (wall > 0.0).then(|| 100.0 * tool / wall);
+        let count = |key: &str, class: &str, field: &str| {
+            cells
+                .iter()
+                .map(|r| r[class][key][field].as_u64().unwrap_or(0))
+                .sum::<u64>()
+        };
+        let approvals = json!({
+            "prompts": cells.iter().map(|r| r["approval_prompts"].as_u64().unwrap_or(0)).sum::<u64>(),
+            "read_only_prompts": count("read_only", "approval_classes", "prompts"),
+            "other_prompts": count("other", "approval_classes", "prompts"),
+            "auto_approved_read_only": count("read_only", "approval_classes", "auto_approved"),
+            "requests_by_tool": cells.iter().fold(BTreeMap::<String, u64>::new(), |mut acc, r| {
+                for (name, n) in r["approvals_by_tool"].as_object().into_iter().flatten() {
+                    *acc.entry(name.clone()).or_default() += n.as_u64().unwrap_or(0);
+                }
+                acc
+            }),
+            "split_consistent": cells.iter().all(|r| r["approval_split_consistent"] == json!(true)),
+        });
         decision.insert(
             provider,
             json!({
@@ -226,23 +258,59 @@ fn write_summary(out: &Path, records: &[Value]) -> Result<()> {
                 "meets_threshold": percent.is_some_and(|p| p >= 10.0),
             }),
         );
+        approvals_by_provider.insert(provider, approvals);
     }
     fs::write(
         out.join("summary.json"),
         serde_json::to_string_pretty(&json!({
-            "schema": 1,
+            "schema": 2,
             "decision_7_record_basis": "execution_intent.turn_id call to its tool_result commit, in a turn segment with two or more consecutive read-only calls (read/list/glob/grep) in one model response",
+            "approval_basis": "requests from journal approval_requested joined to the call; prompts from the client's own approve prompt; auto-approved read-only from the client's auto-approval line, subtracted from the read-only requests",
             "runs": records,
             "decision_7": decision,
+            "approvals": approvals_by_provider,
         }))? + "\n",
     )?;
     Ok(())
 }
 
 fn skeleton(provider: &str, task: &str, commit: &str) -> Value {
-    json!({"schema":1,"harness_commit":commit,"provider":provider,"model":if provider=="openai" {"gpt-6.1-sol"} else {"deepseek-flash"},"task":task,
-        "status":"not_run","reason":null,"retry_after_ms":null,"provider_code":null,"oracle":null,"exit_code":null,"result_code":null,"inferences":0,"tool_calls":{},"approvals":0,"approvals_by_tool":{},"refusals":{},"errors":{},"model_errors":{},
+    json!({"schema":2,"harness_commit":commit,"provider":provider,"model":if provider=="openai" {"gpt-6.1-sol"} else {"deepseek-flash"},"task":task,"config":"no_config",
+        "status":"not_run","reason":null,"retry_after_ms":null,"provider_code":null,"oracle":null,"exit_code":null,"result_code":null,"inferences":0,"tool_calls":{},"approvals":0,"approvals_by_tool":{},"approval_prompts":0,"approval_classes":{"read_only":{"requests":0,"auto_approved":0,"prompts":0},"other":{"requests":0,"prompts":0}},"approval_split_consistent":true,"sandbox":{"configured":false},"refusals":{},"errors":{},"model_errors":{},
         "wall_ms":null,"turn_wall_ms":null,"input_tokens":null,"output_tokens":null,"tool_ms":0.0,"tool_time_percent":null,"readonly_segments":0,"readonly_segment_tool_ms":0.0,"readonly_segments_detail":[],"tool_facts":[]})
+}
+
+/// Human prompts split by class, from the journal's approval requests and the
+/// client's own auto-approval line. `approve_read_only` never changes the
+/// recorded policy, so the request is journaled either way; only the transcript
+/// says whether a human was asked.
+fn approval_split(metrics: &mut Value, transcript: &str) {
+    let prompts = transcript.matches("approve? [y/N] ").count() as u64;
+    let auto = transcript
+        .matches("approval: read-only auto-approved")
+        .count() as u64;
+    let mut read_only_requests = 0u64;
+    let mut other_requests = 0u64;
+    if let Some(by_tool) = metrics["approvals_by_tool"].as_object() {
+        for (name, count) in by_tool {
+            let count = count.as_u64().unwrap_or(0);
+            if ["read", "list", "glob", "grep"].contains(&name.as_str()) {
+                read_only_requests += count;
+            } else {
+                other_requests += count;
+            }
+        }
+    }
+    let read_only_prompts = read_only_requests.saturating_sub(auto);
+    metrics["approval_prompts"] = json!(prompts);
+    metrics["approval_classes"] = json!({
+        "read_only": {"requests": read_only_requests, "auto_approved": auto, "prompts": read_only_prompts},
+        "other": {"requests": other_requests, "prompts": other_requests},
+    });
+    // The split must reconstruct the human prompts exactly and never claim more
+    // auto-approvals than read-only requests.
+    metrics["approval_split_consistent"] =
+        json!(auto <= read_only_requests && read_only_prompts + other_requests == prompts);
 }
 
 struct Execution {
@@ -253,7 +321,14 @@ struct Execution {
     transcript: String,
 }
 
-fn ask(binary: &Path, provider: &str, prompt: &str, ws: &Path, data: &Path) -> Result<Execution> {
+fn ask(
+    binary: &Path,
+    provider: &str,
+    prompt: &str,
+    ws: &Path,
+    data: &Path,
+    config: Option<&Path>,
+) -> Result<Execution> {
     // Same portable-pty setup and reader-channel pattern as support::probe_inner.
     let pair = native_pty_system().openpty(PtySize {
         rows: 40,
@@ -263,7 +338,18 @@ fn ask(binary: &Path, provider: &str, prompt: &str, ws: &Path, data: &Path) -> R
     })?;
     let mut cmd = CommandBuilder::new(binary);
     cmd.cwd(ws);
-    cmd.args(["--no-config", "ask", "--workspace"]);
+    // Decision 15: the opt-in rerun measures the user's own config; the default
+    // keeps the baseline's `--no-config` method reproducible.
+    match config {
+        Some(path) => {
+            cmd.arg("--config");
+            cmd.arg(path);
+        }
+        None => {
+            cmd.arg("--no-config");
+        }
+    }
+    cmd.args(["ask", "--workspace"]);
     cmd.arg(ws);
     cmd.arg("--data-root");
     cmd.arg(data);
@@ -352,7 +438,7 @@ fn elapsed(a: f64, b: f64) -> f64 {
     if b >= a { b - a } else { b + 86_400_000.0 - a }
 }
 
-fn journal(data: &Path, metrics: &mut Value) -> Result<String> {
+fn journal(data: &Path, metrics: &mut Value, sandbox_paths: &mut Vec<String>) -> Result<String> {
     if !data.exists() {
         metrics["result_code"] = json!("no_session");
         return Ok(String::new());
@@ -380,11 +466,16 @@ fn journal(data: &Path, metrics: &mut Value) -> Result<String> {
     let mut answer = String::new();
     let mut start = None;
     let mut end = None;
+    let mut configuration = None;
     for line in raw.lines() {
         let envelope: Value = serde_json::from_str(line)?;
         let record = envelope.get("record").unwrap_or(&envelope);
         let at = millis(record["at"].as_str().ok_or("missing at")?)?;
         let payload = &record["payload"];
+        if payload["kind"] == "session_created" {
+            configuration = Some(payload["configuration"].clone());
+            continue;
+        }
         if payload["kind"] != "commit" {
             continue;
         }
@@ -504,13 +595,56 @@ fn journal(data: &Path, metrics: &mut Value) -> Result<String> {
     }
     metrics["readonly_segments"] = json!(segments.len());
     metrics["readonly_segment_tool_ms"] = json!(segment_total);
+    // The recorded configuration is the only honest source for what was mounted:
+    // it is what the run actually used. Only counts and key names are kept.
+    if let Some(reference) = configuration
+        && let Ok(reference) =
+            serde_json::from_value::<harness_core::session::ArtifactRef>(reference)
+        && let Ok(bytes) = root.read_artifact(&reference, 1024 * 1024)
+        && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+    {
+        match value.get("sandbox") {
+            Some(sandbox) => {
+                let paths = sandbox["toolchain_paths"]
+                    .as_array()
+                    .map(|entries| entries.as_slice())
+                    .unwrap_or_default();
+                sandbox_paths.extend(
+                    paths
+                        .iter()
+                        .filter_map(|path| path.as_str().map(str::to_owned)),
+                );
+                if let Some(registry) = sandbox["cargo_registry"].as_str() {
+                    sandbox_paths.push(registry.to_owned());
+                }
+                let mut env_keys: Vec<_> = sandbox["env"]
+                    .as_object()
+                    .map(|env| env.keys().cloned().collect())
+                    .unwrap_or_default();
+                env_keys.sort();
+                metrics["sandbox"] = json!({
+                    "configured": true,
+                    "toolchain_mounts": paths.len(),
+                    "path_prepend_entries": sandbox["path_prepend"].as_array().map(|p| p.len()).unwrap_or(0),
+                    "cargo_registry": sandbox["cargo_registry"].is_string(),
+                    "env_keys": env_keys,
+                });
+            }
+            None => metrics["sandbox"] = json!({"configured": false}),
+        }
+    }
     Ok(answer)
 }
 
-fn sanitize(raw: &str, ws: &Path, data: &Path) -> String {
+fn sanitize(raw: &str, ws: &Path, data: &Path, sandbox_paths: &[String]) -> String {
     let mut clean = raw
         .replace(&ws.to_string_lossy().to_string(), "<ws>")
         .replace(&data.to_string_lossy().to_string(), "<data>");
+    // Recorded toolchain and registry paths are replaced instead of redacted, so
+    // the sanitized line still carries the fact without a username in it.
+    for path in sandbox_paths {
+        clean = clean.replace(path, "<toolchain>");
+    }
     // Strip terminal control sequences, then redact risky lines wholesale. This
     // is deliberately conservative: manually review every excerpt before commit.
     let mut plain = String::new();
@@ -731,7 +865,8 @@ fn journal_selftest(scratch: &Path) -> Result<()> {
         Ok::<(), Box<dyn std::error::Error>>(())
     })?;
     let mut metrics = skeleton("openai", "selftest", "offline");
-    let answer = journal(&data, &mut metrics)?;
+    let mut sandbox_paths = Vec::new();
+    let answer = journal(&data, &mut metrics, &mut sandbox_paths)?;
     assert_eq!(answer.trim(), "done", "assistant text extraction");
     assert_eq!(metrics["inferences"], 2, "inference count");
     assert_eq!(metrics["tool_calls"]["read"], 2, "tool counts");
@@ -747,7 +882,76 @@ fn journal_selftest(scratch: &Path) -> Result<()> {
         metrics["tool_facts"][0]["tool"], "read",
         "journal-derived tool facts"
     );
-    println!("journal self-test: 2 inferences, 2 reads, 2 approvals, 1 read-only segment");
+    // This configuration records no `[sandbox]` table, so the summary stays off
+    // and no path is offered for redaction.
+    assert_eq!(metrics["sandbox"]["configured"], false, "sandbox summary");
+    assert!(sandbox_paths.is_empty(), "no recorded mounts");
+    // One of the two reads was auto-approved: the split must still reconstruct
+    // the single human prompt exactly.
+    approval_split(
+        &mut metrics,
+        "tool: read {\napprove? [y/N] y\napproval: read-only auto-approved\n",
+    );
+    assert_eq!(metrics["approval_prompts"], 1, "one human prompt");
+    assert_eq!(
+        metrics["approval_classes"]["read_only"]["prompts"], 1,
+        "one read-only prompt"
+    );
+    assert_eq!(
+        metrics["approval_classes"]["read_only"]["auto_approved"], 1,
+        "one auto-approval"
+    );
+    assert_eq!(
+        metrics["approval_classes"]["other"]["prompts"], 0,
+        "no other prompt"
+    );
+    assert_eq!(
+        metrics["approval_split_consistent"], true,
+        "split reconstructs the prompts"
+    );
+    println!(
+        "journal self-test: 2 inferences, 2 reads, 2 approvals, 1 read-only segment, \
+         read-only/other prompt split"
+    );
+    temp.close()?;
+    Ok(())
+}
+
+/// Offline proof that `--config FILE` reaches the harness command line and that
+/// the default still sends `--no-config` (decision 15): a stand-in binary prints
+/// its own argv inside the same PTY path a live cell uses.
+fn config_selftest(scratch: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::Builder::new()
+        .prefix("argv-")
+        .tempdir_in(scratch)?;
+    let stub = temp.path().join("argv.sh");
+    fs::write(
+        &stub,
+        "#!/bin/sh\nfor a in \"$@\"; do printf 'ARGV:%s\\n' \"$a\"; done\n",
+    )?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
+    let ws = temp.path().join("ws");
+    let data = temp.path().join("data");
+    fs::create_dir(&ws)?;
+    let config = temp.path().join("private.toml");
+    fs::write(&config, "approve_read_only = true\n")?;
+    let config_arg = format!("ARGV:{}", config.display());
+
+    let with = ask(&stub, "openai", "PROMPT", &ws, &data, Some(&config))?;
+    assert!(with.transcript.contains("ARGV:--config"));
+    assert!(
+        with.transcript.contains(&config_arg),
+        "config path forwarded"
+    );
+    assert!(!with.transcript.contains("ARGV:--no-config"));
+    assert!(with.transcript.contains("ARGV:ask"));
+    assert!(with.transcript.contains("ARGV:openai"));
+
+    let without = ask(&stub, "openai", "PROMPT", &ws, &data, None)?;
+    assert!(without.transcript.contains("ARGV:--no-config"));
+    assert!(!without.transcript.contains("ARGV:--config"));
+    println!("config self-test: --config FILE forwarded, default stays --no-config");
     temp.close()?;
     Ok(())
 }

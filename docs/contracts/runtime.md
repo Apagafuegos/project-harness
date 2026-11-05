@@ -8,8 +8,8 @@ core and async driver are implemented; see [runtime](../runtime.md) and
 ## Inputs and observations
 
 The engine accepts typed in-process commands for turns, cancellation, approvals,
-head selection, model switching, compaction, context controls, strategy changes
-and execution recovery. There is no separate server or JSON-RPC transport.
+head selection, model switching, compaction, context controls, strategy changes,
+undo preview/undo and execution recovery. There is no separate server or JSON-RPC transport.
 The synchronous core emits effects; the Tokio driver and dedicated storage/tool
 workers own I/O. One commit is in flight; side effects wait for durable intent.
 Tokio drives inference, process supervision, cancellation, and bounded event
@@ -72,5 +72,6 @@ filesystem rollback or a guarantee that remote computation/billing stopped.
 No automatic inference retry, parallel tool execution, workspace switching,
 subagents or remote client protocol is implemented. Persistence or unconfirmed
 process cleanup keeps the session blocked, never silently idle. The
-[audit](../security/v0.1-audit.md) records host cleanup/resource limits and the
-clients' remembered-grant continuation refusal.
+[audit](../security/v0.1-audit.md) records host cleanup/resource limits; a
+remembered-grant continuation is refused by `ask` with a specific code and
+resumed by the TUI that recorded it.

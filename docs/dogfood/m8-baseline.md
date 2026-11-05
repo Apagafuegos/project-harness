@@ -4,7 +4,9 @@ Measured v0.1.0 at `73e687b` on 2026-11-04 with the driver in this commit. One
 run per task per provider, no retries. Raw journals, artifacts, transcripts and
 scratch workspaces were deleted after the metrics and the friction notes were
 extracted; only the sanitized files under
-[`docs/dogfood/baseline/`](baseline/) are committed.
+[`docs/dogfood/baseline/`](baseline/) are committed. The m8-06 rerun with the
+M8 tools and a user configuration is compared in
+[m8-rerun.md](m8-rerun.md).
 
 **The DeepSeek half is not measured.** The supplied key's secret file had been
 deleted and `DEEPSEEK_API_KEY` was absent, so those five cells are `not_run` /

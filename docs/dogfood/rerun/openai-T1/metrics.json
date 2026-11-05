@@ -1,0 +1,117 @@
+{
+  "approval_classes": {
+    "other": {
+      "prompts": 0,
+      "requests": 0
+    },
+    "read_only": {
+      "auto_approved": 5,
+      "prompts": 0,
+      "requests": 5
+    }
+  },
+  "approval_prompts": 0,
+  "approval_split_consistent": true,
+  "approvals": 0,
+  "approvals_by_tool": {
+    "list": 2,
+    "read": 3
+  },
+  "config": "file",
+  "errors": {},
+  "exit_code": 0,
+  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+  "inferences": 6,
+  "input_tokens": 15396,
+  "model": "gpt-6.1-sol",
+  "model_errors": {},
+  "oracle": {
+    "answer_facts": true,
+    "cargo_exit": null,
+    "changed_files": [],
+    "pass": true,
+    "tests_preserved": true
+  },
+  "output_tokens": 344,
+  "provider": "openai",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": null,
+  "refusals": {},
+  "result_code": "completed",
+  "retry_after_ms": null,
+  "sandbox": {
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
+  },
+  "schema": 2,
+  "status": "run",
+  "task": "T1",
+  "tool_calls": {
+    "list": 2,
+    "read": 3
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 14.403718002140522,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "list"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 12.536307998001575,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "list"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 10.738177999854088,
+      "exit_code": null,
+      "inference": 3,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 8.663166999816895,
+      "exit_code": null,
+      "inference": 4,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 8.267164006829262,
+      "exit_code": null,
+      "inference": 5,
+      "status": "succeeded",
+      "tool": "read"
+    }
+  ],
+  "tool_ms": 54.60853500664234,
+  "tool_time_percent": 0.23417398918034013,
+  "turn_wall_ms": 23319.64160399884,
+  "wall_ms": 23697
+}

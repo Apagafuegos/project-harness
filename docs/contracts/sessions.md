@@ -87,8 +87,9 @@ output captures or Markdown.
 read-only catalog/Markdown/journal exports under shared journal locks and
 irreversible **journal-only** deletion under the exclusive writer lock.
 Journal export verifies the actual copied artifact hashes and lengths and
-refuses existing destinations. An unsuccessful export may leave an empty new
-directory. Text is faithful, not scrubbed; opaque state is omitted from Markdown
+refuses existing destinations. A failed journal export removes the empty
+destination directory it created, and never a pre-existing directory or
+anything it did not create. Text is faithful, not scrubbed; opaque state is omitted from Markdown
 but preserved in journal backups. Private storage is not encryption.
 
 Explicit artifact GC validates every journal, refuses the whole run if any

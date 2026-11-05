@@ -1,0 +1,20 @@
+tool: list {"path":"."}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: list {"path":"src"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"max_bytes":10000,"offset_bytes":0,"path":"src/ledger.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"max_bytes":10000,"offset_bytes":0,"path":"src/display.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"max_bytes":10000,"offset_bytes":0,"path":"src/lib.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+- **Movements:** `Ledger` stores a `Vec<Movement>` in insertion order, without sorting or aggregation, including zero-quantity movements. Each movement has an item `String`, day `u32`, and quantity `i64` (`src/ledger.rs`).
+- **Balances:** Aggregated into `BTreeMap<String, i64>`, ordered lexicographically by item name. Zero balances remain present, including when movements cancel out.
+- **Rendering:** Public `display::render_balance(&BTreeMap<String, i64>) -> String` emits sorted `item: quantity\n` rows, including zeros. An empty map renders as `""`. The crate-level `summary(&Ledger)` wraps this.
+- **Parsing:** `display::parse_balance` trims whitespace, skips blank/whitespace-only lines, and **adds duplicate item quantities** rather than replacing them; zero totals survive. Missing `:`, empty item names, or invalid `i64` quantities return the original **1-based line number** as an error (`src/display.rs`).
+turn: completed

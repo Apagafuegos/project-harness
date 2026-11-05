@@ -129,8 +129,13 @@ cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
-CARGO_NET_OFFLINE = "true"
 ```
+
+`[sandbox.env]` refuses credential-shaped names and every name the harness owns,
+including **all `CARGO_*` names** (the backend sets `CARGO_HOME` itself). Pass
+`cargo test --offline` instead of setting `CARGO_NET_OFFLINE`; the sandbox denies
+network regardless. Earlier examples in this repository showed
+`CARGO_NET_OFFLINE` here; that key is refused at config load (m8-06 correction).
 
 Each toolchain mount is a read-only bind at the same absolute path; a configured
 `cargo_registry` is a read-only bind at `$CARGO_HOME/registry`, so cargo finds

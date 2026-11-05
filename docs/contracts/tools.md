@@ -83,9 +83,12 @@ File calls have 30-second deadlines. Output is bounded to 32 KiB inline and
 
 Opaque `AuthorizedOperation` values bind the canonical plan, invocation,
 decision and policy revision; model JSON cannot manufacture them. Remembered
-grants are narrow configuration allowances, never a sandbox bypass. The clients
-refuse continuation with changed allowances (including remembered grants); see
-[the guide](../user-guide.md#continue-and-recorded-instructions). Execution restrictions
+grants are narrow configuration allowances, never a sandbox bypass. `ask` never
+inherits them and refuses a continuation with a specific
+`session_has_remembered_grants` code; the TUI, which recorded them, resumes
+exactly the recorded allowances, and any other changed allowance is still
+refused; see [the guide](../user-guide.md#continue-and-recorded-instructions).
+Execution restrictions
 are owned by [contract 3](execution-security.md); persistence is owned by
 [contract 4](sessions.md). T01–T02 and S01–S02 are mapped to behavioral tests in
 [Milestone 3 acceptance](../milestone-3-acceptance.md):

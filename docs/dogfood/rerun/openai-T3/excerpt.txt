@@ -1,0 +1,38 @@
+tool: read {"max_bytes":20000,"offset_bytes":0,"path":"src/ledger.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"max_bytes":20000,"offset_bytes":0,"path":"src/lib.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+I’ll add both APIs and tests for repeated movements, negative quantities, exact item matching, and missing items. I’ll leave the cutoff code and existing tests unchanged, then run `cargo test --offline`.
+
+tool: edit {"new_text":"    /// Current stock for exactly `item`, or zero if it has no movements.\n    pub fn balance_for(&self, item: &str) -> i64 {\n        self.movements\n            .iter()\n            .filter(|movement| movement.item == item)\n            .map(|movement| movement.quantity)\n            .sum()\n    }\n\n   …
+tool: edit {"new_text":"    /// Current stock for exactly `item`, or zero if it has no movements.\n    pub fn balance_for(&self, item: &str) -> i64 {\n        self.movements\n            .iter()\n            .filter(|movement| movement.item == item)\n            .map(|movement| movement.quantity)\n            .sum()\n    }\n\n   …
+...
+approve? [y/N] y
+tool result: Succeeded succeeded
+tool: edit {"new_text":"/// A single-item summary, including a zero balance for a missing item.\npub fn summary_for(ledger: &Ledger, item: &str) -> String {\n    format!(\"{}: {}\\n\", item, ledger.balance_for(item))\n}\n\n/// A summary at the end of a day, using the ledger's inclusive cutoff API.","old_text":"/// A summary at th…
+tool: edit {"new_text":"/// A single-item summary, including a zero balance for a missing item.\npub fn summary_for(ledger: &Ledger, item: &str) -> String {\n    format!(\"{}: {}\\n\", item, ledger.balance_for(item))\n}\n\n/// A summary at the end of a day, using the ledger's inclusive cutoff API.","old_text":"/// A summary at th…
+approve? [y/N] y
+tool result: Succeeded succeeded
+tool: edit {"new_text":"    #[test]\n    fn single_item_summary_sums_only_exact_item_movements() {\n        let mut ledger = Ledger::new();\n        ledger.record(\"pear\", 9, 3);\n        ledger.record(\"pear\", 1, 2);\n        ledger.record(\"pear\", 4, -8);\n        ledger.record(\"pears\", 2, 100);\n        ledger.record(\"Pe…
+tool: edit {"new_text":"    #[test]\n    fn single_item_summary_sums_only_exact_item_movements() {\n        let mut ledger = Ledger::new();\n        ledger.record(\"pear\", 9, 3);\n        ledger.record(\"pear\", 1, 2);\n        ledger.record(\"pear\", 4, -8);\n        ledger.record(\"pears\", 2, 100);\n        ledger.record(\"Pe…
+approve? [y/N] y
+tool result: Succeeded succeeded
+tool: bash {"command":"cargo test --offline","cwd":".","timeout_ms":120000}
+tool: bash {"command":"cargo test --offline","cwd":".","timeout_ms":120000}
+sandbox: network denied; private per-command caches
+toolchain (read-only): <toolchain>
+sandbox PATH: <toolchain>/bin:/usr/bin:/bin
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+tool result: Failed nonzero_exit
+Implemented:
+- `Ledger::balance_for(&self, item: &str) -> i64`: sums movements matching the item exactly; returns `0` when missing.
+- Public `summary_for(ledger: &Ledger, item: &str) -> String`: returns exactly `"item: quantity\n"`, including for missing items.
+- Unit tests in both files covering repeated movements, negative quantities, exact matching, and missing items.
+
+Ran `cargo test --offline`: **19 passed, 1 failed**. All new tests passed. The sole failure is the seeded `ledger::tests::balance_includes_cutoff` failure (actual `2`, expected `5`).
+
+The cutoff bug and all existing tests were left unchanged.
+turn: completed

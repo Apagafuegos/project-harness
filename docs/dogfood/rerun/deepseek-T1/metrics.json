@@ -1,0 +1,48 @@
+{
+  "approval_classes": {
+    "other": {
+      "prompts": 0,
+      "requests": 0
+    },
+    "read_only": {
+      "auto_approved": 0,
+      "prompts": 0,
+      "requests": 0
+    }
+  },
+  "approval_prompts": 0,
+  "approval_split_consistent": true,
+  "approvals": 0,
+  "approvals_by_tool": {},
+  "config": "file",
+  "errors": {},
+  "exit_code": null,
+  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+  "inferences": 0,
+  "input_tokens": null,
+  "model": "deepseek-flash",
+  "model_errors": {},
+  "oracle": null,
+  "output_tokens": null,
+  "provider": "deepseek",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": "key_unavailable",
+  "refusals": {},
+  "result_code": null,
+  "retry_after_ms": null,
+  "sandbox": {
+    "configured": false
+  },
+  "schema": 2,
+  "status": "not_run",
+  "task": "T1",
+  "tool_calls": {},
+  "tool_facts": [],
+  "tool_ms": 0.0,
+  "tool_time_percent": null,
+  "turn_wall_ms": null,
+  "wall_ms": null
+}

@@ -36,8 +36,13 @@ cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
-CARGO_NET_OFFLINE = "true"
 ```
+
+`CARGO_*` is refused precisely because the backend owns `CARGO_HOME`; the
+network is denied anyway, so a project's tests are run with
+`cargo test --offline` rather than an environment variable. (Earlier revisions
+of this ADR's examples also listed `CARGO_NET_OFFLINE = "true"`; that key is
+refused at config load — see the amendment below.)
 
 - `toolchain_paths`: duplicates are refused; a relative path, a trailing slash
   that is not `/`, `.`/`..` components, or a non-normalized spelling is refused
@@ -215,6 +220,25 @@ so a mask can never be covered again by a later mount. Toolchain roots are
 sorted by component count, then the registry bind follows (its destination is
 already created by the private `CARGO_HOME` directory).
 
+## Amendment (m8-06): the `CARGO_NET_OFFLINE` example was never loadable
+
+Found while configuring the m8-06 rerun. This ADR's schema example, its host
+recipe, `docs/tools.md` and `docs/development.md` all showed
+`[sandbox.env] CARGO_NET_OFFLINE = "true"`, but `ToolchainSettings::validate`
+refuses every `CARGO_*` name because the backend itself sets `CARGO_HOME` — the
+rule stated in the configuration section above and covered by
+`sandbox_env_names_are_refused_without_values`. Loading that example failed:
+
+```text
+error: config_invalid: …: sandbox: sandbox.env.CARGO_NET_OFFLINE: refused environment key or invalid string
+```
+
+The validation is correct and unchanged: `CARGO_*` must stay the harness's, and
+the rerun config used `RUSTUP_TOOLCHAIN` only. The **examples** were wrong and
+are corrected here and in the two documents above; a project's tests are run as
+`cargo test --offline`, with the sandbox's network denial making the variable
+unnecessary. No behaviour, schema or test changed.
+
 ## The Rust recipe for this host
 
 Tested on Ubuntu ARM64, Bubblewrap 0.11.1, rustup toolchain
@@ -228,7 +252,6 @@ cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
-CARGO_NET_OFFLINE = "true"
 ```
 
 Then, with no preparation step:

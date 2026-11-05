@@ -10,11 +10,14 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: v0.1.0 released; Milestones 1–7 implemented within their recorded
-scope.** The prebuilt Linux x86_64/aarch64 musl archives are on the
-[v0.1.0 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0).
-Start with the [user guide](docs/user-guide.md) for installation,
-authentication, configuration, TUI keys and maintenance. [M7
+**Status: v0.2.0 source, Milestones 1–8 implemented within their recorded
+scope; `v0.1.0` is the latest published release.** The v0.2.0 tag and prebuilt
+Linux x86_64/aarch64 musl archives are produced by the orchestrator after
+acceptance, so no v0.2.0 asset is claimed yet; the published
+[v0.1.0 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
+remains available. Start with the [user guide](docs/user-guide.md) for
+installation, authentication, configuration, TUI keys and maintenance. [M8
+acceptance](docs/milestone-8-acceptance.md), [M7
 acceptance](docs/milestone-7-acceptance.md) and the [security
 audit](docs/security/v0.1-audit.md) distinguish evidence from remaining limits.
 
@@ -54,7 +57,12 @@ the strategies. Validation is offline after provisioning; live checks are
 separate. M7 adds strict user TOML defaults, recorded user/nested instructions,
 projection-only ConvertSupported switching, session export/journal-only deletion
 and delayed artifact GC, richer TUI UX/GFM/highlighting and a dual-target release
-pipeline with dependency notices and a mandatory guide. Codex and DeepSeek live
+pipeline with dependency notices and a mandatory guide. M8 makes it a daily
+driver: trusted read-only `list`/`glob`/`grep` search tools, all-or-nothing undo
+of an agent turn's trusted file edits (record version 4), opt-in read-only
+project toolchains in the bash sandbox through a user `[sandbox]` table, and
+opt-in read-only auto-approval in both clients, plus the friction fixes from the
+first live dogfood measurement. Codex and DeepSeek live
 TUI answer/terminal-restoration smokes passed (M7-01); a live coding/tool workflow
 is not claimed. Anthropic live compatibility and live cross-provider switching
 remain partial because no Anthropic key was supplied.
@@ -113,7 +121,9 @@ Anthropic-compatible endpoint. New sessions record `observation_masking` as
 their compaction strategy (`--compaction-strategy` overrides it; a continuation
 keeps its recorded strategy; naming a different one through continuation flags
 or config is refused). Press Ctrl-K in the TUI for the context inspector, `p`/`x`
-in the branch tree (Ctrl-T) to pin or exclude a turn, and Ctrl-D to quit.
+in the branch tree (Ctrl-T) to pin or exclude a turn, Ctrl-Z to preview an undo
+of the newest agent turn's file edits, and Ctrl-D to quit. `harness sessions undo
+SESSION_ID --yes` is the same undo without the dialog.
 
 ## Repository
 
@@ -158,7 +168,13 @@ evaluation harness and the chosen default; [context
 experiments](docs/context-experiments.md) records the two bounded live matrices
 and their limits. [M7 acceptance](docs/milestone-7-acceptance.md) covers
 configuration, instructions, conversion, maintenance, TUI polish, release tooling
-and the accepted audit. See ADRs [0028](docs/decisions/0028-user-config.md),
+and the accepted audit. [M8 acceptance](docs/milestone-8-acceptance.md) covers
+the search tools, undo, sandbox toolchains, read-only auto-approval, the dogfood
+baseline and rerun, and the v0.2.0 readiness record. See ADRs
+[0031](docs/decisions/0031-search-and-navigation-tools.md),
+[0032](docs/decisions/0032-undo-agent-edits.md),
+[0033](docs/decisions/0033-sandbox-toolchains.md),
+[0028](docs/decisions/0028-user-config.md),
 [0029](docs/decisions/0029-release-pipeline.md),
 [0030](docs/decisions/0030-session-export-deletion-and-gc.md) and the
 [roadmap](docs/roadmap.md).

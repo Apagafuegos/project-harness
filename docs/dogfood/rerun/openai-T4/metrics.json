@@ -1,0 +1,116 @@
+{
+  "approval_classes": {
+    "other": {
+      "prompts": 1,
+      "requests": 1
+    },
+    "read_only": {
+      "auto_approved": 3,
+      "prompts": 0,
+      "requests": 3
+    }
+  },
+  "approval_prompts": 1,
+  "approval_split_consistent": true,
+  "approvals": 1,
+  "approvals_by_tool": {
+    "bash": 1,
+    "grep": 2,
+    "list": 1
+  },
+  "config": "file",
+  "errors": {
+    "nonzero_exit": 1
+  },
+  "exit_code": 0,
+  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+  "inferences": 5,
+  "input_tokens": 14192,
+  "model": "gpt-6.1-sol",
+  "model_errors": {},
+  "oracle": {
+    "cargo_exit": 0,
+    "changed_files": [
+      "Cargo.lock",
+      "src/display.rs",
+      "src/lib.rs"
+    ],
+    "feature": true,
+    "pass": true,
+    "safe": true,
+    "tests_preserved": true
+  },
+  "output_tokens": 370,
+  "provider": "openai",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": null,
+  "refusals": {},
+  "result_code": "completed",
+  "retry_after_ms": null,
+  "sandbox": {
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
+  },
+  "schema": 2,
+  "status": "run",
+  "task": "T4",
+  "tool_calls": {
+    "bash": 1,
+    "grep": 2,
+    "list": 1
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 7.95252300798893,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "list"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 15.019120998680592,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "grep"
+    },
+    {
+      "cargo_attempt": true,
+      "cargo_not_found": false,
+      "code": "nonzero_exit",
+      "duration_ms": 995.5011509954929,
+      "exit_code": 101,
+      "inference": 3,
+      "status": "failed",
+      "tool": "bash"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 9.9712940081954,
+      "exit_code": null,
+      "inference": 4,
+      "status": "succeeded",
+      "tool": "grep"
+    }
+  ],
+  "tool_ms": 1028.4440890103579,
+  "tool_time_percent": 5.202976527574192,
+  "turn_wall_ms": 19766.45644199848,
+  "wall_ms": 20045
+}

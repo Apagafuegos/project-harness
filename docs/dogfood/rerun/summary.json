@@ -1,0 +1,876 @@
+{
+  "approval_basis": "requests from journal approval_requested joined to the call; prompts from the client's own approve prompt; auto-approved read-only from the client's auto-approval line, subtracted from the read-only requests",
+  "approvals": {
+    "deepseek": {
+      "auto_approved_read_only": 0,
+      "other_prompts": 0,
+      "prompts": 0,
+      "read_only_prompts": 0,
+      "requests_by_tool": {},
+      "split_consistent": true
+    },
+    "openai": {
+      "auto_approved_read_only": 13,
+      "other_prompts": 9,
+      "prompts": 9,
+      "read_only_prompts": 0,
+      "requests_by_tool": {
+        "bash": 4,
+        "edit": 5,
+        "grep": 3,
+        "list": 4,
+        "read": 6
+      },
+      "split_consistent": true
+    }
+  },
+  "decision_7": {
+    "deepseek": {
+      "eligible_turn_wall_ms": 0.0,
+      "eligible_turns": 0,
+      "meets_threshold": false,
+      "segments": 0,
+      "share_percent": null,
+      "threshold_percent": 10,
+      "tool_ms": 0.0
+    },
+    "openai": {
+      "eligible_turn_wall_ms": 0.0,
+      "eligible_turns": 0,
+      "meets_threshold": false,
+      "segments": 0,
+      "share_percent": null,
+      "threshold_percent": 10,
+      "tool_ms": 0.0
+    }
+  },
+  "decision_7_record_basis": "execution_intent.turn_id call to its tool_result commit, in a turn segment with two or more consecutive read-only calls (read/list/glob/grep) in one model response",
+  "runs": [
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 5,
+          "prompts": 0,
+          "requests": 5
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {
+        "list": 2,
+        "read": 3
+      },
+      "config": "file",
+      "errors": {},
+      "exit_code": 0,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 6,
+      "input_tokens": 15396,
+      "model": "gpt-6.1-sol",
+      "model_errors": {},
+      "oracle": {
+        "answer_facts": true,
+        "cargo_exit": null,
+        "changed_files": [],
+        "pass": true,
+        "tests_preserved": true
+      },
+      "output_tokens": 344,
+      "provider": "openai",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": null,
+      "refusals": {},
+      "result_code": "completed",
+      "retry_after_ms": null,
+      "sandbox": {
+        "cargo_registry": false,
+        "configured": true,
+        "env_keys": [
+          "RUSTUP_TOOLCHAIN"
+        ],
+        "path_prepend_entries": 1,
+        "toolchain_mounts": 1
+      },
+      "schema": 2,
+      "status": "run",
+      "task": "T1",
+      "tool_calls": {
+        "list": 2,
+        "read": 3
+      },
+      "tool_facts": [
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 14.403718002140522,
+          "exit_code": null,
+          "inference": 1,
+          "status": "succeeded",
+          "tool": "list"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 12.536307998001575,
+          "exit_code": null,
+          "inference": 2,
+          "status": "succeeded",
+          "tool": "list"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 10.738177999854088,
+          "exit_code": null,
+          "inference": 3,
+          "status": "succeeded",
+          "tool": "read"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 8.663166999816895,
+          "exit_code": null,
+          "inference": 4,
+          "status": "succeeded",
+          "tool": "read"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 8.267164006829262,
+          "exit_code": null,
+          "inference": 5,
+          "status": "succeeded",
+          "tool": "read"
+        }
+      ],
+      "tool_ms": 54.60853500664234,
+      "tool_time_percent": 0.23417398918034013,
+      "turn_wall_ms": 23319.64160399884,
+      "wall_ms": 23697
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 2,
+          "requests": 2
+        },
+        "read_only": {
+          "auto_approved": 2,
+          "prompts": 0,
+          "requests": 2
+        }
+      },
+      "approval_prompts": 2,
+      "approval_split_consistent": true,
+      "approvals": 2,
+      "approvals_by_tool": {
+        "bash": 1,
+        "edit": 1,
+        "grep": 1,
+        "list": 1
+      },
+      "config": "file",
+      "errors": {},
+      "exit_code": 0,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 5,
+      "input_tokens": 11456,
+      "model": "gpt-6.1-sol",
+      "model_errors": {},
+      "oracle": {
+        "cargo_exit": 0,
+        "changed_files": [
+          "Cargo.lock",
+          "src/ledger.rs"
+        ],
+        "feature": true,
+        "pass": true,
+        "safe": true,
+        "tests_preserved": true
+      },
+      "output_tokens": 273,
+      "provider": "openai",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": null,
+      "refusals": {},
+      "result_code": "completed",
+      "retry_after_ms": null,
+      "sandbox": {
+        "cargo_registry": false,
+        "configured": true,
+        "env_keys": [
+          "RUSTUP_TOOLCHAIN"
+        ],
+        "path_prepend_entries": 1,
+        "toolchain_mounts": 1
+      },
+      "schema": 2,
+      "status": "run",
+      "task": "T2",
+      "tool_calls": {
+        "bash": 1,
+        "edit": 1,
+        "grep": 1,
+        "list": 1
+      },
+      "tool_facts": [
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 12.23598600178957,
+          "exit_code": null,
+          "inference": 1,
+          "status": "succeeded",
+          "tool": "list"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 12.603789001703262,
+          "exit_code": null,
+          "inference": 2,
+          "status": "succeeded",
+          "tool": "grep"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 17.911816991865635,
+          "exit_code": null,
+          "inference": 3,
+          "status": "succeeded",
+          "tool": "edit"
+        },
+        {
+          "cargo_attempt": true,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 1224.8114330023527,
+          "exit_code": 0,
+          "inference": 4,
+          "status": "succeeded",
+          "tool": "bash"
+        }
+      ],
+      "tool_ms": 1267.5630249977112,
+      "tool_time_percent": 5.970740088809005,
+      "turn_wall_ms": 21229.579686000943,
+      "wall_ms": 21687
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 5,
+          "requests": 5
+        },
+        "read_only": {
+          "auto_approved": 2,
+          "prompts": 0,
+          "requests": 2
+        }
+      },
+      "approval_prompts": 5,
+      "approval_split_consistent": true,
+      "approvals": 5,
+      "approvals_by_tool": {
+        "bash": 1,
+        "edit": 4,
+        "read": 2
+      },
+      "config": "file",
+      "errors": {
+        "nonzero_exit": 1
+      },
+      "exit_code": 0,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 8,
+      "input_tokens": 27743,
+      "model": "gpt-6.1-sol",
+      "model_errors": {},
+      "oracle": {
+        "cargo_exit": 0,
+        "changed_files": [
+          "Cargo.lock",
+          "src/ledger.rs",
+          "src/lib.rs"
+        ],
+        "feature": true,
+        "pass": true,
+        "safe": true,
+        "tests_preserved": true
+      },
+      "output_tokens": 1051,
+      "provider": "openai",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": null,
+      "refusals": {},
+      "result_code": "completed",
+      "retry_after_ms": null,
+      "sandbox": {
+        "cargo_registry": false,
+        "configured": true,
+        "env_keys": [
+          "RUSTUP_TOOLCHAIN"
+        ],
+        "path_prepend_entries": 1,
+        "toolchain_mounts": 1
+      },
+      "schema": 2,
+      "status": "run",
+      "task": "T3",
+      "tool_calls": {
+        "bash": 1,
+        "edit": 4,
+        "read": 2
+      },
+      "tool_facts": [
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 13.180271998047829,
+          "exit_code": null,
+          "inference": 1,
+          "status": "succeeded",
+          "tool": "read"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 8.511927001178265,
+          "exit_code": null,
+          "inference": 2,
+          "status": "succeeded",
+          "tool": "read"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 12.749669007956982,
+          "exit_code": null,
+          "inference": 3,
+          "status": "succeeded",
+          "tool": "edit"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 14.98556099832058,
+          "exit_code": null,
+          "inference": 4,
+          "status": "succeeded",
+          "tool": "edit"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 11.62126199901104,
+          "exit_code": null,
+          "inference": 5,
+          "status": "succeeded",
+          "tool": "edit"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 20.18954899907112,
+          "exit_code": null,
+          "inference": 6,
+          "status": "succeeded",
+          "tool": "edit"
+        },
+        {
+          "cargo_attempt": true,
+          "cargo_not_found": false,
+          "code": "nonzero_exit",
+          "duration_ms": 806.920849993825,
+          "exit_code": 101,
+          "inference": 7,
+          "status": "failed",
+          "tool": "bash"
+        }
+      ],
+      "tool_ms": 888.1590899974108,
+      "tool_time_percent": 1.397088675054876,
+      "turn_wall_ms": 63572.13438599557,
+      "wall_ms": 63867
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 1,
+          "requests": 1
+        },
+        "read_only": {
+          "auto_approved": 3,
+          "prompts": 0,
+          "requests": 3
+        }
+      },
+      "approval_prompts": 1,
+      "approval_split_consistent": true,
+      "approvals": 1,
+      "approvals_by_tool": {
+        "bash": 1,
+        "grep": 2,
+        "list": 1
+      },
+      "config": "file",
+      "errors": {
+        "nonzero_exit": 1
+      },
+      "exit_code": 0,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 5,
+      "input_tokens": 14192,
+      "model": "gpt-6.1-sol",
+      "model_errors": {},
+      "oracle": {
+        "cargo_exit": 0,
+        "changed_files": [
+          "Cargo.lock",
+          "src/display.rs",
+          "src/lib.rs"
+        ],
+        "feature": true,
+        "pass": true,
+        "safe": true,
+        "tests_preserved": true
+      },
+      "output_tokens": 370,
+      "provider": "openai",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": null,
+      "refusals": {},
+      "result_code": "completed",
+      "retry_after_ms": null,
+      "sandbox": {
+        "cargo_registry": false,
+        "configured": true,
+        "env_keys": [
+          "RUSTUP_TOOLCHAIN"
+        ],
+        "path_prepend_entries": 1,
+        "toolchain_mounts": 1
+      },
+      "schema": 2,
+      "status": "run",
+      "task": "T4",
+      "tool_calls": {
+        "bash": 1,
+        "grep": 2,
+        "list": 1
+      },
+      "tool_facts": [
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 7.95252300798893,
+          "exit_code": null,
+          "inference": 1,
+          "status": "succeeded",
+          "tool": "list"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 15.019120998680592,
+          "exit_code": null,
+          "inference": 2,
+          "status": "succeeded",
+          "tool": "grep"
+        },
+        {
+          "cargo_attempt": true,
+          "cargo_not_found": false,
+          "code": "nonzero_exit",
+          "duration_ms": 995.5011509954929,
+          "exit_code": 101,
+          "inference": 3,
+          "status": "failed",
+          "tool": "bash"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 9.9712940081954,
+          "exit_code": null,
+          "inference": 4,
+          "status": "succeeded",
+          "tool": "grep"
+        }
+      ],
+      "tool_ms": 1028.4440890103579,
+      "tool_time_percent": 5.202976527574192,
+      "turn_wall_ms": 19766.45644199848,
+      "wall_ms": 20045
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 1,
+          "requests": 1
+        },
+        "read_only": {
+          "auto_approved": 1,
+          "prompts": 0,
+          "requests": 1
+        }
+      },
+      "approval_prompts": 1,
+      "approval_split_consistent": true,
+      "approvals": 1,
+      "approvals_by_tool": {
+        "bash": 1,
+        "read": 1
+      },
+      "config": "file",
+      "errors": {
+        "nonzero_exit": 1
+      },
+      "exit_code": 0,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 3,
+      "input_tokens": 6479,
+      "model": "gpt-6.1-sol",
+      "model_errors": {},
+      "oracle": {
+        "answer_facts": true,
+        "cargo_exit": null,
+        "changed_files": [
+          "Cargo.lock"
+        ],
+        "pass": false,
+        "tests_preserved": true
+      },
+      "output_tokens": 207,
+      "provider": "openai",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": null,
+      "refusals": {},
+      "result_code": "completed",
+      "retry_after_ms": null,
+      "sandbox": {
+        "cargo_registry": false,
+        "configured": true,
+        "env_keys": [
+          "RUSTUP_TOOLCHAIN"
+        ],
+        "path_prepend_entries": 1,
+        "toolchain_mounts": 1
+      },
+      "schema": 2,
+      "status": "run",
+      "task": "T5",
+      "tool_calls": {
+        "bash": 1,
+        "read": 1
+      },
+      "tool_facts": [
+        {
+          "cargo_attempt": true,
+          "cargo_not_found": false,
+          "code": "nonzero_exit",
+          "duration_ms": 752.9551969990134,
+          "exit_code": 101,
+          "inference": 1,
+          "status": "failed",
+          "tool": "bash"
+        },
+        {
+          "cargo_attempt": false,
+          "cargo_not_found": false,
+          "code": "none",
+          "duration_ms": 7.8950429931283,
+          "exit_code": null,
+          "inference": 2,
+          "status": "succeeded",
+          "tool": "read"
+        }
+      ],
+      "tool_ms": 760.8502399921417,
+      "tool_time_percent": 3.993126376243284,
+      "turn_wall_ms": 19053.998503997922,
+      "wall_ms": 19354
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 0,
+          "prompts": 0,
+          "requests": 0
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {},
+      "config": "file",
+      "errors": {},
+      "exit_code": null,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 0,
+      "input_tokens": null,
+      "model": "deepseek-flash",
+      "model_errors": {},
+      "oracle": null,
+      "output_tokens": null,
+      "provider": "deepseek",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": "key_unavailable",
+      "refusals": {},
+      "result_code": null,
+      "retry_after_ms": null,
+      "sandbox": {
+        "configured": false
+      },
+      "schema": 2,
+      "status": "not_run",
+      "task": "T1",
+      "tool_calls": {},
+      "tool_facts": [],
+      "tool_ms": 0.0,
+      "tool_time_percent": null,
+      "turn_wall_ms": null,
+      "wall_ms": null
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 0,
+          "prompts": 0,
+          "requests": 0
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {},
+      "config": "file",
+      "errors": {},
+      "exit_code": null,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 0,
+      "input_tokens": null,
+      "model": "deepseek-flash",
+      "model_errors": {},
+      "oracle": null,
+      "output_tokens": null,
+      "provider": "deepseek",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": "key_unavailable",
+      "refusals": {},
+      "result_code": null,
+      "retry_after_ms": null,
+      "sandbox": {
+        "configured": false
+      },
+      "schema": 2,
+      "status": "not_run",
+      "task": "T2",
+      "tool_calls": {},
+      "tool_facts": [],
+      "tool_ms": 0.0,
+      "tool_time_percent": null,
+      "turn_wall_ms": null,
+      "wall_ms": null
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 0,
+          "prompts": 0,
+          "requests": 0
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {},
+      "config": "file",
+      "errors": {},
+      "exit_code": null,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 0,
+      "input_tokens": null,
+      "model": "deepseek-flash",
+      "model_errors": {},
+      "oracle": null,
+      "output_tokens": null,
+      "provider": "deepseek",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": "key_unavailable",
+      "refusals": {},
+      "result_code": null,
+      "retry_after_ms": null,
+      "sandbox": {
+        "configured": false
+      },
+      "schema": 2,
+      "status": "not_run",
+      "task": "T3",
+      "tool_calls": {},
+      "tool_facts": [],
+      "tool_ms": 0.0,
+      "tool_time_percent": null,
+      "turn_wall_ms": null,
+      "wall_ms": null
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 0,
+          "prompts": 0,
+          "requests": 0
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {},
+      "config": "file",
+      "errors": {},
+      "exit_code": null,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 0,
+      "input_tokens": null,
+      "model": "deepseek-flash",
+      "model_errors": {},
+      "oracle": null,
+      "output_tokens": null,
+      "provider": "deepseek",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": "key_unavailable",
+      "refusals": {},
+      "result_code": null,
+      "retry_after_ms": null,
+      "sandbox": {
+        "configured": false
+      },
+      "schema": 2,
+      "status": "not_run",
+      "task": "T4",
+      "tool_calls": {},
+      "tool_facts": [],
+      "tool_ms": 0.0,
+      "tool_time_percent": null,
+      "turn_wall_ms": null,
+      "wall_ms": null
+    },
+    {
+      "approval_classes": {
+        "other": {
+          "prompts": 0,
+          "requests": 0
+        },
+        "read_only": {
+          "auto_approved": 0,
+          "prompts": 0,
+          "requests": 0
+        }
+      },
+      "approval_prompts": 0,
+      "approval_split_consistent": true,
+      "approvals": 0,
+      "approvals_by_tool": {},
+      "config": "file",
+      "errors": {},
+      "exit_code": null,
+      "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+      "inferences": 0,
+      "input_tokens": null,
+      "model": "deepseek-flash",
+      "model_errors": {},
+      "oracle": null,
+      "output_tokens": null,
+      "provider": "deepseek",
+      "provider_code": null,
+      "readonly_segment_tool_ms": 0.0,
+      "readonly_segments": 0,
+      "readonly_segments_detail": [],
+      "reason": "key_unavailable",
+      "refusals": {},
+      "result_code": null,
+      "retry_after_ms": null,
+      "sandbox": {
+        "configured": false
+      },
+      "schema": 2,
+      "status": "not_run",
+      "task": "T5",
+      "tool_calls": {},
+      "tool_facts": [],
+      "tool_ms": 0.0,
+      "tool_time_percent": null,
+      "turn_wall_ms": null,
+      "wall_ms": null
+    }
+  ],
+  "schema": 2
+}

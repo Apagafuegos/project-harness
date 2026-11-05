@@ -1,0 +1,91 @@
+{
+  "approval_classes": {
+    "other": {
+      "prompts": 1,
+      "requests": 1
+    },
+    "read_only": {
+      "auto_approved": 1,
+      "prompts": 0,
+      "requests": 1
+    }
+  },
+  "approval_prompts": 1,
+  "approval_split_consistent": true,
+  "approvals": 1,
+  "approvals_by_tool": {
+    "bash": 1,
+    "read": 1
+  },
+  "config": "file",
+  "errors": {
+    "nonzero_exit": 1
+  },
+  "exit_code": 0,
+  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+  "inferences": 3,
+  "input_tokens": 6479,
+  "model": "gpt-6.1-sol",
+  "model_errors": {},
+  "oracle": {
+    "answer_facts": true,
+    "cargo_exit": null,
+    "changed_files": [
+      "Cargo.lock"
+    ],
+    "pass": false,
+    "tests_preserved": true
+  },
+  "output_tokens": 207,
+  "provider": "openai",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": null,
+  "refusals": {},
+  "result_code": "completed",
+  "retry_after_ms": null,
+  "sandbox": {
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
+  },
+  "schema": 2,
+  "status": "run",
+  "task": "T5",
+  "tool_calls": {
+    "bash": 1,
+    "read": 1
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": true,
+      "cargo_not_found": false,
+      "code": "nonzero_exit",
+      "duration_ms": 752.9551969990134,
+      "exit_code": 101,
+      "inference": 1,
+      "status": "failed",
+      "tool": "bash"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 7.8950429931283,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    }
+  ],
+  "tool_ms": 760.8502399921417,
+  "tool_time_percent": 3.993126376243284,
+  "turn_wall_ms": 19053.998503997922,
+  "wall_ms": 19354
+}

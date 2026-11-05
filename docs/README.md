@@ -1,26 +1,38 @@
 # Documentation
 
-v0.1.0 is released with implemented headless and terminal clients.
-Start with the [user guide](user-guide.md) for installation and daily use.
-A design document alone is not evidence of implementation; acceptance documents
-separate behavioral tests, historical live runs and remaining partials.
+v0.2.0 is the current source version with Milestones 1–8 implemented; `v0.1.0`
+is the latest published release. Start with the [user guide](user-guide.md) for
+installation and daily use. A design document alone is not evidence of
+implementation; acceptance documents separate behavioral tests, historical live
+runs and remaining partials.
 
-Key v0.1 documents:
+Key current documents:
 
 - [User guide](user-guide.md): installing a prebuilt binary, first turn, config,
-  instructions, approvals, keys, sessions, context and maintenance.
-- [M7 acceptance](milestone-7-acceptance.md): decisions 1–17, shipped features,
-  full offline/S02 evidence, release dry runs, audit and pending publication.
+  instructions, approvals, keys, sessions, undo, toolchains, context and
+  maintenance.
+- [M8 acceptance](milestone-8-acceptance.md): decisions 1–16, the daily-driver
+  features, their tests, offline/S02 evidence, the dogfood baseline and rerun,
+  and v0.2.0 readiness with its partials and deferred item.
+- [M7 acceptance](milestone-7-acceptance.md): decisions 1–17, the v0.1 features,
+  full offline/S02 evidence, release dry runs, audit and the release record.
 - [Security audit](security/v0.1-audit.md): accepted findings, fixes and residual risks.
 - [User config](decisions/0028-user-config.md): strict user-only TOML precedence
-  and ask-only approval/startup-switch defaults.
+  and read-only auto-approval scope.
 - [Release pipeline](decisions/0029-release-pipeline.md): public dual-target musl
   archives, dependency notices, mandatory guide and non-publishing dry runs.
 - [Session maintenance](decisions/0030-session-export-deletion-and-gc.md): verified
   exports, journal-only deletion and GC publication/reuse locking.
+- [Search tools](decisions/0031-search-and-navigation-tools.md): trusted
+  in-process `list`/`glob`/`grep`, walk rules, limits and read-only policy.
+- [Undo](decisions/0032-undo-agent-edits.md): turn-scoped, all-or-nothing undo of
+  trusted `write`/`edit` effects and record version 4.
 - [Sandbox toolchains](decisions/0033-sandbox-toolchains.md): opt-in read-only
   toolchain mounts, a fixed sandbox environment, masking and the offline Rust
   recipe.
+- [Dogfood baseline](dogfood/m8-baseline.md) and [rerun](dogfood/m8-rerun.md):
+  the same five tasks on v0.1.0 and on v0.2.0 as a user would configure it, with
+  sanitized per-cell evidence under `docs/dogfood/`.
 
 The full index:
 
@@ -86,6 +98,12 @@ The full index:
   registry, masking and structured state, and the chosen new-session default.
 - [Evaluation harness](decisions/0027-evaluation-harness.md): the dev-only
   offline pipeline, fixed tasks, provenance and opt-in live mode.
+- [Search tools](decisions/0031-search-and-navigation-tools.md): the M8
+  `list`/`glob`/`grep` tools, walk rules, limits and policy.
+- [Undo of agent edits](decisions/0032-undo-agent-edits.md): the M8 undo records,
+  pre-images, surfaces, recovery and record version 4.
+- [Sandbox toolchains](decisions/0033-sandbox-toolchains.md): the M8 `[sandbox]`
+  table, mounts, masking, writable state and the host recipe.
 - [Providers](providers.md): implemented adapters, router, credentials and opt-in checks.
 - [Built-in tools usage](tools.md): implemented file/shell/search backends, host
   assembly and opt-in toolchains.
@@ -122,6 +140,12 @@ The full index:
 - [Milestone 6 acceptance](milestone-6-acceptance.md): pins/exclusions, schema
   v3, strategies, DeepSeek, the offline evaluation harness, the chosen default
   and the live evidence, with partial rows stated.
+- [Milestone 7 acceptance](milestone-7-acceptance.md): configuration,
+  instructions, conversion, maintenance, TUI polish, release tooling, the audit
+  and the published v0.1.0 release record.
+- [Milestone 8 acceptance](milestone-8-acceptance.md): search tools, undo and
+  record version 4, sandbox toolchains, read-only auto-approval, the dogfood
+  baseline and rerun, and the v0.2.0 readiness record with its partials.
 
 ## Document status
 
@@ -152,7 +176,10 @@ M7 implements projection-only conversion (0015 amendment), user TOML (0028),
 user/nested instructions (0022 amendment), TUI UX/GFM/highlighting (0023 Parts
 6–7), public release tooling (0029) and session maintenance (0030). The accepted
 security audit baseline is `5b89aa2f0f3b038b73993d4c1d137da494c6027f`.
-M8 adds search tools (0031) and opt-in read-only sandbox toolchains (0033).
+M8 implements trusted search tools (0031), durable undo of trusted file edits
+and record version 4 (0032), and opt-in read-only sandbox toolchains (0033).
+Workspace version is 0.2.0; the latest published release is `v0.1.0`. A v0.2.0
+binary reads v1–v4 journals and writes v4, which v0.1.0 refuses.
 The public [`v0.1.0` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
 carries both musl archives and their checksums.
 Schema/examples alone are not evidence of implementation.

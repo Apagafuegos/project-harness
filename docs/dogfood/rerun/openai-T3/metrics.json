@@ -1,0 +1,146 @@
+{
+  "approval_classes": {
+    "other": {
+      "prompts": 5,
+      "requests": 5
+    },
+    "read_only": {
+      "auto_approved": 2,
+      "prompts": 0,
+      "requests": 2
+    }
+  },
+  "approval_prompts": 5,
+  "approval_split_consistent": true,
+  "approvals": 5,
+  "approvals_by_tool": {
+    "bash": 1,
+    "edit": 4,
+    "read": 2
+  },
+  "config": "file",
+  "errors": {
+    "nonzero_exit": 1
+  },
+  "exit_code": 0,
+  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
+  "inferences": 8,
+  "input_tokens": 27743,
+  "model": "gpt-6.1-sol",
+  "model_errors": {},
+  "oracle": {
+    "cargo_exit": 0,
+    "changed_files": [
+      "Cargo.lock",
+      "src/ledger.rs",
+      "src/lib.rs"
+    ],
+    "feature": true,
+    "pass": true,
+    "safe": true,
+    "tests_preserved": true
+  },
+  "output_tokens": 1051,
+  "provider": "openai",
+  "provider_code": null,
+  "readonly_segment_tool_ms": 0.0,
+  "readonly_segments": 0,
+  "readonly_segments_detail": [],
+  "reason": null,
+  "refusals": {},
+  "result_code": "completed",
+  "retry_after_ms": null,
+  "sandbox": {
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
+  },
+  "schema": 2,
+  "status": "run",
+  "task": "T3",
+  "tool_calls": {
+    "bash": 1,
+    "edit": 4,
+    "read": 2
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 13.180271998047829,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 8.511927001178265,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 12.749669007956982,
+      "exit_code": null,
+      "inference": 3,
+      "status": "succeeded",
+      "tool": "edit"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 14.98556099832058,
+      "exit_code": null,
+      "inference": 4,
+      "status": "succeeded",
+      "tool": "edit"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 11.62126199901104,
+      "exit_code": null,
+      "inference": 5,
+      "status": "succeeded",
+      "tool": "edit"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 20.18954899907112,
+      "exit_code": null,
+      "inference": 6,
+      "status": "succeeded",
+      "tool": "edit"
+    },
+    {
+      "cargo_attempt": true,
+      "cargo_not_found": false,
+      "code": "nonzero_exit",
+      "duration_ms": 806.920849993825,
+      "exit_code": 101,
+      "inference": 7,
+      "status": "failed",
+      "tool": "bash"
+    }
+  ],
+  "tool_ms": 888.1590899974108,
+  "tool_time_percent": 1.397088675054876,
+  "turn_wall_ms": 63572.13438599557,
+  "wall_ms": 63867
+}

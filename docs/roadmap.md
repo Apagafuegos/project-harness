@@ -5,17 +5,18 @@ headless mock lifecycle with context inspection (Milestone 2), and tools,
 selective security and recovery (Milestone 3), and native providers, rolling
 compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
-bounded experiments (Milestone 6), and v0.1 documentation/release readiness
-(Milestone 7) are implemented within their recorded scope and v0.1.0 is
-released. Anthropic live compatibility and live
+bounded experiments (Milestone 6), v0.1 documentation/release readiness
+(Milestone 7) and the daily-driver features of Milestone 8 are implemented
+within their recorded scope. `v0.1.0` is released; the v0.2.0 release of
+Milestone 8 is pending. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
 M5 quota limit; it does not claim a live coding/tool workflow.
 
-Sections 0–6 describe each milestone's historical scope; later closure is
-linked rather than changing old measurements. See [M7
-acceptance](milestone-7-acceptance.md) and the [user guide](user-guide.md) for
-the current product.
+Sections 0–7 describe each earlier milestone's historical scope; later closure
+is linked rather than changing old measurements. See [M7
+acceptance](milestone-7-acceptance.md), [M8 acceptance](milestone-8-acceptance.md)
+and the [user guide](user-guide.md) for the current product.
 
 ## 0. Foundation and proposed specification — present
 
@@ -253,7 +254,7 @@ relevant C01/C02/RFC 6.1 clauses to gate tests. Known partials/limits:
 - The m6-00 DeepSeek scripted check was initially unrun; M7-01's single passing
   run now covers streaming/tools/usage/thinking replay (M6 Evidence log).
 
-## 7. v0.1 polish and release readiness — implemented, publication pending
+## 7. v0.1 polish and release readiness — released
 
 [M7 acceptance](milestone-7-acceptance.md) maps all goals and decisions 1–17:
 
@@ -279,15 +280,64 @@ relevant C01/C02/RFC 6.1 clauses to gate tests. Known partials/limits:
   required-guide packaging/refusal regression. No runtime or journal-format
   change in step 09.
 
-The two-target release dry run already passed; it is not a tagged release.
-Final exact-head offline/S02 CI is required for this documentation step. Release
-workflow dispatch/tag/asset verification and publication belong to the orchestrator.
+The two-target release dry run passed before tagging, and `v0.1.0` was then
+released: the tag and its [release record](milestone-7-acceptance.md#release-record)
+were published on 2026-11-04, and `CHANGELOG.md` dates the released section
+2026-11-03. Later work does not change that record. Release workflow
+dispatch/tag/asset verification for **v0.2.0** belongs to the orchestrator after
+[M8 acceptance](milestone-8-acceptance.md).
 
-## Outside v0.1
+## 8. Daily-driver agent — implemented, v0.2.0 release pending
+
+M8 makes the harness usable for day-to-day coding work: the agent can find code
+without a process, take back its own file edits, and run a project's tests
+inside the sandbox, and the approval burden that the first measurement exposed
+is reduced without weakening any check.
+
+- **Search and navigation tools** — trusted, in-process, read-only `list`,
+  `glob` and `grep` on the descriptor-rooted workspace, sharing `read`'s policy
+  (`workspace_read`, no allowances, `approve_read_only`), with explicit
+  truncation and gitignore handling ([ADR 0031](decisions/0031-search-and-navigation-tools.md)).
+- **Undo of agent edits** — all-or-nothing undo of one turn's trusted
+  `write`/`edit` effects through Ctrl-Z or `harness sessions undo`, with stored
+  pre-images, a durable intent/result pair, explicit uncertainty and a recorded
+  context note; **record version 4** ([ADR 0032](decisions/0032-undo-agent-edits.md)).
+- **Project toolchains in the bash sandbox** — opt-in, read-only
+  `[sandbox] toolchain_paths`, `path_prepend`, `cargo_registry` and
+  `[sandbox.env]`, a private per-command `CARGO_HOME`, workspace `target/`, and
+  config-load refusals ([ADR 0033](decisions/0033-sandbox-toolchains.md)).
+- **Friction fixes** — TUI `approve_read_only`, the exit-127 note, the no-repeat
+  instruction sentence, stdout ending before diagnostics, the specific
+  remembered-grant refusal with TUI resumption, and cleanup of an empty export
+  directory a failed export created (m8-05, decisions 12 and 16).
+- **Measurement** — the [m8-01 baseline](dogfood/m8-baseline.md) and the
+  [m8-06 rerun](dogfood/m8-rerun.md) with the same fixture, tasks, oracles and
+  providers, and the sanitized evidence under `docs/dogfood/`.
+
+[M8 acceptance](milestone-8-acceptance.md) maps every goal and decisions 1–16
+to the implementation, its tests and recorded evidence. Partial or deferred:
+
+- Anthropic live compatibility and live cross-provider switching stay partial
+  (no Anthropic key was supplied in M8 either).
+- The DeepSeek half of the dogfood measurement is `not_run` /
+  `key_unavailable`, so no cross-provider comparison exists.
+- **m8-04 (parallel read-only tools) is deferred**, by decision 11 and again by
+  the rerun: decision 7's measure is **0%** against the 10% threshold in both
+  measurements (baseline: no turn had two or more consecutive read-only calls;
+  rerun: 13 read-only calls, but never two in one model response, and total tool
+  time 2.72% of turn wall time). Sequential tool execution and the
+  one-unresolved-intent storage rule stay. The revisit condition (share at or
+  above 10%) is not met, so it is not a post-v0.2.0 candidate on this evidence.
+- Undo covers trusted `write`/`edit` effects only; a mutation performed through
+  `bash` (seen in the rerun, F07) is reported as not reversible.
+
+## Outside v0.2
 
 Subagents, MCP client, plugin runtime, semantic memory, remote workspaces,
-multi-agent orchestration, separate server/JSON-RPC, and filesystem checkpoints.
+multi-agent orchestration, separate server/JSON-RPC, and filesystem checkpoints
+remain explicitly **planned but not implemented** — none of them is in M8.
 Restricted subprocess networking also needs an actual constrained-egress backend
-before the proposed deny-network-only implementation can grant exceptions.
+before the proposed deny-network-only implementation can grant exceptions. A
+parallel read-only tool executor (m8-04) is deferred, not planned for v0.2.
 No automatic retention, workspace switching or credential UI is provided.
 Licensing is settled and effective: MIT OR Apache-2.0.

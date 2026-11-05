@@ -836,8 +836,11 @@ cargo_registry = "/home/you/.cargo/registry"
 
 [sandbox.env]
 RUSTUP_TOOLCHAIN = "1.99.1"
-CARGO_NET_OFFLINE = "true"
 ```
+
+`[sandbox.env]` refuses every `CARGO_*` name because the backend owns
+`CARGO_HOME`; pass `cargo test --offline` instead of setting
+`CARGO_NET_OFFLINE`, which is refused at config load. Network is denied anyway.
 
 Mount the toolchain's own `bin` (real binaries) rather than `~/.cargo/bin`
 (rustup proxy shims), and give the offline registry as `cargo_registry` rather
@@ -1163,15 +1166,30 @@ environment; without it those cells are recorded `not_run` and the script exits
 77. OpenAI uses the read-only Codex login.
 
 ```sh
-# every task on both providers, one run each, no retries
+# every task on both providers, one run each, no retries, baseline method
 scripts/dogfood.sh --provider all --task all --out docs/dogfood/baseline
 
 # one task on one provider
 scripts/dogfood.sh --provider openai --task T3 --out /tmp/dogfood-T3
+
+# measure a user's own TOML (decision 15): approve_read_only and [sandbox]
+scripts/dogfood.sh --provider openai --task all --out /tmp/dogfood-T15 \
+  --config /absolute/private/defaults.toml
 ```
 
+Without `--config` the driver passes `--no-config`, so the original method still
+reproduces. With `--config FILE` it passes `harness --config FILE ask …`; the
+file is the user's own, must never be committed, and no value from it belongs in
+evidence except key names and sanitized mount counts. `--self-test` proves the
+forwarding offline with a stand-in binary that prints its argv.
+
 Each cell writes `metrics.json` and a sanitized `excerpt.txt`; the run writes
-`summary.json` with the per-provider decision-7 share. Optional oracles inspect
+`summary.json` with the per-provider decision-7 share and approval totals.
+Metrics record approval requests by tool, the human prompts answered, the
+read-only/other split and the auto-approved read-only count: requests come from
+the journal's `approval_requested` events, the auto-approval count from the
+client's own transcript line, and the split is checked to reconstruct the prompts
+exactly (`split_consistent`). Optional oracles inspect
 the result on the host: file diffs against the pristine fixture, a
 `cargo test --offline` of the copy, and answer greps. That host `Command` use is
 intentional and confined to this opt-in script; the harness itself still runs
@@ -1186,8 +1204,10 @@ scripts/dogfood.sh --self-test
 That proves each oracle fails on the pristine fixture, passes on the committed
 reference patch and answer under `crates/eval/dogfood/reference/`, and that
 `T1`/`T5` also fail if any file changed. It additionally builds one real journal
-through the runtime and checks the metric extraction against it. It runs host
-`cargo` on the fixture, so it stays out of `check.sh`.
+through the runtime and checks the metric extraction against it, proves
+`--config FILE` is forwarded (and the default still sends `--no-config`), and
+proves the spawned PTY really exposes `/dev/tty`. It runs host `cargo` on the
+fixture, so it stays out of `check.sh`.
 
 ## Specification artifacts
 

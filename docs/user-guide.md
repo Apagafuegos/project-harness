@@ -1,4 +1,4 @@
-# User guide — v0.1
+# User guide — v0.2
 
 A Linux coding-agent harness with a terminal client and a scriptable `ask`
 command. Session history is append-only; model context is a separate projection.
@@ -6,25 +6,26 @@ Branching and compaction never undo workspace changes.
 
 ## Install a prebuilt binary
 
-The repository is public and licensed `MIT OR Apache-2.0`. v0.1.0 assets are
-built and published from the `v0.1.0` tag; see the
+The repository is public and licensed `MIT OR Apache-2.0`. v0.2.0 assets are
+built and published from the `v0.2.0` tag by the release workflow; see the
 [GitHub Release](https://github.com/Apagafuegos/project-harness/releases). A
-missing archive means that release run is still in progress. No Rust toolchain
-is needed to run a prebuilt binary.
+missing archive means that release run has not finished yet — `v0.1.0` is the
+latest published release as this guide is written. No Rust toolchain is needed
+to run a prebuilt binary.
 
 Choose `x86_64-unknown-linux-musl` for Linux x86_64 (`uname -m`: `x86_64`), or
 `aarch64-unknown-linux-musl` for Linux ARM64 (`aarch64`). Download the matching
-`harness-0.1.0-TARGET.tar.gz` and `SHA256SUMS` from the **same release**. In the
+`harness-0.2.0-TARGET.tar.gz` and `SHA256SUMS` from the **same release**. In the
 download directory, for example on ARM64:
 
 ```sh
-grep '  harness-0.1.0-aarch64-unknown-linux-musl.tar.gz$' SHA256SUMS > selected.sha256
+grep '  harness-0.2.0-aarch64-unknown-linux-musl.tar.gz$' SHA256SUMS > selected.sha256
 test -s selected.sha256
 sha256sum -c selected.sha256
-tar -tzf harness-0.1.0-aarch64-unknown-linux-musl.tar.gz
-tar -xzf harness-0.1.0-aarch64-unknown-linux-musl.tar.gz
+tar -tzf harness-0.2.0-aarch64-unknown-linux-musl.tar.gz
+tar -xzf harness-0.2.0-aarch64-unknown-linux-musl.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 755 harness-0.1.0-aarch64-unknown-linux-musl/harness "$HOME/.local/bin/harness"
+install -m 755 harness-0.2.0-aarch64-unknown-linux-musl/harness "$HOME/.local/bin/harness"
 export PATH="$HOME/.local/bin:$PATH"
 harness --version
 harness --help
@@ -86,7 +87,8 @@ Do **not** supply `--auth` for Anthropic/DeepSeek. Defaults are `gpt-6.1-sol`
 (Codex), `gpt-5.5` (OpenAI API key), `claude-sonnet-5-5` and `deepseek-flash`.
 `--model MODEL` overrides the choice. Provider availability depends on your
 account. Anthropic live compatibility and live cross-provider switching remain
-partial in v0.1 evidence; offline fixtures are not live proof.
+partial (no Anthropic key was supplied for v0.2 either); offline fixtures are
+not live proof.
 
 Do not put credentials in TOML, AGENTS.md, prompts, command examples or exports.
 Harness does not load `.env` files and has no credential UI. Provider diagnostic
@@ -166,6 +168,57 @@ An absent default file is normal. An explicit missing file, unknown key, wrong
 type, unreadable/non-UTF-8 file or file over 64 KiB exits 2. Credential-like keys
 are specifically refused without echoing their values. `--no-config` ignores
 TOML, including its errors; it does not disable user instructions.
+
+### Project toolchains in the bash sandbox
+
+By default the bash sandbox binds only system paths, with `PATH=/usr/bin:/bin`,
+so a rustup toolchain or another project toolchain outside `/usr` is
+unreachable and `cargo test` fails with exit 127. A `[sandbox]` table in the
+**user** TOML only (never a project config) adds opt-in, read-only mounts:
+
+```toml
+[sandbox]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu"]
+path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+cargo_registry = "/home/you/.cargo/registry"
+
+[sandbox.env]
+RUSTUP_TOOLCHAIN = "1.99.1"
+```
+
+With no table, the sandbox is exactly v0.1's. Each `toolchain_paths` entry is a
+read-only bind at the same absolute path; `path_prepend` entries come before
+`/usr/bin:/bin` and must resolve inside a mounted toolchain or `/usr`;
+`cargo_registry` is bound read-only at `$CARGO_HOME/registry`. Nothing is ever
+writable, and nothing is discovered automatically. Mount the toolchain's own
+`bin` (the real `cargo`/`rustc`), not `~/.cargo/bin` (rustup proxy shims that
+need the rest of your home), and give the registry as `cargo_registry` rather
+than mounting `~/.cargo`, so no credential file is inside a mount.
+
+`[sandbox.env]` accepts ordinary names; it refuses credential-shaped names and
+names the harness owns, including **all `CARGO_*` names** (the harness sets
+`CARGO_HOME` to a private per-command directory). Pass `cargo test --offline`
+instead of setting `CARGO_NET_OFFLINE`; the sandbox denies network anyway.
+
+Every mount and prepend is checked when the config loads, and a refusal exits 2
+naming the path: `/`, `$HOME` or any of its ancestors, the workspace, the data
+root, anything inside either, the harness config directory, `~/.ssh`, `~/.gnupg`,
+`~/.codex`, `~/.aws`, `~/.config`, the sandbox's own private mounts, and a
+missing or non-directory value. A changed `[sandbox]` configuration is a policy
+change, so continuing a session with one is refused with
+`session_policy_mismatch`; re-run with the recorded settings.
+
+Present credential leaves inside a mount (`credentials`, `credentials.toml`,
+`.git-credentials`) are masked. An absent one cannot be created from inside the
+read-only mount. `harness doctor` shows each mount, its existence and
+readability, its credential-mask statuses, the prepends and the environment
+**key names only**; the bash approval preview shows the same scope. Build output
+is not redirected: cargo writes the workspace's own `target/`, so repeated
+commands reuse it.
+
+One practical consequence: running a project's tests inside a dependency-free
+crate without a committed `Cargo.lock` creates one, because cargo writes a lock
+file. That is ordinary build output in the workspace, not a harness change.
 
 ## Continue and recorded instructions
 
@@ -336,7 +389,7 @@ harness --compaction-strategy rolling_summary --summary-model gpt-6.1-sol
 harness ask --workspace "$PWD" --compaction-strategy structured_state --summary-model gpt-6.1-sol "Explain the project"
 ```
 
-There is no CLI/TUI strategy-switch shortcut in v0.1. The headless typed
+There is no CLI/TUI strategy-switch shortcut. The headless typed
 `SetCompactionStrategy` command changes it only while idle through a recorded
 configuration change, invalidates previews, and requires a summary model for
 model-based strategies. Continuation flags are not that command.
@@ -435,6 +488,8 @@ host races; absent protected paths cannot be masked in advance and detection is
 not rollback (including an initially absent `.git`). No unrestricted fallback
 is safe. See the full audit linked above, the
 [documentation index](https://github.com/Apagafuegos/project-harness/blob/main/docs/README.md)
-and [M7 acceptance](https://github.com/Apagafuegos/project-harness/blob/main/docs/milestone-7-acceptance.md).
+and [M7 acceptance](https://github.com/Apagafuegos/project-harness/blob/main/docs/milestone-7-acceptance.md)
+and [M8 acceptance](https://github.com/Apagafuegos/project-harness/blob/main/docs/milestone-8-acceptance.md).
 Subagents, MCP/plugins, remote workspaces, semantic memory, filesystem checkpoints
-and constrained shell networking are planned beyond v0.1.
+and constrained shell networking are planned beyond v0.2. A parallel read-only
+tool executor is deferred, not planned.

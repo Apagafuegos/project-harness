@@ -1,0 +1,23 @@
+tool: list {"path":"."}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: grep {"case_insensitive":false,"context_lines":2,"glob":"**/*","include_ignored":false,"max_results":200,"output":"matches","path":".","pattern":"render_balance|cutoff"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+I found the definition and uses in `src/display.rs` and `src/lib.rs`. I’ll rename them, leave the cutoff logic unchanged, and run `cargo test --offline`.
+
+tool: bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nfor name in ('src/display.rs', 'src/lib.rs'):\n    path = Path(name)\n    text = path.read_text()\n    path.write_text(text.replace('render_balance', 'format_balance'))\nPY\ncargo test --offline","cwd":".","timeout_ms":120000}
+tool: bash {"command":"python3 - <<'PY'\nfrom pathlib import Path\nfor name in ('src/display.rs', 'src/lib.rs'):\n    path = Path(name)\n    text = path.read_text()\n    path.write_text(text.replace('render_balance', 'format_balance'))\nPY\ncargo test --offline","cwd":".","timeout_ms":120000}
+sandbox: network denied; private per-command caches
+toolchain (read-only): <toolchain>
+sandbox PATH: <toolchain>/bin:/usr/bin:/bin
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+tool result: Failed nonzero_exit
+tool: grep {"case_insensitive":false,"context_lines":0,"glob":"**/*","include_ignored":false,"max_results":200,"output":"matches","path":".","pattern":"render_balance|format_balance"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+Renamed `display::render_balance` to `display::format_balance` in the public definition and all uses, including tests, in `src/display.rs` and `src/lib.rs`. No old-name references or compatibility alias remain; behavior is unchanged.
+
+Ran `cargo test --offline`: **15 passed, 1 failed**. The only failure is the seeded `ledger::tests::balance_includes_cutoff` failure (`2` versus expected `5`), which was left unchanged.
+turn: completed
