@@ -153,6 +153,24 @@ fn plan_image(root: &DataRoot, intent: &ExecutionIntent, state: &State) -> Resul
         .ok_or(StoreError::Invalid("undo_image_binding"))?;
     let bytes = root.read_artifact(&plan, codec::MAX_LINE_BYTES)?;
     let value = codec::unique_json(&bytes)?;
+    if value["name"].as_str() == Some("multi_edit") {
+        let planned = value["targets"]
+            .as_array()
+            .ok_or(StoreError::Invalid("undo_image_binding"))?;
+        let captured: Vec<_> = image.targets().collect();
+        if planned.len() != captured.len()
+            || planned.iter().zip(&captured).any(|(target, image)| {
+                target["path"].as_str() != Some(image.path)
+                    || target["pre_image"].as_str()
+                        != image.pre_image.as_ref().map(|pre| pre.sha256.as_str())
+                    || image.pre_image.is_none()
+                    || image.pre_mode.is_none()
+            })
+        {
+            return Err(StoreError::Invalid("undo_image_binding"));
+        }
+        return Ok(());
+    }
     let target = &value["target"];
     let pre = target["pre_image"].as_str();
     let pre_matches = match (&image.pre_image, pre) {
@@ -187,19 +205,19 @@ fn undo_sources(intent: &UndoIntent, state: &State) -> Result<()> {
             let image = invocation
                 .image()
                 .ok_or(StoreError::Invalid("undo_binding"))?;
-            if invocation.turn() != &intent.target_turn_id
-                || image.path != target.path
-                || !invocation.has_result()
-            {
+            if invocation.turn() != &intent.target_turn_id || !invocation.has_result() {
                 return Err(StoreError::Invalid("undo_binding"));
             }
-            images.push(image);
+            let Some(image) = image.targets().find(|image| image.path == target.path) else {
+                return Err(StoreError::Invalid("undo_binding"));
+            };
+            images.push((image, invocation));
         }
         let first = images.first().ok_or(StoreError::Invalid("undo_binding"))?;
         let last = images.last().ok_or(StoreError::Invalid("undo_binding"))?;
-        if first.pre_image != target.pre_image
-            || first.pre_mode != target.pre_mode
-            || last.post_image != target.post_image
+        if first.0.pre_image != target.pre_image
+            || first.0.pre_mode != target.pre_mode
+            || last.0.post_image != target.post_image
         {
             return Err(StoreError::Invalid("undo_binding"));
         }
