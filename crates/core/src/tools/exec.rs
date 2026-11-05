@@ -7,8 +7,8 @@ use std::sync::{
 
 use super::{Plan, PolicySnapshot, Registry, ToolDefinition};
 use crate::session::{
-    CallRef, ContentBlock, DecisionId, ExecutionBackend, FileEffect, FileImage, InvocationId,
-    ResultCode, ToolStatus, UndoConflict, UndoFileOutcome,
+    CallRef, ContentBlock, DecisionId, ExecutionBackend, FileEffect, FileImage, FilePathEffect,
+    InvocationId, ResultCode, ToolStatus, UndoConflict, UndoFileOutcome,
 };
 
 /// A plan whose write-ahead intent the core has committed before dispatch.
@@ -105,6 +105,8 @@ pub struct ExecutionOutcome {
     /// For a trusted write/edit, what the executor observed about the rename
     /// commit point. `None` for every other call. Never inferred from `status`.
     pub file_effect: Option<FileEffect>,
+    /// Per-path commit observations for a batched filesystem mutation.
+    pub file_paths: Vec<FilePathEffect>,
 }
 
 /// What one undo restoration did. A `Refused` outcome changed no target; a
