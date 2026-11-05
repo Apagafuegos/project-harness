@@ -23,7 +23,11 @@ pub mod theme;
 mod tools;
 mod transcript;
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    time::Duration,
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use harness_core::{
@@ -275,6 +279,13 @@ pub struct App {
     renderer: transcript::Renderer,
     /// Latest built-context estimate, absent after a reset.
     context: Option<(Totals, Flags)>,
+    /// Opt-in: answer read-only approval tickets without a key press (F02).
+    read_only_approval: bool,
+    /// Tickets already answered as read-only, so one ticket is submitted once.
+    read_only_approved: BTreeSet<ApprovalId>,
+    /// Commands produced without a key press, taken by the shell and submitted
+    /// through the same command path as a key press.
+    undecided: Vec<Action>,
 }
 
 impl App {
@@ -320,7 +331,28 @@ impl App {
             output: false,
             renderer: transcript::Renderer::default(),
             context: None,
+            read_only_approval: false,
+            read_only_approved: BTreeSet::new(),
+            undecided: Vec::new(),
         }
+    }
+
+    /// Opt in to answering registry-declared read-only tickets automatically.
+    /// The shell sets this from the resolved `approve_read_only` value.
+    pub fn set_read_only_approval(&mut self, on: bool) {
+        self.read_only_approval = on;
+    }
+
+    /// Whether this app auto-approves read-only tool calls.
+    pub fn read_only_approval(&self) -> bool {
+        self.read_only_approval
+    }
+
+    /// Decisions this app made without a key press. The shell dispatches them
+    /// exactly like a key press: one command, never retried, journaled as an
+    /// ordinary allow.
+    pub fn take_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.undecided)
     }
 
     /// Supply the merged, sourced catalog for the current and switched models.
@@ -412,6 +444,7 @@ impl App {
             self.interrupt_armed = false;
         }
         self.seed_history();
+        self.approve_read_only();
         self.sync_modal();
         let active = self.active_turn();
         if active != self.timed_turn {
@@ -553,6 +586,45 @@ impl App {
         self.output
     }
 
+    /// F02: answer a pending read-only ticket without a key press.
+    ///
+    /// Only the shared [`crate::ask::read_only`] classifier qualifies, so shell
+    /// commands, mutations, unknown and non-registry tools always open the
+    /// modal. The submitted decision is an ordinary, unremembered allow bound
+    /// to the ticket's approval id and plan digest; turning the setting on can
+    /// never create a grant or change the recorded session policy.
+    fn approve_read_only(&mut self) {
+        if !self.read_only_approval {
+            return;
+        }
+        let Some(ticket) = self.view().and_then(|view| view.pending_approval.clone()) else {
+            return;
+        };
+        if self.read_only_approved.contains(&ticket.approval_id) {
+            return;
+        }
+        let Some((name, _)) = self
+            .view()
+            .and_then(|view| render::call_proposal(view, &ticket.call.call_id))
+        else {
+            return;
+        };
+        if !crate::ask::read_only(&name) {
+            return;
+        }
+        self.read_only_approved.insert(ticket.approval_id.clone());
+        self.notices.push(Notice::Info(format!(
+            "approval: {name} auto-approved as read-only (no remembered grant)"
+        )));
+        self.undecided
+            .push(Action::Command(Command::SubmitApproval {
+                approval_id: ticket.approval_id,
+                plan_digest: ticket.plan_digest,
+                decision: Decision::Allow,
+                remember: false,
+            }));
+    }
+
     /// Keep the modal in step with the view. Approval takes precedence over
     /// resolution, and a confirm-quit dialog only survives while it is still
     /// the only thing asking for input.
@@ -589,6 +661,11 @@ impl App {
             return;
         }
         if let Some(ticket) = &view.pending_approval {
+            if self.read_only_approved.contains(&ticket.approval_id) {
+                // Answered without a key press: the modal never opens for it.
+                self.modal = Modal::None;
+                return;
+            }
             match &self.modal {
                 Modal::Approval { approval_id, .. } if *approval_id == ticket.approval_id => {}
                 _ => {

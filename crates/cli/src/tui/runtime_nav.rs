@@ -111,6 +111,7 @@ pub struct SessionCommands {
     options: SessionOptions,
     provider: Arc<dyn ModelProvider>,
     changed: watch::Sender<SessionHandle>,
+    read_only_approval: bool,
 }
 impl SessionCommands {
     /// Adopt a session opened by shared wiring.
@@ -129,7 +130,14 @@ impl SessionCommands {
             options,
             provider,
             changed,
+            read_only_approval: false,
         }
+    }
+    /// Carry the resolved `approve_read_only` decision into every app this
+    /// shell builds. Default false; the flag or the user TOML opts in.
+    pub fn read_only_approval(mut self, on: bool) -> Self {
+        self.read_only_approval = on;
+        self
     }
     /// The current session identity, also useful to injected-loop clients.
     /// Waits for an in-flight handover, so a caller never sees a shut-down
@@ -187,6 +195,7 @@ impl SessionCommands {
             super::theme::Theme::from_environment(),
         );
         app.set_catalog(self.options.driver.runtime.context.catalog.clone());
+        app.set_read_only_approval(self.read_only_approval);
         app
     }
 }

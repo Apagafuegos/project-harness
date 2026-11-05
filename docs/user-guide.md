@@ -140,10 +140,12 @@ switch_policy = "reject"
 ```
 
 Other supported keys are `model`, `summary_model` and `data_root` (strings).
-`approve_read_only` is boolean. `approve_read_only` and startup `switch_policy`
-are **ask-only**; they may coexist in a shared file but do not automate TUI
-approvals or replace its reject-first model dialog. The other keys apply to both
-clients. Auth still must be applicable to the selected provider.
+`approve_read_only` is boolean and applies to **both clients**:
+`--approve-read-only` (or the TOML key) auto-approves only the registry's
+trusted read-only tools (`read`, `list`, `glob`, `grep`) in `ask` and in the TUI.
+Startup `switch_policy` stays **ask-only**; it may coexist in a shared file but
+does not replace the TUI's reject-first model dialog. The other keys apply to
+both clients. Auth still must be applicable to the selected provider.
 
 ```sh
 harness config path
@@ -209,7 +211,14 @@ It is not a secret-content filter and can include readable `.git` metadata.
 
 In the TUI an approval captures keys: `a` allow once, `d` deny, `r` allow and
 remember a narrow tool/path or exact command/cwd grant, Esc **denies**. `v`
-shows raw arguments; scrolling/paste never answers. Inspect command/cwd/timeout,
+shows raw arguments; scrolling/paste never answers. `harness` also accepts
+`--approve-read-only` (or `approve_read_only = true` in the user TOML): only
+registry-declared trusted read-only tools (`read`, `list`, `glob`, `grep`) are
+then answered automatically, with an ordinary allow bound to the same plan that
+is never remembered, and the transcript says the call was auto-approved as
+read-only. `bash`, `write`, `edit`, unknown and non-registry tools always open
+the dialog, and the setting never creates a grant or changes the recorded
+policy. Inspect command/cwd/timeout,
 network denial, file previews/diffs and plan digest before approving. Remember
 never overrides protected paths or sandbox enforcement and has the continuation
 limitation above. Tickets bind an exact plan/revision and expire after five

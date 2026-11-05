@@ -3,8 +3,9 @@
 #[path = "support/tui_pty.rs"]
 mod support;
 
-/// M7 supersedes M5 decision 3: seven shared session flags plus global config
-/// selection. Ask-only approval/startup switching do not widen the TUI surface.
+/// M7 supersedes M5 decision 3: the shared session flags plus global config
+/// selection, and M8 decision 12 adds `--approve-read-only` (read-only tools
+/// only). Startup switching stays ask-only.
 #[test]
 fn plain_harness_is_the_tui_with_shared_flags_and_user_config() {
     let binary = env!("CARGO_BIN_EXE_harness");
@@ -22,18 +23,18 @@ fn plain_harness_is_the_tui_with_shared_flags_and_user_config() {
         "--summary-model",
         "--compaction-strategy",
         "--session",
+        "--approve-read-only",
         "--config",
         "--no-config",
     ] {
         assert!(text.contains(flag), "missing {flag} in {text}");
     }
-    assert!(!text.contains("--approve-read-only"));
     assert!(!text.contains("--switch-policy"));
     let options = text
         .lines()
         .filter(|line| line.trim_start().starts_with("--"))
         .count();
-    assert_eq!(options, 9, "unexpected top-level option:\n{text}");
+    assert_eq!(options, 10, "unexpected top-level option:\n{text}");
     for args in [&["tui"][..], &["--config", "harness.toml"][..]] {
         let out = std::process::Command::new(binary)
             .args(args)

@@ -196,6 +196,19 @@ where
             for action in app.inspector_refresh() {
                 inspector_shell::dispatch(action, handle, &mut inspections);
             }
+            // Decisions the app made without a key press (read-only
+            // auto-approve) take the same command path as a key press.
+            let decided = app.take_actions();
+            if !decided.is_empty() {
+                dispatch(
+                    decided,
+                    handle,
+                    &mut pending,
+                    &mut navigation,
+                    &mut inspections,
+                    &mut quitting,
+                );
+            }
         }
         if !quitting
             && app.view().is_some_and(|v| {

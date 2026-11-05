@@ -32,7 +32,7 @@ pub fn globals() -> Vec<Arg> {
             .value_parser(clap::value_parser!(PathBuf))
             .global(true)
             .conflicts_with("no-config")
-            .help("User TOML defaults (approve_read_only and switch_policy apply to ask only)"),
+            .help("User TOML defaults (switch_policy applies to ask only)"),
         Arg::new("no-config")
             .long("no-config")
             .action(ArgAction::SetTrue)
@@ -43,12 +43,12 @@ pub fn globals() -> Vec<Arg> {
 
 pub fn command() -> Command {
     Command::new("config")
-        .about("Inspect user defaults; approve_read_only and startup switch_policy are ask-only")
+        .about("Inspect user defaults; startup switch_policy is ask-only")
         .subcommand_required(true)
         .subcommand(Command::new("path").about("Print the resolved config path and existence"))
         .subcommand(
             Command::new("show")
-                .about("Print resolved defaults and sources; ask-only keys do not control the TUI")
+                .about("Print resolved defaults and sources; ask-only keys follow their client")
                 .args(
                     crate::ask_cli::command()
                         .get_arguments()
@@ -105,7 +105,13 @@ impl Settings {
                         .unwrap_or_else(|| "unset".into()),
                     self.sources[key],
                     if matches!(*key, "approve_read_only" | "switch_policy") {
-                        " (ask only)"
+                        // `approve_read_only` now reaches both clients; only the
+                        // startup switch policy stays ask-only (M7 decision 14).
+                        if *key == "switch_policy" {
+                            " (ask only)"
+                        } else {
+                            " (ask and TUI)"
+                        }
                     } else {
                         ""
                     }

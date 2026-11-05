@@ -46,7 +46,7 @@ fn config_path_show_missing_default_explicit_no_config_and_global_positions() {
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("provider = \"deepseek\" [config]"));
     assert!(text.contains("model = \"override\" [flag]"));
-    assert!(text.contains("approve_read_only = \"true\" [config] (ask only)"));
+    assert!(text.contains("approve_read_only = \"true\" [config] (ask and TUI)"));
     assert!(text.contains("switch_policy = \"omit-optional\" [config] (ask only)"));
     assert!(text.contains("auth = \"codex\" [default]"));
     let output = run(temp.path(), &["config", "path"]);

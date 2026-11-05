@@ -92,7 +92,9 @@ fn violations(path: &Path, source: &str) -> Vec<String> {
         }
     }
 
-    // Approval answers exist only in the modal key handler of `mod.rs`.
+    // Approval answers exist only in `mod.rs`: the modal key handler, and the
+    // one classifier-gated read-only auto-approval (M8 decision 12). Any other
+    // function, file or timer path is still a violation.
     let mut function = "";
     let mut key_calls = 0usize;
     for (line, text) in source.lines().enumerate() {
@@ -104,7 +106,9 @@ fn violations(path: &Path, source: &str) -> Vec<String> {
         {
             function = after.split('(').next().unwrap_or_default();
         }
-        if text.contains("SubmitApproval") && !(file == "mod.rs" && function == "approval_key") {
+        if text.contains("SubmitApproval")
+            && !(file == "mod.rs" && matches!(function, "approval_key" | "approve_read_only"))
+        {
             failures.push(format!(
                 "{}:{}: approval outside the modal key handler",
                 path.display(),
@@ -199,6 +203,15 @@ fn boundary_guard_rejects_provider_execution_and_timer_approval_mutations() {
             "guard missed {source}"
         );
     }
+    // The auto-approval hook is allowed only in its own named function.
+    assert!(
+        !violations(
+            Path::new("mod.rs"),
+            "fn tick(&mut self) { Command::SubmitApproval { }; }"
+        )
+        .is_empty(),
+        "guard missed an approval outside both named handlers"
+    );
     // A timer in the loop is a third key-reducer call.
     let loop_with_timer = "fn drive() {\n app.on_key(a);\n let actions = app.on_key(c);\n _ = tick.tick() => { app.on_key(approve); }\n}\n";
     assert!(!violations(Path::new("runtime.rs"), loop_with_timer).is_empty());

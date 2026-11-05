@@ -105,7 +105,7 @@ fn precedence_every_applicable_key_both_clients_and_ask_only_scope() {
             );
             assert!(settings.given(key));
             assert_eq!(settings.sources[key], "config");
-            if tui && matches!(key, "switch_policy" | "approve_read_only") {
+            if tui && key == "switch_policy" {
                 let options = crate::tui_cli::options(
                     &matches(tui, &[]),
                     &settings,
@@ -190,6 +190,19 @@ fn precedence_every_applicable_key_both_clients_and_ask_only_scope() {
             if key == "data_root" {
                 assert_eq!(root.to_str(), Some(override_value));
             }
+            if key == "approve_read_only" && tui {
+                // The TUI takes the same resolved value into its pure model.
+                let mut app = harness::tui::App::new(harness::tui::SessionInfo {
+                    workspace: "/unused-workspace".into(),
+                    model: ModelRef {
+                        provider_instance: "openai-codex".into(),
+                        model: "gpt-6.1-sol".into(),
+                    },
+                    context_limit: None,
+                });
+                app.set_read_only_approval(settings.approve_read_only());
+                assert!(app.read_only_approval());
+            }
         }
     }
 }
@@ -271,7 +284,7 @@ fn no_config_ignores_even_explicit_bad_file_and_show_has_sources() {
     assert!(show.contains("model = \"flag-model\" [flag]"));
     assert!(show.contains("auth = \"codex\" [default]"));
     assert!(show.contains("switch_policy = \"reject\" [default] (ask only)"));
-    assert!(show.contains("approve_read_only = \"false\" [default] (ask only)"));
+    assert!(show.contains("approve_read_only = \"false\" [default] (ask and TUI)"));
 }
 
 fn provider() -> Arc<harness_core::model::scripted::ScriptedProvider> {

@@ -525,7 +525,12 @@ fn proposal(view: &RuntimeView, call: &CallRef) -> Result<(String, Value), Failu
     }
     Err((1, "approval_proposal_missing".into()))
 }
-fn read_only(name: &str) -> bool {
+/// The one read-only classifier both clients use for `--approve-read-only`.
+///
+/// Only a registry tool whose effects are exactly `[Read]` on the trusted
+/// filesystem qualifies, so an unknown name or any process/mutation effect is
+/// never auto-approved. Today that is `read`, `list`, `glob` and `grep`.
+pub(crate) fn read_only(name: &str) -> bool {
     Registry::builtin().definitions().any(|d| {
         d.name == name
             && d.effects.as_slice() == [EffectClass::Read]
@@ -676,5 +681,21 @@ fn session_options(o: &Options) -> crate::wiring::SessionOptions {
         explicit_strategy: o.explicit_strategy,
         driver: o.driver.clone(),
         sandbox: o.sandbox.clone(),
+    }
+}
+
+/// `--approve-read-only` covers exactly the registry's read-only trusted tools.
+#[cfg(test)]
+mod read_only_tests {
+    use super::read_only;
+
+    #[test]
+    fn only_registry_read_only_trusted_tools_are_auto_approvable() {
+        for name in ["read", "list", "glob", "grep"] {
+            assert!(read_only(name), "{name} must stay auto-approvable");
+        }
+        for name in ["write", "edit", "bash", "unknown-tool", "", "Read", "cargo"] {
+            assert!(!read_only(name), "{name} must never be auto-approved");
+        }
     }
 }

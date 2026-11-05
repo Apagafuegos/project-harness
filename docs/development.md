@@ -614,15 +614,21 @@ model = "gpt-6.1-sol"
 # summary_model = "gpt-6.1-sol" # enables automatic compaction
 compaction_strategy = "observation_masking"
 data_root = "/absolute/private/harness-state"
-# Ask only; the TUI retains explicit approval keys and its existing switch policy:
+# Ask only; the TUI retains its existing reject-first switch policy:
 switch_policy = "reject"
+# Both clients: only registry-declared read-only trusted tools
 approve_read_only = false
 ```
 
-The six common keys apply to both clients; `switch_policy` and
-`approve_read_only` apply to **ask only**, and may coexist harmlessly in a shared
-file used by the TUI. Values use the same parsers as their flags. No environment
-interpolation or tilde expansion occurs. Config selections count like flags in
+The six common keys apply to both clients; startup `switch_policy` applies to
+**ask only**. `approve_read_only` applies to **both** clients (M8 decision 12
+supersedes M7 decision 14 for this key): ask's terminal path and the TUI both
+auto-approve only registry tools whose effects are exactly `[Read]` on the
+trusted filesystem, as an ordinary unremembered allow bound to the ticket. In
+the TUI the modal never opens for those and the transcript says so; shell
+commands, mutations and unknown tools always ask. Values use the same parsers
+as their flags. No environment interpolation or tilde expansion occurs. Config
+selections count like flags in
 all existing continuation checks (including `auth_not_applicable`, model
 switching and `session_policy_mismatch`); no persisted field or policy rule is
 added. To keep a saved model/strategy without an explicit override, leave the

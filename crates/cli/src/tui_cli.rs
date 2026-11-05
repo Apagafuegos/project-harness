@@ -27,6 +27,7 @@ pub fn args() -> Vec<Arg> {
                     | "summary-model"
                     | "compaction-strategy"
                     | "session"
+                    | "approve-read-only"
             )
         })
         .cloned()
@@ -100,7 +101,8 @@ async fn wired(
     );
     let opened = wiring::open_session(&options, providers.provider.clone()).await?;
     let warnings = opened.warnings.clone();
-    let commands = SessionCommands::new(opened, options, providers.provider);
+    let commands = SessionCommands::new(opened, options, providers.provider)
+        .read_only_approval(settings.approve_read_only());
     let result = async {
         let mut guard = TerminalGuard::enter().map_err(|_| (2, "terminal_setup_failed".into()))?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))

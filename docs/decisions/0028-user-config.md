@@ -23,14 +23,22 @@ values are validated with the matching flag's parser, not a second enum list.
 The model default depends on the effective provider/auth. An absent summary
 model remains absent. No environment interpolation or tilde expansion is added.
 
-### Client applicability (M7 decision 14)
+### Client applicability (M7 decision 14, amended by M8 decision 12)
 
-The first six keys above apply to both clients. `approve_read_only` and startup
-`switch_policy` are **ask-only** at this baseline. These keys may coexist in a
-shared config used by the TUI; they do not change its explicit-key approvals,
-reject-first startup switching or the existing model-dialog policy choice.
-Help and `config show` label this applicability. No new TUI flag or automation
-is introduced.
+The first six keys above apply to both clients. Startup `switch_policy` is
+**ask-only**. `approve_read_only` applies to **both clients**: ask's
+`--approve-read-only` and the TUI's `--approve-read-only` (or the config key)
+use the same flag > config > default precedence and the same classifier —
+registry tools whose effects are exactly `[Read]` on the trusted filesystem
+(`read`, `list`, `glob`, `grep`). M8 decision 12 supersedes M7 decision 14's
+"ask-only" ruling for this one key. In the TUI an eligible pending ticket is
+answered with an ordinary, unremembered allow bound to its approval id and plan
+digest, the modal never opens, and the transcript says the call was
+auto-approved as read-only. Shell commands, mutations, unknown and non-registry
+tools always open the modal. The startup `switch_policy` therefore remains
+ask-only: these keys may coexist in a shared config used by the TUI without
+changing its reject-first startup switching or the model-dialog policy choice.
+Help and `config show` label this applicability.
 
 The effective choices enter the same existing client options. Config-supplied
 provider/model/strategy count as explicit selections for the existing
@@ -63,7 +71,7 @@ environment/Codex authentication sources.
 
 `harness config path` prints the selected path and existence and validates any
 file it would load. `harness config show` prints each effective value and source
-(`flag`, `config`, `default`), with ask-only annotations. Flags may follow
+(`flag`, `config`, `default`), with client-applicability annotations. Flags may follow
 `config show` to inspect overrides without opening storage or loading credentials.
 Both commands exit 0 or 2. `--no-config` bypasses reading, including validation.
 
@@ -73,7 +81,8 @@ config search, transport, runtime, secret store or migration is introduced.
 ## Evidence
 
 `config::tests` covers every applicable key's three-tier precedence in both
-production option assemblers, clap-default masking, ask-only isolation, typed
+production option assemblers, clap-default masking, ask-only isolation, the
+read-only auto-approve precedence and TUI plumbing, typed
 validation, cap/UTF-8/missing boundaries, credential redaction and source labels.
 It drives real ask/session creation with scripted providers and checks existing
 header/configuration fields and continuation refusals. `tests/config.rs` covers

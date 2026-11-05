@@ -607,7 +607,8 @@ fn undo_hint_text(hint: &harness_core::runtime::RecoveryHint) -> &'static str {
     }
 }
 
-fn call_proposal(
+/// Name and arguments of the proposal a pending approval answers.
+pub(super) fn call_proposal(
     view: &RuntimeView,
     call: &harness_core::session::CallId,
 ) -> Option<(String, serde_json::Map<String, serde_json::Value>)> {

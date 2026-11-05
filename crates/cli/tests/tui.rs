@@ -45,10 +45,14 @@ fn summary_model() -> ModelRef {
 }
 
 fn policy(compaction: bool) -> Vec<u8> {
+    policy_with_read(compaction, "allow")
+}
+
+fn policy_with_read(compaction: bool, workspace_read: &str) -> Vec<u8> {
     let mut value = json!({
         "policy_revision": "tui-test",
         "enabled_tools": ["read", "write", "edit", "list", "glob", "grep"],
-        "workspace_read": "allow",
+        "workspace_read": workspace_read,
         "workspace_mutation": "ask",
         "process": "deny",
         "network": "deny",
@@ -149,6 +153,16 @@ impl Fixture {
         }
     }
 
+    /// A session whose read policy asks, so a `read` call produces a ticket.
+    fn new_read_ask() -> Self {
+        let mut fixture = Self::new(false);
+        fixture.header.configuration = fixture
+            .root
+            .put_artifact(&policy_with_read(false, "ask"))
+            .unwrap();
+        fixture
+    }
+
     fn info(&self) -> SessionInfo {
         SessionInfo {
             workspace: self.workspace.clone(),
@@ -215,7 +229,14 @@ impl Recorded {
     }
 
     fn app(&self) -> App {
+        self.app_with(false)
+    }
+
+    /// Reduce the recorded items into an app whose read-only setting is already
+    /// applied, exactly as the shell sets it before the first subscription item.
+    fn app_with(&self, read_only_approval: bool) -> App {
         let mut app = App::new(self.info.clone());
+        app.set_read_only_approval(read_only_approval);
         for item in &self.items {
             app.on_subscription(item.clone());
         }
@@ -503,6 +524,98 @@ async fn denied_tool_is_rendered_with_its_outcome() {
         screen.contains("the write was denied"),
         "the next assistant reply must render: {screen}"
     );
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_only_approval_allows_read_without_a_key_press() {
+    let fixture = Fixture::new_read_ask();
+    fs::write(fixture.workspace.join("note"), "hello").unwrap();
+    let mut recorded = fixture
+        .create([proposal("read", json!({"path": "note"})), reply("read it")])
+        .await;
+    let turn = recorded.start("read the note").await;
+    let ticket = recorded.wait_approval().await;
+
+    let mut app = recorded.app_with(true);
+    let actions = app.take_actions();
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    let Action::Command(Command::SubmitApproval {
+        approval_id,
+        plan_digest,
+        decision,
+        remember,
+    }) = &actions[0]
+    else {
+        panic!("expected SubmitApproval, got {:?}", actions[0]);
+    };
+    // The ordinary allow is bound to the ticket and never remembered.
+    assert_eq!(approval_id, &ticket.approval_id);
+    assert_eq!(plan_digest, &ticket.plan_digest);
+    assert_eq!(*decision, Decision::Allow);
+    assert!(!*remember);
+    assert!(app.take_actions().is_empty(), "one ticket, one decision");
+
+    // No modal opens, and the transcript says the call was auto-approved.
+    let screen = text(&render(&mut app, 100, 40));
+    assert!(!screen.contains("approve tool call"), "{screen}");
+    assert!(screen.contains("auto-approved as read-only"), "{screen}");
+
+    // The shell submits it exactly like a key press; the journal keeps an
+    // ordinary allow and the session policy gains no grant.
+    recorded.submit(&ticket, Decision::Allow, false).await;
+    recorded.wait_finished(&turn).await;
+    let screen = text(&render(&mut recorded.app(), 100, 40));
+    assert!(screen.contains("approval: allowed"), "{screen}");
+    let configuration_ref = recorded.view.view().snapshot.configuration().clone();
+    let configuration: Value = serde_json::from_slice(
+        &fixture
+            .root
+            .read_artifact(&configuration_ref, 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(configuration["allowances"], json!([]));
+    assert!(configuration.get("approve_read_only").is_none());
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_only_approval_still_shows_the_modal_for_write() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture
+        .create([
+            proposal("write", json!({"path": "note.txt", "text": "hello"})),
+            reply("wrote it"),
+        ])
+        .await;
+    recorded.start("write a file").await;
+    recorded.wait_approval().await;
+    let mut app = recorded.app_with(true);
+    assert!(
+        app.take_actions().is_empty(),
+        "write must never be auto-approved"
+    );
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("approve tool call"), "{screen}");
+    assert!(screen.contains("a allow"), "{screen}");
+    recorded.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_only_approval_off_leaves_every_read_ticket_to_the_modal() {
+    let fixture = Fixture::new_read_ask();
+    fs::write(fixture.workspace.join("note"), "hello").unwrap();
+    let mut recorded = fixture
+        .create([proposal("read", json!({"path": "note"})), reply("read it")])
+        .await;
+    recorded.start("read the note").await;
+    recorded.wait_approval().await;
+    let mut app = recorded.app_with(false);
+    assert!(app.take_actions().is_empty());
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("approve tool call"), "{screen}");
+    assert!(!screen.contains("auto-approved"), "{screen}");
     recorded.shutdown().await;
 }
 

@@ -238,6 +238,21 @@ impl Commands for CountedScans {
 }
 
 #[tokio::test]
+async fn read_only_approval_setting_reaches_every_app_the_shell_builds() {
+    let f = Fixture::new(vec![reply("one")]);
+    let host = f.host().await;
+    assert!(!host.app().read_only_approval(), "default must stay off");
+    assert!(
+        host.clone()
+            .read_only_approval(true)
+            .app()
+            .read_only_approval(),
+        "the resolved flag/config value must reach the pure app"
+    );
+    host.shutdown().await;
+}
+
+#[tokio::test]
 async fn picker_keys_and_render_status_refusals() {
     let f = Fixture::new(vec![reply("one")]);
     let host = f.host().await;
