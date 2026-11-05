@@ -101,6 +101,10 @@ pub struct ToolMetadata {
     /// an earlier version, where the effect is unavailable rather than absent.
     #[serde(default)]
     pub file_effect: Option<FileEffect>,
+    /// Per-path outcome for a v5 `multi_edit` batch; empty on older and
+    /// single-target results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_paths: Vec<FilePathEffect>,
 }
 
 /// Persisted tool result value fields.
@@ -349,6 +353,54 @@ pub struct FileImage {
     pub pre_mode: Option<u32>,
     /// SHA-256 of the exact replacement bytes this execution will write.
     pub post_image: Digest,
+    /// Remaining targets of a v5 multi-file edit, in canonical path order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_targets: Vec<FileImageTarget>,
+}
+
+/// A further target in one multi-file execution image.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileImageTarget {
+    /// Canonical workspace path.
+    pub path: String,
+    /// Exact pre-image bytes, or null for a created file.
+    pub pre_image: Option<ArtifactRef>,
+    /// Ordinary permission bits, or null when absent.
+    pub pre_mode: Option<u32>,
+    /// SHA-256 of the exact replacement bytes.
+    pub post_image: Digest,
+}
+
+impl FileImage {
+    /// The primary and any additional captured targets in plan order.
+    pub fn targets(&self) -> impl Iterator<Item = FileImageTargetRef<'_>> {
+        std::iter::once(FileImageTargetRef {
+            path: &self.path,
+            pre_image: &self.pre_image,
+            pre_mode: self.pre_mode,
+            post_image: &self.post_image,
+        })
+        .chain(self.additional_targets.iter().map(|target| FileImageTargetRef {
+            path: &target.path,
+            pre_image: &target.pre_image,
+            pre_mode: target.pre_mode,
+            post_image: &target.post_image,
+        }))
+    }
+}
+
+/// Borrowed view of a target in a captured execution image.
+#[derive(Clone, Copy, Debug)]
+pub struct FileImageTargetRef<'a> {
+    /// Canonical workspace path.
+    pub path: &'a str,
+    /// Exact pre-image artifact, or none when absent.
+    pub pre_image: &'a Option<ArtifactRef>,
+    /// Ordinary permission bits, or none when absent.
+    pub pre_mode: Option<u32>,
+    /// Digest of the expected post-image.
+    pub post_image: &'a Digest,
 }
 
 /// One applied trusted file mutation the user asked to undo. `pre_image` and
