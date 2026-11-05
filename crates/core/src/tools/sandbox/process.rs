@@ -486,6 +486,7 @@ pub(super) fn run(
         output_truncated: overflow || elided,
         artifacts,
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
