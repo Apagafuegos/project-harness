@@ -8,10 +8,9 @@ implemented except m8-04, which is **deferred** by decision 11 and again by the
 rerun. Workspace version is **0.2.0**; `publish = false`, the toolchain and the
 dependency set are unchanged in this step.
 
-The v0.2.0 **release is pending**: this document records readiness, not a
-publication. The orchestrator tags, dispatches the release workflow and verifies
-the published assets afterwards; no tag, dispatch or public asset is claimed
-here, and `CHANGELOG.md`'s `[0.2.0]` section is dated `Unreleased`.
+The orchestrator has since tagged and published v0.2.0 (see [Release
+record](#release-record) below); `CHANGELOG.md`'s `[0.2.0]` section is dated
+2026-11-05.
 
 **Met** means implemented with cited source tests or recorded evidence.
 **Partial** is an explicit limitation, never a pass inferred from fixtures.
@@ -30,7 +29,7 @@ introduces no product behaviour, journal-format or runtime change.
 | 03b: undo of agent file edits | Capture before dispatch, `file_effect` classification, record version 4 (`undo_intent`, `undo_uncertain`, `undo_result`, `undo_note`, `execution_intent.file_image`, `tool_metadata.file_effect`), runtime `PreviewUndo`/`Undo`/`ResolveUndo`, recovery barrier, context note and `undos` report, Ctrl-Z modal, `harness sessions undo <ID> [--yes]`; implemented at `aef721c315cba50dbcde75bfbfda11964ddc2280` (pre-rebase heads `e07c344`, `009920a`, CI 41906109023) plus review `e65e825` (CI 42038415374) | `crates/core/tests/undo.rs` (`undo_restores_an_overwritten_file_and_removes_a_created_one`, `a_preflight_conflict_changes_nothing_and_consumes_nothing`, `a_large_and_a_binary_pre_image_are_streamed_and_restored`, `a_binary_old_target_is_a_valid_pre_image`, `a_turn_with_no_trusted_file_edit_reports_nothing_and_lists_bash`, `a_stale_preview_never_reselects_a_different_turn`, `a_capture_that_stales_refuses_without_dispatching`, `a_pending_undo_blocks_new_work_until_it_is_resolved`, `a_protected_target_never_reaches_capture_or_undo`), `session::tests::undo` (`an_undo_intent_must_be_exactly_the_selection_storage_derives`, `an_intent_whose_targets_disagree_with_the_recorded_images_is_refused`, `the_terminal_note_and_result_are_one_atomic_exact_pair`, `an_unresolved_undo_blocks_turns_configuration_and_overlapping_work`, `a_note_consumes_its_turn_on_its_branch_only`, `a_compaction_may_not_cover_an_undo_note_or_anything_before_it`, `a_missing_pre_image_artifact_blocks_replay`, `a_plan_that_disagrees_with_the_captured_image_is_rejected`, `pre_images_survive_an_undo_and_a_collection`), `tools::fs::undo_tests::temporary_write_failure_is_not_applied_and_other_edits_remain_undoable`, `crates/cli/tests/sessions_undo.rs`, `crates/cli/src/sessions_cli/undo_text_tests.rs::every_undo_path_escapes_terminal_controls`; ADR §9 verification plan and break-on-purpose list | Met |
 | 04: parallel read-only tools | Not implemented | Decision 11: 0% against the 10% threshold on the baseline; the m8-06 rerun again measures 0% (no turn with two or more consecutive read-only calls, total tool time 2.72% of turn wall time) | **Deferred** |
 | 05: friction fixes | TUI `approve_read_only` (`d15df33`), exit-127 note (`9088ba1`), no-repeat instruction sentence (`56d743f`), stdout ends before diagnostics (`c2bd4db`), specific remembered-grant refusal plus TUI resumption (`f5c928c`), empty export-directory cleanup (`e2971a9`), docs (`d270512`) | `crates/cli/src/config_tests.rs` and `tui/mod.rs` auto-approval tests; `crates/core/src/tools/{tests,sandbox/args}.rs` 127-note and unchanged-status tests; `crates/cli/tests/ask.rs` stdout-newline and `session_has_remembered_grants` tests; `crates/cli/tests/config.rs` TUI-resumption refusal test; `session::tests::artifact_gc::{failed_journal_export_removes_the_empty_directory_it_created, a_failed_export_never_removes_a_preexisting_empty_destination, a_failed_export_never_touches_a_preexisting_nonempty_destination}`; CI at final main head `d270512` 42052880315 and 42046512439 (both jobs success) | Met |
-| 06: rerun, comparison, v0.2.0 readiness | Driver `--config FILE` + approval-split metrics + `--self-test` forwarding proof; private user config with `approve_read_only` and a read-only `[sandbox]` toolchain; [rerun report](dogfood/m8-rerun.md) and cells under `docs/dogfood/rerun/`; workspace `0.2.0`; `CHANGELOG.md` `[0.2.0]`; roadmap §8; this document | `scripts/dogfood.sh --self-test` (all oracles both ways, journal metrics with the read-only/other approval split, `--config` forwarding, PTY `/dev/tty`); the rerun itself (five OpenAI cells, five DeepSeek `not_run`); `cargo fmt --all -- --check` and Clippy on the touched crates; final exact-head CI recorded in the step handoff | Met in this step; the release itself is the orchestrator's |
+| 06: rerun, comparison, v0.2.0 readiness | Driver `--config FILE` + approval-split metrics + `--self-test` forwarding proof; private user config with `approve_read_only` and a read-only `[sandbox]` toolchain; [rerun report](dogfood/m8-rerun.md) and cells under `docs/dogfood/rerun/`; workspace `0.2.0`; `CHANGELOG.md` `[0.2.0]`; roadmap §8; this document | `scripts/dogfood.sh --self-test` (all oracles both ways, journal metrics with the read-only/other approval split, `--config` forwarding, PTY `/dev/tty`); the rerun itself (five OpenAI cells, five DeepSeek `not_run`); `cargo fmt --all -- --check` and Clippy on the touched crates; final exact-head CI recorded in the step handoff | Met; released afterwards (see [Release record](#release-record)) |
 | 07: project toolchains in the bash sandbox | `[sandbox]` table (`toolchain_paths`, `path_prepend`, `cargo_registry`, `env`), load-time refusals, read-only binds, credential masking, private per-command `CARGO_HOME`, workspace `target/`, plan binding, doctor and approval-preview reports ([ADR 0033](decisions/0033-sandbox-toolchains.md)); implemented at `7b645cb` (CI 42027783229) and corrected at `e46fe7d` (CI 42032457831 and 42038365450), both jobs success | `tools::sandbox::settings` and `settings_tests` (env/path/refusal matrix, doctor statuses), `tools::sandbox::args::tests::toolchain_arguments_golden_and_configuration_binding`, `tools::tests::omitted_or_empty_sandbox_keeps_the_v01_plan_bytes`, `crates/cli/src/config_sandbox_tests.rs`, `crates/cli/tests/doctor.rs`, `crates/core/tests/sandbox/toolchains.rs` (`s02_toolchain_credentials_present_and_absent_readonly_and_private_caches`, `s02_toolchain_cargo_test_offline_with_readonly_registry`), `crates/cli/src/tui/tools.rs` preview tests; local run of both S02 toolchain tests on this host: pass | Met |
 
 ### Concrete semantics covered
@@ -209,3 +208,25 @@ undo, auto-approval and `[sandbox]` sections, the reconciled contracts, and this
 document. Not done here, by instruction: no tag, no release-workflow dispatch, no
 `main` change and no asset verification. The orchestrator does those after
 acceptance.
+
+## Release record
+
+- `main` integrated the reviewed m8-06 candidate at
+  `0c5157f6ce534bceca2b7dc4999a9a33d2424ae5` after CI 42058968787 passed (Rust
+  workspace and Host sandbox security (S02)).
+- Final-candidate dispatch [42062285842](https://github.com/Apagafuegos/project-harness/actions/runs/42062285842)
+  passed on that exact commit: both `verify` jobs, both native musl builds,
+  packaging and checksum generation; publish is skipped on dispatch by design.
+- Its `release-assets` artifact was downloaded and checked before tagging:
+  `SHA256SUMS` verified both archives; the archives held the binary, both
+  licences, README, `CHANGELOG.md`, `docs/` and `third-party-notices/`; the
+  aarch64 binary reported `harness 0.2.0`.
+- Annotated tag `v0.2.0` on that commit started publish run
+  [42064489275](https://github.com/Apagafuegos/project-harness/actions/runs/42064489275),
+  which passed every job and published the
+  [v0.2.0 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.0)
+  at 2026-11-05T16:37:49Z (not a draft or prerelease).
+- The published `SHA256SUMS` and both archives were re-downloaded, verified
+  with `sha256sum -c` and are byte-identical to the dry-run artifact.
+- Final binary reproducibility is not claimed; the partials, deferred item and
+  residual risks above still apply.

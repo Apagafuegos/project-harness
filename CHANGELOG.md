@@ -3,12 +3,12 @@
 Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-05
 
 Milestone 8 makes harness a daily driver: search tools, durable undo of the
 agent's file edits, project toolchains in the bash sandbox, opt-in read-only
-auto-approval and the friction fixes from the first dogfood measurement. The
-version is **unreleased**: no tag, date or published assets are claimed here.
+auto-approval and the friction fixes from the first dogfood measurement. Released
+from the public `v0.2.0` tag; the GitHub Release carries the prebuilt archives.
 
 ### Added
 

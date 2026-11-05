@@ -10,12 +10,10 @@ Rust only: Tokio for asynchronous runtime work, Ratatui for the terminal UI, and
 Cargo for the build. The engine stays separate from the client so it can run
 headlessly and support other clients later.
 
-**Status: v0.2.0 source, Milestones 1–8 implemented within their recorded
-scope; `v0.1.0` is the latest published release.** The v0.2.0 tag and prebuilt
-Linux x86_64/aarch64 musl archives are produced by the orchestrator after
-acceptance, so no v0.2.0 asset is claimed yet; the published
-[v0.1.0 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
-remains available. Start with the [user guide](docs/user-guide.md) for
+**Status: v0.2.0, Milestones 1–8 implemented within their recorded scope.**
+The public [v0.2.0 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.0)
+carries prebuilt Linux x86_64/aarch64 musl archives and their checksums; a
+v0.2.0 binary writes record version 4, which v0.1.0 refuses. Start with the [user guide](docs/user-guide.md) for
 installation, authentication, configuration, TUI keys and maintenance. [M8
 acceptance](docs/milestone-8-acceptance.md), [M7
 acceptance](docs/milestone-7-acceptance.md) and the [security
