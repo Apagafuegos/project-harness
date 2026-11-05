@@ -150,6 +150,8 @@ pub(super) fn call(
             string(arguments, "new_text").unwrap_or_default(),
             DIFF_LINES,
         ));
+    } else if name == "multi_edit" {
+        rows.extend(multi_edit_preview(arguments));
     }
     rows
 }
@@ -211,6 +213,27 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
             bounded(string(arguments, "path").unwrap_or("?"), 120),
             plain,
         )],
+        "multi_edit" => {
+            let edits = arguments
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let paths = arguments
+                .get("edits")
+                .and_then(Value::as_array)
+                .map(|edits| {
+                    edits
+                        .iter()
+                        .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                })
+                .unwrap_or(0);
+            vec![Span::styled(
+                format!("{edits} replacements across {paths} files"),
+                plain,
+            )]
+        }
         _ => vec![Span::styled(code_style_json(arguments), dim)],
     }
 }
@@ -279,7 +302,7 @@ pub(super) fn approval(
         }
         return rows;
     }
-    if raw || !matches!(name, "bash" | "edit" | "write" | "read") {
+    if raw || !matches!(name, "bash" | "edit" | "multi_edit" | "write" | "read") {
         let mut rows = Vec::new();
         if !matches!(name, "bash" | "edit" | "write" | "read") {
             rows.push(Line::from(vec![
@@ -330,6 +353,7 @@ pub(super) fn approval(
             ));
             rows
         }
+        "multi_edit" => multi_edit_preview(arguments),
         "write" => {
             let text = string(arguments, "text").unwrap_or_default();
             let mut rows = vec![
@@ -381,6 +405,52 @@ pub(super) fn approval(
             ]
         }
     }
+}
+
+fn multi_edit_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
+    let edits = arguments
+        .get("edits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut grouped = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    for edit in edits {
+        let Some(path) = edit.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let old = edit
+            .get("old_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let new = edit
+            .get("new_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        grouped
+            .entry(path.to_owned())
+            .or_default()
+            .push((old.to_owned(), new.to_owned()));
+    }
+    let theme = Theme::default();
+    let label = theme.style(Role::Strong);
+    let mut rows = vec![Line::styled(
+        format!("{} files · exact replacements", grouped.len()),
+        theme.style(Role::Dim),
+    )];
+    for (path, replacements) in grouped {
+        rows.push(Line::from(vec![
+            Span::styled("path ", label),
+            Span::raw(bounded(&path, 120)),
+        ]));
+        for (index, (old, new)) in replacements.iter().enumerate() {
+            rows.push(Line::styled(
+                format!("replacement {} of {}", index + 1, replacements.len()),
+                theme.style(Role::Dim),
+            ));
+            rows.extend(diff(old, new, usize::MAX));
+        }
+    }
+    rows
 }
 
 /// Toolchain scope is taken from the exact plan, not client configuration.
