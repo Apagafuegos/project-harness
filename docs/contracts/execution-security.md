@@ -33,6 +33,13 @@ shells, installers, and all other external programs always use the process backe
   workspace mounts plus protected-path masks/read-only `.git` and private
   temporary/home space. A writable shell workspace is not per-file containment.
   `elevated` is not offered in v0.1; any future expansion needs a new decision.
+- Opt-in user toolchains are read-only binds at the same absolute path, with a
+  fixed executable search path and an explicit environment allowlist; see
+  [ADR 0033](../decisions/0033-sandbox-toolchains.md). A configured mount cannot
+  be writable, cannot widen workspace access and cannot set a harness-owned
+  variable. Cargo's writable state lives in sandbox-private per-command
+  directories (0700, owned by the sandbox user), never in a mount or the
+  workspace.
 - Subprocess network access is always denied in v0.1. A requested exception is
   `network_unsupported`; approval cannot supply a missing enforcement backend.
 - Provider credentials, trusted policy, and session storage are not exposed to
@@ -60,6 +67,47 @@ but do not promise atomic compare-and-swap against unrelated host mutation.
 User config and user instructions use a separate user-owned std-fs boundary;
 project instructions never become authority. See audit residual risks before
 claiming stronger isolation or redaction.
+
+## Opt-in toolchains (M8)
+
+A `[sandbox]` table in the user TOML only may add `toolchain_paths`
+(read-only binds at the same path), `path_prepend` (each inside a mounted
+root or `/usr`, before the fixed `/usr/bin:/bin`) and `env` (explicit settings
+with a fixed name allowlist). Refusals happen at config load, exit 2 and name
+the path: `/`, `$HOME` and its ancestors, the workspace and data root and their
+ancestors and descendants, the harness config directory, `~/.ssh`, `~/.gnupg`,
+`~/.codex`, `~/.aws`, `~/.config`, the sandbox's own private mounts, and any
+missing or non-directory path. Credential-shaped and harness-owned variable
+names are refused by name, never by value. `PATH` itself is not settable, the
+host environment is still cleared, network stays denied, and every bash call
+still requires approval whose preview states the bound mounts, sandbox `PATH`
+and environment key names.
+
+Inside each mount the fixed leaves `credentials`, `credentials.toml` and
+`.git-credentials` are masked with the existing mechanism **when present at
+setup**. An absent leaf is not masked and does not fail the sandbox: Bubblewrap
+cannot create a mount point beneath a read-only bind (ADR 0012's absent-path
+limitation). Because the mount is read-only, a sandboxed process cannot create
+it either, and a test proves the write fails with nothing appearing on the
+host. Creating it on the host while a command runs is the documented L04 race.
+No placeholder is created and no mount is ever made writable to mask
+a credential. `doctor` reports, per mount, which leaves were masked and which
+were absent.
+
+The effective settings are recorded in the existing session configuration
+artifact and in the approved bash plan bytes; a later change is refused on
+continuation with the existing `session_policy_mismatch` rule, without writing
+to the journal.
+
+## Known limits of the toolchain feature
+
+A mounted toolchain is trusted user code: it can read every mount and the
+workspace and can echo what it reads. Masking covers the fixed credential
+leaves only, not every secret-shaped file, and hard-link aliases of a masked
+file inside the mount are not protected. Caches are per command and never
+shared across commands or sessions, so nothing persists and nothing needs
+collection. The recipe names exact paths; host toolchain drift makes a mount
+missing (refused at load) or the build fail, never silently substituted.
 
 `crates/core/tests/sandbox.rs`, `crates/core/tests/tool_host.rs` and
 `crates/cli/tests/doctor.rs` run the required real host suites in CI;

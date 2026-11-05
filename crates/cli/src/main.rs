@@ -236,7 +236,11 @@ fn print(command: &str, result: Result<String, String>) -> ExitCode {
         }
         Err(message) => {
             eprintln!("{command}: {message}");
-            ExitCode::FAILURE
+            if message.starts_with("config_") {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -370,6 +374,7 @@ fn repair(arguments: &ArgMatches) -> Result<String, String> {
 
 /// Probe the host and print the report.
 fn run_doctor(arguments: &ArgMatches) -> Result<String, String> {
+    let sandbox = config::resolve(arguments)?.sandbox_config();
     let programs = doctor::Programs {
         bwrap: arguments
             .get_one::<PathBuf>("bwrap")
@@ -381,6 +386,7 @@ fn run_doctor(arguments: &ArgMatches) -> Result<String, String> {
             .clone(),
     };
     let mut report = doctor::report(&programs)?;
+    report["sandbox"] = sandbox.toolchains.report();
     if let Some(workspace_root) = arguments.get_one::<PathBuf>("workspace") {
         let bytes = serde_json::to_vec(&json!({
             "policy_revision":"doctor", "enabled_tools":["read","write","edit","bash"],
@@ -406,7 +412,7 @@ fn run_doctor(arguments: &ArgMatches) -> Result<String, String> {
                 sandbox: Some(SandboxConfig {
                     bwrap: programs.bwrap,
                     systemd_run: programs.systemd_run,
-                    ..SandboxConfig::default()
+                    ..sandbox
                 }),
             },
             &policy,

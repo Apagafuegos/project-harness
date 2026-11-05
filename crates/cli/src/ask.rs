@@ -394,11 +394,15 @@ async fn drive(
             && !cancelled
         {
             let (name, arguments) = proposal(client.view(), &ticket.call)?;
-            let summary = format!(
+            let mut summary = format!(
                 "tool: {} {}",
                 bounded(&name, 80),
                 bounded(&arguments.to_string(), 320)
             );
+            for row in crate::wiring::sandbox_summary(&ticket.plan) {
+                summary.push('\n');
+                summary.push_str(&row);
+            }
             let decision = if io.terminal.is_none() {
                 writeln!(io.stderr, "approval denied: no controlling terminal")
                     .map_err(|_| infrastructure())?;

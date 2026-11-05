@@ -12,7 +12,8 @@
 - v0.1 sessions use trees in one JSONL journal; tool execution is sequential.
 - Trusted Rust filesystem tools require workspace authorization. Every external
   executable uses Bubblewrap, with no unrestricted fallback and network denied
-  by default. See `docs/contracts/execution-security.md`.
+  by default. Opt-in user toolchains mount read-only with a fixed environment;
+  a mount is never writable. See `docs/contracts/execution-security.md`.
 - The current contract documents are drafts. When implementing them, resolve and
   record relevant open decisions and add behavioral tests alongside the code.
 - The six high-level contracts are provisionally agreed. Review RFC-001 before

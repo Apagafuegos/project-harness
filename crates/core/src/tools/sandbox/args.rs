@@ -18,6 +18,8 @@ struct Wire {
     timeout_ms: u64,
     arguments: Arguments,
     mounts: Vec<Mount>,
+    #[serde(default)]
+    sandbox: super::ToolchainSettings,
 }
 #[derive(Deserialize)]
 struct Arguments {
@@ -68,6 +70,25 @@ pub(super) fn validate_config(config: &SandboxConfig) -> Result<(), SandboxUnava
         || config.tasks_max < 4
     {
         return Err(fail("invalid trusted sandbox limits"));
+    }
+    config.toolchains.validate().map_err(fail)?;
+    for path in &config.toolchains.toolchain_paths {
+        if !path.is_dir()
+            || fs::canonicalize(path).ok().as_ref() != Some(path)
+            || checked_path(
+                Path::new("/"),
+                path.strip_prefix("/")
+                    .map_err(|_| fail("invalid toolchain root"))?
+                    .to_str()
+                    .ok_or_else(|| fail("non UTF-8 toolchain root"))?,
+            )
+            .is_err()
+        {
+            return Err(fail(format!(
+                "unavailable configured toolchain mount {}",
+                path.display()
+            )));
+        }
     }
     for path in &config.system_paths {
         if !path.is_absolute()
@@ -125,11 +146,16 @@ pub(super) fn probe_spec(config: &SandboxConfig, root: &Path) -> Result<Spec, Sa
                 path: ".".into(),
                 mode: "rw".into(),
             }],
+            sandbox: config.toolchains.clone(),
         },
         root,
     )
 }
 fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, SandboxUnavailable> {
+    validate_config(config)?;
+    if wire.sandbox != config.toolchains {
+        return Err(fail("plan sandbox configuration mismatch"));
+    }
     if wire.name != "bash"
         || wire.backend != "bubblewrap"
         || wire.network != "deny"
@@ -154,14 +180,30 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
     ]
     .map(Into::into)
     .into();
+    let path = if config.toolchains.is_empty() {
+        config.path.clone()
+    } else {
+        config.toolchains.path()
+    };
     for (key, value) in [
-        ("PATH", config.path.as_str()),
+        ("PATH", path.as_str()),
         ("HOME", "/home/sandbox"),
         ("TMPDIR", "/tmp"),
         ("LANG", "C.UTF-8"),
         ("TERM", "dumb"),
     ] {
         args.extend(["--setenv".into(), key.into(), value.into()]);
+    }
+    for (key, value) in &config.toolchains.env {
+        args.extend(["--setenv".into(), key.into(), value.into()]);
+    }
+    if !config.toolchains.is_empty() {
+        for (key, value) in [
+            ("CARGO_HOME", "/home/sandbox/.cargo"),
+            ("CARGO_TARGET_DIR", "/tmp/cargo-target"),
+        ] {
+            args.extend(["--setenv".into(), key.into(), value.into()]);
+        }
     }
     for path in &config.system_paths {
         match fs::read_link(path) {
@@ -198,6 +240,58 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
         ]
         .map(Into::into),
     );
+    if !config.toolchains.is_empty() {
+        for path in ["/home/sandbox/.cargo", "/tmp/cargo-target"] {
+            args.extend(["--perms".into(), "0700".into(), "--dir".into(), path.into()]);
+        }
+    }
+    // Install every read-only bind before masks, including overlapping mounts.
+    let mut toolchains: Vec<_> = config.toolchains.toolchain_paths.iter().collect();
+    toolchains.sort_by_key(|path| path.components().count());
+    for path in &toolchains {
+        args.extend([
+            "--ro-bind".into(),
+            path.as_os_str().into(),
+            path.as_os_str().into(),
+        ]);
+    }
+    let mut masked_credentials = Vec::<PathBuf>::new();
+    for root in &toolchains {
+        for path in config.toolchains.credential_paths(root) {
+            if masked_credentials.iter().any(|p| path.starts_with(p)) {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| fail("invalid credential path"))?;
+            checked_path(
+                root,
+                relative
+                    .to_str()
+                    .ok_or_else(|| fail("non UTF-8 credential path"))?,
+            )?;
+            match fs::symlink_metadata(&path) {
+                Ok(m) if m.is_file() => args.extend([
+                    "--ro-bind".into(),
+                    "/dev/null".into(),
+                    path.into_os_string(),
+                ]),
+                Ok(m) if m.is_dir() => {
+                    args.extend([
+                        "--tmpfs".into(),
+                        path.as_os_str().into(),
+                        "--remount-ro".into(),
+                        path.as_os_str().into(),
+                    ]);
+                    masked_credentials.push(path);
+                }
+                // D13: absent leaves cannot be masked beneath read-only binds.
+                // Never create host placeholders or fail setup for absence.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Err(fail("cannot mask configured toolchain credential path")),
+            }
+        }
+    }
     let Some(workspace) = wire.mounts.first() else {
         return Err(fail("missing workspace mount"));
     };
@@ -306,6 +400,47 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, SandboxUnavailab
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn toolchain_arguments_golden_and_configuration_binding() {
+        let workspace = tempfile::tempdir().unwrap();
+        let toolchain = tempfile::tempdir().unwrap();
+        fs::create_dir(toolchain.path().join("bin")).unwrap();
+        fs::write(toolchain.path().join("credentials"), "secret").unwrap();
+        let config = SandboxConfig {
+            system_paths: vec!["/usr".into()],
+            toolchains: super::super::ToolchainSettings {
+                toolchain_paths: vec![toolchain.path().into()],
+                path_prepend: vec![toolchain.path().join("bin")],
+                env: [("RUSTUP_TOOLCHAIN".into(), "1.99.1".into())].into(),
+            },
+            ..SandboxConfig::default()
+        };
+        let spec = probe_spec(&config, workspace.path()).unwrap();
+        let normalized: Vec<_> = spec
+            .argv(10, 11)
+            .iter()
+            .map(|s| {
+                s.to_str()
+                    .unwrap()
+                    .replace(toolchain.path().to_str().unwrap(), "<toolchain>")
+                    .replace(workspace.path().to_str().unwrap(), "<workspace>")
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_string(&normalized).unwrap(),
+            include_str!("../golden/toolchains-argv.json").trim()
+        );
+        let mut wire: Wire = serde_json::from_str(include_str!("../golden/bash.json")).unwrap();
+        wire.workspace = workspace.path().to_str().unwrap().into();
+        assert!(
+            build_wire(&config, wire, workspace.path())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("configuration mismatch")
+        );
+    }
+
     #[test]
     fn exact_arguments_for_both_bash_golden_plans() {
         let root = tempfile::tempdir().unwrap();

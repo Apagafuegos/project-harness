@@ -70,6 +70,9 @@ pub struct PolicySnapshot {
     process: RestrictedPolicy,
     protected_paths: Vec<WorkspacePath>,
     allowances: Vec<Allowance>,
+    // Boxed: the settings are three containers, and a job must not carry the
+    // whole policy inline (clippy's large-enum-variant guard).
+    sandbox: Box<super::sandbox::ToolchainSettings>,
 }
 
 /// A validated, tool-scoped allowance. No shell prefix or glob variant exists.
@@ -246,7 +249,18 @@ impl PolicySnapshot {
                 .collect::<Result<_, _>>()?,
             _ => return Err(PolicyError::InvalidField("allowances")),
         };
+        let sandbox: super::sandbox::ToolchainSettings = object
+            .get("sandbox")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| PolicyError::InvalidField("sandbox"))?
+            .unwrap_or_default();
+        sandbox
+            .validate()
+            .map_err(|_| PolicyError::InvalidField("sandbox"))?;
         Ok(Self {
+            sandbox: Box::new(sandbox),
             artifact,
             object,
             revision,
@@ -257,6 +271,11 @@ impl PolicySnapshot {
             protected_paths,
             allowances,
         })
+    }
+
+    /// Recorded opt-in sandbox settings; absent fields retain v0.1 behavior.
+    pub fn sandbox(&self) -> &super::sandbox::ToolchainSettings {
+        &self.sandbox
     }
 
     /// Exact artifact this policy was read from.

@@ -155,6 +155,65 @@ fn old_bwrap_is_unavailable() {
 }
 
 #[test]
+fn sandbox_table_is_reported_with_masked_and_absent_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let tools = temp.path().join("tools");
+    fs::create_dir_all(tools.join("bin")).unwrap();
+    fs::write(tools.join("credentials"), "CREDENTIAL_SENTINEL").unwrap();
+    let config = temp.path().join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "data_root = {:?}\n[sandbox]\ntoolchain_paths = [{:?}]\npath_prepend = [{:?}]\n[sandbox.env]\nBUILD_LABEL = \"DOCTOR_ENV_SENTINEL\"\n",
+            temp.path().join("state").to_str().unwrap(),
+            tools.to_str().unwrap(),
+            tools.join("bin").to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let report = doctor(&[
+        "--config",
+        config.to_str().unwrap(),
+        "--workspace",
+        workspace.to_str().unwrap(),
+        "--data-root",
+        temp.path().join("state").to_str().unwrap(),
+        "--bwrap",
+        "/nonexistent/bwrap",
+    ]);
+    let sandbox = &report["sandbox"];
+    let mount = &sandbox["toolchain_paths"][0];
+    assert_eq!(mount["path"], tools.to_str().unwrap());
+    assert_eq!(mount["mode"], "ro");
+    assert_eq!(mount["exists"], true);
+    assert_eq!(mount["readable"], true);
+    let masks: Vec<(&str, &str)> = mount["credential_masks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mask| {
+            (
+                mask["path"].as_str().unwrap(),
+                mask["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(masks.contains(&(tools.join("credentials").to_str().unwrap(), "masked")));
+    assert!(masks.contains(&(tools.join("credentials.toml").to_str().unwrap(), "absent")));
+    assert!(masks.contains(&(tools.join(".git-credentials").to_str().unwrap(), "absent")));
+    assert_eq!(
+        sandbox["path_prepend"][0],
+        tools.join("bin").to_str().unwrap()
+    );
+    assert_eq!(sandbox["env_keys"], serde_json::json!(["BUILD_LABEL"]));
+    let rendered = report.to_string();
+    assert!(!rendered.contains("CREDENTIAL_SENTINEL"));
+    assert!(!rendered.contains("DOCTOR_ENV_SENTINEL"));
+}
+
+#[test]
 fn relative_program_paths_are_refused() {
     let output = Command::new(env!("CARGO_BIN_EXE_harness"))
         .args(["doctor", "--bwrap", "bwrap"])

@@ -425,6 +425,7 @@ fn modal_content(app: &App) -> Option<(String, Vec<Line<'static>>)> {
                 ))),
             }
             lines.push(Line::raw(""));
+            lines.extend(tools::sandbox_summary(&ticket.plan));
             lines.push(tools::digest(ticket.plan_digest.as_str()));
             // The key hints live in the frame and footer, never in the body.
             Some(("approve tool call".into(), lines))

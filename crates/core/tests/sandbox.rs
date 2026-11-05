@@ -24,6 +24,8 @@ use std::{
 mod assertions;
 #[path = "../../../tests/support/loopback.rs"]
 mod loopback;
+#[path = "sandbox/toolchains.rs"]
+mod toolchains;
 
 fn backend() -> &'static Sandbox {
     static BACKEND: OnceLock<Sandbox> = OnceLock::new();

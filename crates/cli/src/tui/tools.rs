@@ -383,6 +383,14 @@ pub(super) fn approval(
     }
 }
 
+/// Toolchain scope is taken from the exact plan, not client configuration.
+pub(super) fn sandbox_summary(plan: &[u8]) -> Vec<Line<'static>> {
+    crate::wiring::sandbox_summary(plan)
+        .into_iter()
+        .map(note)
+        .collect()
+}
+
 /// The plan digest, always visible and dimmed.
 pub(super) fn digest(digest: &str) -> Line<'static> {
     Line::styled(
@@ -717,6 +725,30 @@ mod tests {
         ] {
             assert!(preview.contains(field), "{preview}");
         }
+    }
+
+    #[test]
+    fn approval_preview_shows_the_bound_sandbox_scope() {
+        let plan = serde_json::to_vec(&serde_json::json!({
+            "name":"bash", "sandbox":{
+                "toolchain_paths":["/opt/rust"], "path_prepend":["/opt/rust/bin"],
+                "env":{"RUSTUP_TOOLCHAIN":"1.99.1"}
+            }
+        }))
+        .unwrap();
+        let rows = text(&sandbox_summary(&plan));
+        assert!(rows.contains("toolchain (read-only): /opt/rust"), "{rows}");
+        assert!(
+            rows.contains("sandbox PATH: /opt/rust/bin:/usr/bin:/bin"),
+            "{rows}"
+        );
+        assert!(
+            rows.contains("sandbox env keys: RUSTUP_TOOLCHAIN"),
+            "{rows}"
+        );
+        assert!(!rows.contains("1.99.1"), "values are never rendered");
+        assert!(sandbox_summary(b"{\"name\":\"read\"}").is_empty());
+        assert_eq!(crate::wiring::sandbox_summary(b"{}"), Vec::<String>::new());
     }
 
     #[test]

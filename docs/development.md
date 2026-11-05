@@ -766,6 +766,58 @@ committed AppArmor profile, and uploads the reports as the `harness-doctor`
 artifact. [Decision 0008](decisions/0008-host-sandbox.md) records where the
 shell security suite runs.
 
+### Running a project's toolchain in the sandbox
+
+A `[sandbox]` table in the user config adds read-only toolchain mounts
+([ADR 0033](decisions/0033-sandbox-toolchains.md)). The tested recipe on this
+host, with rustup's `1.99.1` toolchain in the home directory, is:
+
+```toml
+[sandbox]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
+                   "/home/you/.cargo/registry"]
+path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+
+[sandbox.env]
+RUSTUP_TOOLCHAIN = "1.99.1"
+CARGO_NET_OFFLINE = "true"
+```
+
+Mount the toolchain's own `bin` (real binaries) rather than `~/.cargo/bin`
+(rustup proxy shims), and mount `~/.cargo/registry` rather than `~/.cargo` so
+no credential file is inside a mount. The mount and the workspace are
+read-only in the sense that matters here only for directories, so cargo writes
+its lock files and artifacts to `$CARGO_HOME=/home/sandbox/.cargo` and
+`$CARGO_TARGET_DIR=/tmp/cargo-target`, private 0700 directories created for
+each command and destroyed with it. Cargo resolves the registry through
+`CARGO_HOME`, so link it once per command:
+
+```sh
+ln -s /home/you/.cargo/registry "$CARGO_HOME/registry"
+cargo test --offline
+```
+
+`harness doctor` reports the configured mounts, prepends and environment key
+names, whether each mount exists and is readable, and, per mount, which of the
+fixed credential leaves (`credentials`, `credentials.toml`, `.git-credentials`)
+were masked and which were absent. A present leaf is masked read-only; an
+absent one cannot be masked beneath a read-only bind, cannot be created from
+inside the sandbox, and does not fail the sandbox. Changing the mounts, the
+prepends or the environment later is refused on continuation with
+`session_policy_mismatch`, exactly like other recorded policy fields.
+
+Two S02 cases cover it in `crates/core/tests/sandbox/toolchains.rs`: masking and
+absent-leaf behavior with private caches, and a real `cargo test --offline` run
+with a read-only toolchain and registry that asserts the test binary ran and
+that network is still denied. Run them with the suite:
+
+```sh
+./scripts/with-clean-fds.sh cargo test --locked -p harness-core --test sandbox -- --ignored --test-threads=1 toolchains
+```
+
+The recipe test prints `SKIPPED: toolchain recipe` and returns when no 1.99.1
+toolchain or fetched offline registry is present, instead of pretending.
+
 ### When the shell sandbox is unavailable
 
 The doctor's `bubblewrap.failures` says what failed. The most common cause on

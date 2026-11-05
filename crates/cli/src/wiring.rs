@@ -139,13 +139,14 @@ pub async fn open_session(
             .map_err(|_| configuration("configuration_unreadable"))?;
         let policy: Value =
             serde_json::from_slice(&bytes).map_err(|_| configuration("invalid_configuration"))?;
-        let expected = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
+        let expected = configured_policy(o);
         for field in [
             "workspace_read",
             "workspace_mutation",
             "process",
             "network",
             "allowances",
+            "sandbox",
         ] {
             if policy[field] != expected[field] {
                 return Err(configuration("session_policy_mismatch"));
@@ -173,7 +174,7 @@ pub async fn open_session(
             .map_err(storage)?
     } else {
         known(o, &o.model)?;
-        let policy = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
+        let policy = configured_policy(o);
         let policy_bytes =
             serde_json::to_vec(&policy).map_err(|_| configuration("invalid_configuration"))?;
         let parsed = PolicySnapshot::parse(
@@ -293,6 +294,48 @@ fn policy_json(summary: Option<&ModelRef>, strategy: StrategyId) -> Value {
         "compaction":{"strategy":strategy.as_str(),"summary_model":summary,"automatic":summary.is_some()}})
 }
 
+/// Read-only approval summary from the exact bound plan, never live config.
+/// Only environment key names are rendered.
+pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<Value>(plan) else {
+        return Vec::new();
+    };
+    if value["name"] != "bash" {
+        return Vec::new();
+    }
+    let Some(sandbox) = value.get("sandbox") else {
+        return Vec::new();
+    };
+    let Ok(settings) =
+        serde_json::from_value::<harness_core::tools::sandbox::ToolchainSettings>(sandbox.clone())
+    else {
+        return Vec::new();
+    };
+    let mut rows = vec!["sandbox: network denied; private per-command caches".into()];
+    rows.extend(
+        settings
+            .toolchain_paths
+            .iter()
+            .map(|p| format!("toolchain (read-only): {}", p.display())),
+    );
+    rows.push(format!("sandbox PATH: {}", settings.path()));
+    rows.push(format!(
+        "sandbox env keys: {}",
+        settings.env.keys().cloned().collect::<Vec<_>>().join(", ")
+    ));
+    rows
+}
+
+fn configured_policy(o: &SessionOptions) -> Value {
+    let mut policy = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
+    if let Some(sandbox) = &o.sandbox
+        && !sandbox.toolchains.is_empty()
+    {
+        policy["sandbox"] = serde_json::to_value(&sandbox.toolchains).expect("sandbox settings");
+    }
+    policy
+}
+
 /// Apply an explicit continuation switch after recovery and before starting a turn.
 /// Identical models do not append a marker; refusals retain their full preview.
 pub async fn switch_session(
@@ -333,7 +376,7 @@ fn session_configuration(
     o: &SessionOptions,
     availability: &ToolAvailability,
 ) -> Result<(Value, Vec<String>), Failure> {
-    let mut value = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
+    let mut value = configured_policy(o);
     let tools = available_tools(availability);
     let search = |name: &str| tools.iter().any(|tool| tool == name);
     let search_hint = if search("list") && search("glob") && search("grep") {

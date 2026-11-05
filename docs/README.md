@@ -18,6 +18,9 @@ Key v0.1 documents:
   archives, dependency notices, mandatory guide and non-publishing dry runs.
 - [Session maintenance](decisions/0030-session-export-deletion-and-gc.md): verified
   exports, journal-only deletion and GC publication/reuse locking.
+- [Sandbox toolchains](decisions/0033-sandbox-toolchains.md): opt-in read-only
+  toolchain mounts, a fixed sandbox environment, masking and the offline Rust
+  recipe.
 
 The full index:
 
@@ -84,7 +87,8 @@ The full index:
 - [Evaluation harness](decisions/0027-evaluation-harness.md): the dev-only
   offline pipeline, fixed tasks, provenance and opt-in live mode.
 - [Providers](providers.md): implemented adapters, router, credentials and opt-in checks.
-- [Built-in tools usage](tools.md): implemented file/shell backends and host assembly.
+- [Built-in tools usage](tools.md): implemented file/shell/search backends, host
+  assembly and opt-in toolchains.
 - [Runtime core](runtime.md): implemented inputs, effects, turn commits,
   cancellation, worker/driver, provider stream, media, resync, recovery and
   tail repair.
@@ -148,6 +152,7 @@ M7 implements projection-only conversion (0015 amendment), user TOML (0028),
 user/nested instructions (0022 amendment), TUI UX/GFM/highlighting (0023 Parts
 6–7), public release tooling (0029) and session maintenance (0030). The accepted
 security audit baseline is `5b89aa2f0f3b038b73993d4c1d137da494c6027f`.
+M8 adds search tools (0031) and opt-in read-only sandbox toolchains (0033).
 The public [`v0.1.0` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
 carries both musl archives and their checksums.
 Schema/examples alone are not evidence of implementation.

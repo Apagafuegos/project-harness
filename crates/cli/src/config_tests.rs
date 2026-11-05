@@ -1,4 +1,6 @@
 //! Offline resolution and production option-assembly tests for both clients.
+#[path = "config_sandbox_tests.rs"]
+mod sandbox;
 use super::*;
 use clap::Command;
 use harness_core::{

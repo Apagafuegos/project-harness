@@ -110,6 +110,8 @@ struct WirePlan {
     timeout_ms: u64,
     policy_revision: String,
     target: Option<Target>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox: Option<super::sandbox::ToolchainSettings>,
 }
 
 /// An exact immutable plan. No public construction or deserialization is possible.
@@ -312,6 +314,9 @@ impl Plan {
             },
             policy_revision: policy.revision().into(),
             target,
+            sandbox: (definition.backend == ExecutionBackend::Bubblewrap
+                && !policy.sandbox().is_empty())
+            .then(|| policy.sandbox().clone()),
         };
         let bytes =
             serde_json::to_vec(&wire).expect("plan contains only infallibly serializable values");

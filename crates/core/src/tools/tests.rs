@@ -473,6 +473,42 @@ fn workspace_path_invalid_arguments_and_normalization() {
 }
 
 #[test]
+fn omitted_or_empty_sandbox_keeps_the_v01_plan_bytes() {
+    let view = FakeWorkspace::new();
+    let omitted = plan("bash", args("bash"), &view, &default_policy()).unwrap();
+    assert_eq!(
+        omitted.bytes(),
+        include_str!("golden/bash.json").trim_end().as_bytes()
+    );
+    let mut empty = config();
+    empty["sandbox"] = json!({});
+    let empty = plan("bash", args("bash"), &view, &policy(empty)).unwrap();
+    assert_eq!(empty.bytes(), omitted.bytes());
+    assert_eq!(empty.digest(), omitted.digest());
+    let mut tools = config();
+    tools["sandbox"] = json!({"toolchain_paths":["/opt/rust"],"path_prepend":["/opt/rust/bin"],"env":{"RUSTUP_TOOLCHAIN":"1.99.1"}});
+    let configured = plan("bash", args("bash"), &view, &policy(tools)).unwrap();
+    assert_ne!(configured.bytes(), omitted.bytes());
+    assert!(
+        serde_json::from_slice::<Value>(configured.bytes()).unwrap()["sandbox"]["toolchain_paths"]
+            == json!(["/opt/rust"])
+    );
+    // Only bash carries sandbox scope; trusted file plans stay byte-identical.
+    for name in ["read", "write", "edit"] {
+        let mut configured = config();
+        configured["sandbox"] = json!({"toolchain_paths":["/opt/rust"]});
+        assert_eq!(
+            plan(name, args(name), &view, &policy(configured))
+                .unwrap()
+                .bytes(),
+            plan(name, args(name), &view, &default_policy())
+                .unwrap()
+                .bytes()
+        );
+    }
+}
+
+#[test]
 fn plans_golden_canonical_bytes_determinism_and_digest() {
     let view = FakeWorkspace::new();
     let p = default_policy();

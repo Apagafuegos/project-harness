@@ -7,6 +7,8 @@ mod args;
 mod output;
 mod probe;
 mod process;
+mod settings;
+pub use settings::{ToolchainSettings, credential_name};
 
 use super::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, Plan};
 use crate::session::{ContentBlock, ExecutionBackend, ResultCode, ToolStatus};
@@ -30,6 +32,8 @@ pub struct SandboxConfig {
     pub system_paths: Vec<PathBuf>,
     /// Sandbox executable search path (not the host's PATH).
     pub path: String,
+    /// Opt-in user toolchains, recorded in the session policy and bash plan.
+    pub toolchains: ToolchainSettings,
     /// Absolute systemd-run executable used when its user manager is available.
     pub systemd_run: PathBuf,
     /// Maximum aggregate stdout and stderr bytes retained.
@@ -62,6 +66,7 @@ impl Default for SandboxConfig {
             .filter(|path| std::fs::symlink_metadata(path).is_ok())
             .collect(),
             path: "/usr/bin:/bin".into(),
+            toolchains: ToolchainSettings::default(),
             systemd_run: DEFAULT_SYSTEMD_RUN.into(),
             capture_limit: 64 * 1024 * 1024,
             model_text_limit: 32 * 1024,

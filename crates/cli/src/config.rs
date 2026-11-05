@@ -3,6 +3,7 @@
 #[path = "config_tests.rs"]
 mod tests;
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use harness_core::tools::{SandboxConfig, sandbox::ToolchainSettings};
 use std::{
     collections::BTreeMap,
     fs::OpenOptions,
@@ -64,8 +65,16 @@ pub fn command() -> Command {
 pub struct Settings {
     values: BTreeMap<&'static str, Option<String>>,
     sources: BTreeMap<&'static str, &'static str>,
+    sandbox: ToolchainSettings,
+    sandbox_source: &'static str,
 }
 impl Settings {
+    pub fn sandbox_config(&self) -> SandboxConfig {
+        SandboxConfig {
+            toolchains: self.sandbox.clone(),
+            ..SandboxConfig::default()
+        }
+    }
     pub fn text(&self, key: &str) -> Option<&str> {
         self.values[key].as_deref()
     }
@@ -85,7 +94,8 @@ impl Settings {
             .expect("shared parser")
     }
     pub fn show(&self) -> String {
-        KEYS.iter()
+        let mut rows: Vec<_> = KEYS
+            .iter()
             .map(|key| {
                 format!(
                     "{key} = {} [{}]{}",
@@ -101,8 +111,24 @@ impl Settings {
                     }
                 )
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect();
+        for (key, value) in [
+            (
+                "sandbox.toolchain_paths",
+                serde_json::json!(self.sandbox.toolchain_paths),
+            ),
+            (
+                "sandbox.path_prepend",
+                serde_json::json!(self.sandbox.path_prepend),
+            ),
+            (
+                "sandbox.env (keys only)",
+                serde_json::json!(self.sandbox.env.keys().collect::<Vec<_>>()),
+            ),
+        ] {
+            rows.push(format!("{key} = {value} [{}]", self.sandbox_source));
+        }
+        rows.join("\n")
     }
 }
 
@@ -130,7 +156,44 @@ pub fn resolve(args: &ArgMatches) -> Result<Settings, String> {
         let path = path(args)?;
         load(&path, args.get_one::<PathBuf>("config").is_some())?
     };
-    resolve_values(args, values)
+    let settings = resolve_values(args, values)?;
+    if !settings.sandbox.is_empty() {
+        let workspace = args
+            .try_get_one::<PathBuf>("workspace")
+            .ok()
+            .flatten()
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+            .map_err(|_| "config_invalid: cannot resolve workspace")?;
+        let workspace = if workspace.is_absolute() {
+            workspace
+        } else {
+            std::env::current_dir()
+                .map_err(|_| "config_invalid: cannot resolve workspace")?
+                .join(workspace)
+        };
+        let home = PathBuf::from(
+            std::env::var_os("HOME")
+                .ok_or("config_invalid: HOME required for sandbox validation")?,
+        );
+        // Only the harness config directory is refused, never an arbitrary
+        // directory a user pointed --config at.
+        let dirs = vec![harness::wiring::user_config_directory().map_err(str::to_owned)?];
+        let selected = path(args)?;
+        let selected = if selected.is_absolute() {
+            selected
+        } else {
+            std::env::current_dir()
+                .map_err(|_| "config_invalid: cannot resolve config")?
+                .join(selected)
+        };
+        settings
+            .sandbox
+            .validate_locations(&workspace, &settings.data_root(), &home, &dirs)
+            .map_err(|e| invalid(&selected, "sandbox", &e))?;
+    }
+    Ok(settings)
 }
 
 fn invalid(path: &Path, key: &str, reason: &str) -> String {
@@ -142,10 +205,7 @@ fn invalid(path: &Path, key: &str, reason: &str) -> String {
 }
 
 fn credential(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "api_key"
-        || key.ends_with("_key")
-        || matches!(key.as_str(), "token" | "secret" | "password")
+    harness_core::tools::sandbox::credential_name(key)
 }
 fn has_credentials(value: &toml::Value) -> bool {
     match value {
@@ -185,6 +245,11 @@ fn load(path: &Path, explicit: bool) -> Result<BTreeMap<String, String>, String>
     let value: toml::Value = text
         .parse()
         .map_err(|_| invalid(path, "file", "invalid TOML"))?;
+    if let Some(sandbox) = value.get("sandbox") {
+        // Parse before generic credential refusal so sandbox env errors name the
+        // offending key while never echoing its value or TOML source.
+        parse_sandbox(path, sandbox)?;
+    }
     if has_credentials(&value) {
         return Err("config_credential_refused: put credentials in environment variables".into());
     }
@@ -193,6 +258,13 @@ fn load(path: &Path, explicit: bool) -> Result<BTreeMap<String, String>, String>
         .ok_or_else(|| invalid(path, "file", "expected table"))?;
     let mut values = BTreeMap::new();
     for (key, value) in table {
+        if key == "sandbox" {
+            values.insert(
+                key.clone(),
+                serde_json::to_string(&parse_sandbox(path, value)?).expect("settings"),
+            );
+            continue;
+        }
         if !KEYS.contains(&key.as_str()) {
             return Err(invalid(path, key, "unknown key"));
         }
@@ -211,6 +283,25 @@ fn load(path: &Path, explicit: bool) -> Result<BTreeMap<String, String>, String>
         values.insert(key.clone(), text);
     }
     Ok(values)
+}
+
+fn parse_sandbox(path: &Path, value: &toml::Value) -> Result<ToolchainSettings, String> {
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid(path, "sandbox", "expected table"))?;
+    for key in table.keys() {
+        if !matches!(key.as_str(), "toolchain_paths" | "path_prepend" | "env") {
+            return Err(invalid(path, &format!("sandbox.{key}"), "unknown key"));
+        }
+    }
+    let settings: ToolchainSettings = value
+        .clone()
+        .try_into()
+        .map_err(|_| invalid(path, "sandbox", "invalid sandbox table types"))?;
+    settings
+        .validate()
+        .map_err(|e| invalid(path, "sandbox", &e))?;
+    Ok(settings)
 }
 
 // Validate against the actual ask flag, including its type/value parser. Never
@@ -292,14 +383,29 @@ fn resolve_values(args: &ArgMatches, config: BTreeMap<String, String>) -> Result
             ),
         );
     }
-    Ok(Settings { values, sources })
+    let sandbox = config
+        .get("sandbox")
+        .map(|v| serde_json::from_str(v))
+        .transpose()
+        .map_err(|_| "config_invalid: sandbox: invalid settings")?
+        .unwrap_or_default();
+    Ok(Settings {
+        values,
+        sources,
+        sandbox,
+        sandbox_source: if config.contains_key("sandbox") {
+            "config"
+        } else {
+            "default"
+        },
+    })
 }
 
 pub fn run(args: &ArgMatches) -> std::process::ExitCode {
     let result = match args.subcommand() {
         Some(("path", _)) => path(args).and_then(|p| {
             if !args.get_flag("no-config") {
-                load(&p, args.get_one::<PathBuf>("config").is_some())?;
+                resolve(args)?;
             }
             Ok(format!("{} (exists: {})", p.display(), p.exists()))
         }),

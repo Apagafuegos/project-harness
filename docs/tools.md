@@ -115,6 +115,40 @@ complete JSON as an artifact and keeps a bounded prefix inline. The shared
 30-second deadline and cancellation propagate between entries, files and lines.
 Interrupted search intents use the existing read-only restart closure.
 
+## Implemented: opt-in toolchains (M8)
+
+A `[sandbox]` table in the user config can add read-only toolchain mounts, a
+prepended executable search path and an explicit environment, so a daily agent
+can run a project's tests (ADR 0033). With no table nothing changes.
+
+```toml
+[sandbox]
+toolchain_paths = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu",
+                   "/home/you/.cargo/registry"]
+path_prepend = ["/home/you/.rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin"]
+
+[sandbox.env]
+RUSTUP_TOOLCHAIN = "1.99.1"
+CARGO_NET_OFFLINE = "true"
+```
+
+Each mount is a read-only bind at the same absolute path, installed before any
+credential mask and before the workspace's ancestor binds. `PATH` becomes the
+prepends followed by `/usr/bin:/bin`; a prepend must resolve inside a mount or
+`/usr`. The fixed leaves `credentials`, `credentials.toml` and
+`.git-credentials` are masked when they exist at setup; absent ones are not
+masked (they cannot be, beneath a read-only bind), cannot be created from
+inside the sandbox, and do not fail it. The backend also creates two private
+0700 directories for cargo, `$CARGO_HOME=/home/sandbox/.cargo` and
+`$CARGO_TARGET_DIR=/tmp/cargo-target`, which vanish with the command.
+
+The plan for `bash` carries the same object in a trailing `sandbox` field, so
+the approved bytes bind the mounts, the search path and the environment; a plan
+bound to other settings is refused before spawn. The approval preview and
+`harness doctor` report the mounts, prepends and environment key names (never
+values), and doctor additionally reports each mount's existence, readability
+and whether each fixed credential leaf was masked or absent.
+
 ## Planned separately
 
 Native provider adapters and a CLI chat command remain separate work.

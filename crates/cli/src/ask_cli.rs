@@ -1,10 +1,7 @@
 //! Real adapter and process I/O wiring for the injected headless client.
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use harness::ask::{self, ControllingTerminal, Options};
-use harness_core::{
-    session::{ModelRef, Portability, SessionId},
-    tools::SandboxConfig,
-};
+use harness_core::session::{ModelRef, Portability, SessionId};
 use std::{
     io::{self, IsTerminal},
     path::PathBuf,
@@ -169,7 +166,7 @@ pub(crate) fn options(
         prompt: args.get_one::<String>("prompt").expect("required").clone(),
         approve_read_only: settings.approve_read_only(),
         driver,
-        sandbox: Some(SandboxConfig::default()),
+        sandbox: Some(settings.sandbox_config()),
         codex: codex && provider_name == "openai",
     }
 }

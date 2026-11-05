@@ -7,10 +7,7 @@ use harness::{
     },
     wiring::{self, SessionOptions},
 };
-use harness_core::{
-    session::{ModelRef, Portability, SessionId},
-    tools::SandboxConfig,
-};
+use harness_core::session::{ModelRef, Portability, SessionId};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
@@ -179,7 +176,7 @@ pub(crate) fn options(
         switch_policy: Portability::Reject,
         known_instances: instances,
         driver,
-        sandbox: Some(SandboxConfig::default()),
+        sandbox: Some(settings.sandbox_config()),
     }
 }
 
