@@ -1,0 +1,145 @@
+--- a/src/display.rs
++++ b/src/display.rs
+@@ -1,11 +1,11 @@
+-//! Stable text output: one `item: quantity` line per item.
++//! Stable text output: one `product: quantity` line per product.
+ use std::collections::BTreeMap;
+ 
+ /// Format sorted balances, always ending each row with a newline.
+ pub fn render_balance(stock: &BTreeMap<String, i64>) -> String {
+     let mut text = String::new();
+-    for (item, quantity) in stock {
+-        text.push_str(&format!("{item}: {quantity}\n"));
++    for (product, quantity) in stock {
++        text.push_str(&format!("{product}: {quantity}\n"));
+     }
+     text
+ }
+@@ -19,13 +19,13 @@
+         if line.is_empty() {
+             continue;
+         }
+-        let (item, quantity) = line.split_once(':').ok_or(index + 1)?;
+-        let item = item.trim();
+-        if item.is_empty() {
++        let (product, quantity) = line.split_once(':').ok_or(index + 1)?;
++        let product = product.trim();
++        if product.is_empty() {
+             return Err(index + 1);
+         }
+         let quantity: i64 = quantity.trim().parse().map_err(|_| index + 1)?;
+-        *stock.entry(item.to_owned()).or_default() += quantity;
++        *stock.entry(product.to_owned()).or_default() += quantity;
+     }
+     Ok(stock)
+ }
+
+--- a/src/ledger.rs
++++ b/src/ledger.rs
+@@ -4,7 +4,7 @@
+ /// One stock movement; a negative quantity removes stock.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct Movement {
+-    pub item: String,
++    pub product: String,
+     pub day: u32,
+     pub quantity: i64,
+ }
+@@ -22,9 +22,9 @@
+     }
+ 
+     /// Record a movement without aggregating or sorting history.
+-    pub fn record(&mut self, item: &str, day: u32, quantity: i64) {
++    pub fn record(&mut self, product: &str, day: u32, quantity: i64) {
+         self.movements.push(Movement {
+-            item: item.to_owned(),
++            product: product.to_owned(),
+             day,
+             quantity,
+         });
+@@ -35,7 +35,7 @@
+         &self.movements
+     }
+ 
+-    /// Number of recorded movements, not distinct item names.
++    /// Number of recorded movements, not distinct product names.
+     pub fn len(&self) -> usize {
+         self.movements.len()
+     }
+@@ -45,11 +45,11 @@
+         self.movements.is_empty()
+     }
+ 
+-    /// Current stock by item, sorted lexicographically, retaining zero stock.
++    /// Current stock by product, sorted lexicographically, retaining zero stock.
+     pub fn balances(&self) -> BTreeMap<String, i64> {
+         let mut stock = BTreeMap::new();
+         for movement in &self.movements {
+-            *stock.entry(movement.item.clone()).or_default() += movement.quantity;
++            *stock.entry(movement.product.clone()).or_default() += movement.quantity;
+         }
+         stock
+     }
+@@ -59,24 +59,24 @@
+         let mut stock = BTreeMap::new();
+         for movement in &self.movements {
+             if movement.day < cutoff {
+-                *stock.entry(movement.item.clone()).or_default() += movement.quantity;
++                *stock.entry(movement.product.clone()).or_default() += movement.quantity;
+             }
+         }
+         stock
+     }
+ 
+-    /// Distinct item names in lexicographic order.
++    /// Distinct product names in lexicographic order.
+     pub fn items(&self) -> Vec<String> {
+         self.balances().into_keys().collect()
+     }
+ 
+-    /// Copy only the movements for a single item, preserving insertion order.
+-    pub fn select(&self, item: &str) -> Self {
++    /// Copy only the movements for a single product, preserving insertion order.
++    pub fn select(&self, product: &str) -> Self {
+         Self {
+             movements: self
+                 .movements
+                 .iter()
+-                .filter(|m| m.item == item)
++                .filter(|m| m.product == product)
+                 .cloned()
+                 .collect(),
+         }
+
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -7,7 +7,7 @@
+ 
+ use ledger::Ledger;
+ 
+-/// A current, sorted summary of every item, retaining zero balances.
++/// A current, sorted summary of every product, retaining zero balances.
+ pub fn summary(ledger: &Ledger) -> String {
+     display::render_balance(&ledger.balances())
+ }
+@@ -22,8 +22,8 @@
+ pub fn from_snapshot(text: &str, day: u32) -> Result<Ledger, usize> {
+     let balances = display::parse_balance(text)?;
+     let mut ledger = Ledger::new();
+-    for (item, quantity) in balances {
+-        ledger.record(&item, day, quantity);
++    for (product, quantity) in balances {
++        ledger.record(&product, day, quantity);
+     }
+     Ok(ledger)
+ }
+@@ -49,7 +49,7 @@
+     fn snapshot_uses_supplied_day() {
+         let ledger = from_snapshot("pear: 3\napple: 1", 7).unwrap();
+         assert_eq!(ledger.len(), 2);
+-        assert_eq!(ledger.movements()[0].item, "apple");
++        assert_eq!(ledger.movements()[0].product, "apple");
+         assert!(ledger.movements().iter().all(|m| m.day == 7));
+     }
+ 
+
