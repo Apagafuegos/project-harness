@@ -271,6 +271,25 @@ turns anyway.
 | F08 | cost / limit | low — no wrong outcome | T1 (and the total) | Answering a read-only question cost 6 inferences and 15,396 input tokens (baseline: 3 and 4,312), because each small `list`/`read` result is re-sent as context. Tool time fell to 55 ms, so the price is context, not process time. | Watch it in the next measurement; the existing result-size bounds and context reports already expose it. No change now. |
 | F09 | dev tooling (driver) | low — no measurement affected | the run as a whole | The driver's final `fs::remove_dir` of `target/dogfood-tmp/` fails if any unrelated file or directory is left there, turning a fully recorded run into `infrastructure_failure` (exit 1) instead of the intended 77 for missing keys. It happened here because a doctor probe had created directories under the same scratch root. | Use a per-run scratch subdirectory, or treat the final cleanup as best-effort with an explicit warning. |
 
+## v0.2.1 measurement fixes (2026-11-05, after this rerun)
+
+Nothing in this report was re-measured, and the tables above are unchanged on
+purpose: they record what the oracles decided at v0.2.0.
+
+- **F06 is fixed in the oracle, not in the cells.** From v0.2.1 the T1/T5
+  "no file changed" invariant exempts a *created* `Cargo.lock`, exactly as the
+  T2–T4 `safe` check already did, and the dogfood `--self-test` covers it. Read
+  against that corrected oracle, **T5's recorded facts pass** for both providers:
+  each T5 cell records `answer_facts: true` and exactly one changed file,
+  `Cargo.lock`, with no source file changed (see this report's DeepSeek addendum
+  for the provider that ran later). The cells stay comparable because the
+  correction relaxes an invariant that was inconsistent with the other three
+  tasks, rather than the answer being judged differently.
+- **F09 is fixed in the driver.** A leftover scratch file or directory no longer
+  turns a finished run into `infrastructure_failure`: the driver removes the
+  whole per-run scratch tree and, if it survives, reports it as a warning
+  without failing any recorded cell.
+
 ## What this does not show
 
 - No TUI timings or UX measurements: `ask` has no TUI and nothing here times

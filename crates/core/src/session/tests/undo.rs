@@ -50,6 +50,7 @@ struct Writes {
     path: &'static str,
     post: &'static [u8],
     capture: Option<FileImage>,
+    effect: FileEffect,
 }
 impl Writes {
     /// A completed turn with one captured write. `commits` covers the twelve
@@ -130,7 +131,7 @@ impl Writes {
                 self.invocation.clone(),
                 ToolStatus::Succeeded,
                 Provenance::Executor,
-                Some(FileEffect::Applied),
+                Some(self.effect),
             ),
             7 => transition(snapshot, Executing, Continuing),
             8 => transition(snapshot, Continuing, Preparing),
@@ -226,6 +227,7 @@ fn written(
         path,
         post,
         capture: None,
+        effect: FileEffect::Applied,
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
@@ -234,6 +236,106 @@ fn written(
     }
     assert_eq!(store.snapshot().state(), RuntimeState::Idle);
     (temp, root, store)
+}
+
+/// A completed newer turn that proposed `calls` `bash` calls and had every one
+/// denied, so it is skipped by selection and has no trusted file mutation.
+fn denied_bash_turn(store: &mut JournalStore, calls: usize) {
+    store
+        .append(start_turn(&store.snapshot(), "run it"), at())
+        .unwrap();
+    store
+        .append(
+            transition(
+                &store.snapshot(),
+                RuntimeState::Preparing,
+                RuntimeState::Inferring,
+            ),
+            at(),
+        )
+        .unwrap();
+    let content: Vec<ContentBlock> = (0..calls)
+        .map(|_| ContentBlock::ToolCall {
+            call_id: CallId::new(),
+            name: "bash".into(),
+            arguments: serde_json::Map::new(),
+            provider_call_id: None,
+        })
+        .collect();
+    let calls: Vec<CallRef> = {
+        let commit = response_commit(&store.snapshot(), content, FinishReason::ToolCalls);
+        let response = commit.entries[0].id.clone();
+        let call_ids: Vec<CallId> = match &commit.entries[0].payload {
+            EntryPayload::AssistantResponse(response) => response
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolCall { call_id, .. } => Some(call_id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        store.append(commit, at()).unwrap();
+        call_ids
+            .into_iter()
+            .map(|call_id| CallRef {
+                response_entry_id: response.clone(),
+                call_id,
+            })
+            .collect()
+    };
+    for call in calls {
+        store
+            .append(
+                tool_result_with_effect(
+                    &store.snapshot(),
+                    call,
+                    None,
+                    ToolStatus::Denied,
+                    Provenance::Runtime,
+                    None,
+                ),
+                at(),
+            )
+            .unwrap();
+    }
+    for (from, to) in [
+        (RuntimeState::Processing, RuntimeState::Continuing),
+        (RuntimeState::Continuing, RuntimeState::Preparing),
+        (RuntimeState::Preparing, RuntimeState::Inferring),
+    ] {
+        store
+            .append(transition(&store.snapshot(), from, to), at())
+            .unwrap();
+    }
+    store
+        .append(
+            response_commit(
+                &store.snapshot(),
+                vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+                FinishReason::Stop,
+            ),
+            at(),
+        )
+        .unwrap();
+    let snapshot = store.snapshot();
+    let turn = snapshot.active_turn().unwrap().clone();
+    store
+        .append(
+            audit(
+                &snapshot,
+                vec![JournalEvent::TurnFinished(TurnFinished {
+                    turn_id: turn,
+                    outcome: TurnOutcome::Completed,
+                    code: None,
+                })],
+            ),
+            at(),
+        )
+        .unwrap();
 }
 
 /// The exact intent storage derives for the selected turn, as JSON.
@@ -277,13 +379,18 @@ fn terminal(snapshot: &SessionSnapshot, intent: &UndoIntent) -> Commit {
             },
         })
         .collect();
+    let omitted: Vec<(CallRef, String)> = intent
+        .omitted_calls
+        .iter()
+        .map(|call| (call.clone(), "bash".to_owned()))
+        .collect();
     let text = crate::session::undo::note_text(
         &intent.target_turn_id,
         &intent.undo_id,
         UndoOutcome::Succeeded,
         &intent.targets,
         &rows,
-        &[],
+        &omitted,
         None,
     );
     Commit {
@@ -583,6 +690,7 @@ fn a_compaction_may_not_cover_an_undo_note_or_anything_before_it() {
         path: "b",
         post: b"created",
         capture: None,
+        effect: FileEffect::Applied,
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
@@ -794,4 +902,349 @@ fn pre_images_survive_an_undo_and_a_collection() {
     // Deleting the journal leaves the bytes for another branch or session.
     root.delete_session(&id).unwrap();
     root.verify_artifact(&pre).unwrap();
+}
+
+/// Decision 17: a candidate's report includes the bash proposals of newer
+/// unconsumed turns skipped on the way, and replay accepts either that list or
+/// the v0.2.0 one, and nothing else.
+#[test]
+fn a_candidate_reports_skipped_bash_calls_and_accepts_both_recorded_lists() {
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    denied_bash_turn(&mut store, 1);
+    let snapshot = store.snapshot();
+    let UndoSelection::Candidate {
+        turn_id,
+        omitted_calls,
+        ..
+    } = store.snapshot().select_undo().unwrap()
+    else {
+        panic!("the write turn is the candidate")
+    };
+    assert_eq!(omitted_calls.len(), 1, "the skipped bash call is listed");
+    let corrected = intent(&store);
+    assert_eq!(corrected.target_turn_id, turn_id);
+    assert_eq!(corrected.omitted_calls, omitted_calls);
+    store
+        .append(intent_commit(&snapshot, corrected.clone()), at())
+        .unwrap();
+
+    // The v0.2.0 writer recorded only the target turn's own calls. A journal
+    // carrying that list still replays: history is never rewritten.
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    denied_bash_turn(&mut store, 1);
+    let snapshot = store.snapshot();
+    let mut legacy = intent(&store);
+    assert_eq!(legacy.omitted_calls.len(), 1);
+    legacy.omitted_calls.clear();
+    store
+        .append(intent_commit(&snapshot, legacy), at())
+        .expect("the v0.2.0 omission still replays");
+
+    // Any other list is a binding failure.
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    denied_bash_turn(&mut store, 2);
+    let snapshot = store.snapshot();
+    let mut wrong = intent(&store);
+    wrong.omitted_calls.pop();
+    assert!(
+        matches!(
+            store.append(intent_commit(&snapshot, wrong), at()),
+            Err(StoreError::Invalid("undo_binding"))
+        ),
+        "a partial list is not the recorded selection"
+    );
+    let unknown = intent(&store);
+    let mut wrong = unknown;
+    wrong.omitted_calls = vec![CallRef {
+        response_entry_id: EntryId::new(),
+        call_id: CallId::new(),
+    }];
+    assert!(matches!(
+        store.append(intent_commit(&snapshot, wrong), at()),
+        Err(StoreError::Invalid("undo_binding"))
+    ));
+}
+
+/// Consuming the target turn does not hide the turns skipped on the way: the
+/// skipped bash call is still reported as not reversed.
+#[test]
+fn a_skipped_bash_call_is_still_reported_once_the_target_turn_is_consumed() {
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    denied_bash_turn(&mut store, 1);
+    // Consume the older write turn first: its own bash list is empty, so the
+    // skipped newer turn stays listed.
+    let snapshot = store.snapshot();
+    let first = intent(&store);
+    store
+        .append(intent_commit(&snapshot, first.clone()), at())
+        .unwrap();
+    let pending = store.snapshot();
+    store.append(terminal(&pending, &first), at()).unwrap();
+    // The newer bash-only turn is skipped and still reported as not reversed.
+    let UndoSelection::Nothing { omitted_calls } = store.snapshot().select_undo().unwrap() else {
+        panic!("nothing is undoable now")
+    };
+    assert_eq!(omitted_calls.len(), 1, "a skipped turn is still reported");
+}
+
+/// A terminal commit whose one entry is not a note is invalid, never a panic.
+#[test]
+fn a_result_with_a_non_note_entry_is_invalid_not_a_panic() {
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    let snapshot = store.snapshot();
+    let exact = intent(&store);
+    store
+        .append(intent_commit(&snapshot, exact.clone()), at())
+        .unwrap();
+    let snapshot = store.snapshot();
+    let mut bad = terminal(&snapshot, &exact);
+    bad.entries[0].payload = EntryPayload::UserMessage(UserMessage {
+        content: Vec::new(),
+    });
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.append(bad, at()).map(|_| ())
+    }))
+    .expect("storage must not panic on a malformed terminal commit");
+    assert!(
+        matches!(refused, Err(StoreError::Invalid("undo_commit_shape"))),
+        "{refused:?}"
+    );
+    // The pending intent is untouched, so the honest result still resolves it.
+    let snapshot = store.snapshot();
+    store
+        .append(terminal(&snapshot, &exact), at())
+        .expect("the session recovers and can still be resolved");
+}
+
+/// The same malformed record, replayed from a journal file: a diagnostic, not a
+/// panic and not a silently accepted history.
+#[test]
+fn a_malformed_terminal_commit_is_a_replay_diagnostic() {
+    let (_temp, root, mut store) = written("a", Some(b"before"), b"after");
+    let snapshot = store.snapshot();
+    let exact = intent(&store);
+    store
+        .append(intent_commit(&snapshot, exact.clone()), at())
+        .unwrap();
+    let id = store.snapshot().session_id().clone();
+    let snapshot = store.snapshot();
+    let mut bad = terminal(&snapshot, &exact);
+    bad.entries[0].payload = EntryPayload::UserMessage(UserMessage {
+        content: Vec::new(),
+    });
+    let line = codec::encode(&Record {
+        version: codec::CURRENT_VERSION,
+        seq: snapshot.sequence() + 1,
+        record_id: RecordId::new(),
+        session_id: id.clone(),
+        at: at(),
+        previous_checksum: Some(snapshot.checksum().clone()),
+        payload: RecordPayload::Commit(bad),
+    })
+    .expect("a well-formed v4 record");
+    drop(store);
+    let path = journal_path(&root, &id);
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(&line.0).unwrap();
+    file.sync_all().unwrap();
+    let inspection = JournalStore::inspect(&root, &id).unwrap();
+    let diagnostic = inspection.diagnostic.expect("a diagnostic");
+    assert_eq!(diagnostic.kind, DiagnosticKind::Corrupt);
+    assert_eq!(diagnostic.code, "undo_commit_shape");
+    assert!(matches!(
+        JournalStore::open(root, &id),
+        Err(StoreError::Journal(_))
+    ));
+}
+
+/// ADR 0032 §8: the intent and every terminal shape are bounded before a
+/// target changes. A maximum note under worst-case escaping, every target and
+/// every omitted call are reserved; a record that cannot fit is refused.
+#[test]
+fn the_record_preflight_bounds_the_worst_case_terminal_commit() {
+    let (_temp, _root, store) = written("a", Some(b"before"), b"after");
+    let small = intent(&store);
+    assert!(crate::session::undo::fits_record_limit(&small, 0));
+    // A small undo is nowhere near the limit.
+    let mut few = small.clone();
+    few.targets = (0..10)
+        .map(|n| {
+            let path = format!("{n:0>4000}");
+            target(&path, None)
+        })
+        .collect();
+    assert!(crate::session::undo::fits_record_limit(&few, 0));
+    // The window that matters: an intent that still fits, whose *terminal*
+    // commit does not, because the note and the rows name every 4 KiB path.
+    // This case fails only if the terminal shapes are bounded (tested by
+    // removing that loop: `fits_record_limit` then accepts it).
+    let mut many = small.clone();
+    many.targets = (0..1200)
+        .map(|n| {
+            let path = format!("{n:0>4000}");
+            target(&path, None)
+        })
+        .collect();
+    assert!(
+        !crate::session::undo::fits_record_limit(&many, 0),
+        "a terminal commit over 8 MiB must be refused before any change"
+    );
+    // Omitted calls count too, in the intent and in every note line.
+    let mut calls = small.clone();
+    calls.omitted_calls = (0..120_000)
+        .map(|_| CallRef {
+            response_entry_id: EntryId::new(),
+            call_id: CallId::new(),
+        })
+        .collect();
+    assert!(!crate::session::undo::fits_record_limit(&calls, 0));
+}
+
+fn target(path: &str, pre: Option<ArtifactRef>) -> UndoTarget {
+    UndoTarget {
+        path: path.to_owned(),
+        invocation_ids: vec![InvocationId::new()],
+        pre_mode: pre.as_ref().map(|_| 0o644),
+        pre_image: pre,
+        post_image: Digest::of(path.as_bytes()),
+    }
+}
+
+/// ADR 0032 §1: a newest turn whose every mutation is proven `not_applied` has
+/// no file changes. It is a candidate with no targets, is consumed by an empty
+/// successful undo, and the turn before it is then reachable.
+#[test]
+fn an_all_not_applied_candidate_is_consumed_and_reaches_the_earlier_turn() {
+    let (_temp, _root, mut store) = written("a", Some(b"before"), b"after");
+    // A second, newer turn whose one write never happened.
+    let capture_plan = capture(
+        std::sync::Arc::new(DataRoot::open(_root.path(), false).unwrap()).as_ref(),
+        "b",
+        Some(b"old"),
+        b"new",
+    );
+    let mut writes = Writes {
+        call: None,
+        invocation: None,
+        step: 0,
+        plan: capture_plan.plan,
+        pre: capture_plan.pre,
+        path: "b",
+        post: b"new",
+        capture: None,
+        effect: FileEffect::NotApplied,
+    };
+    for _ in 0..TOOL_TURN_COMMITS {
+        let snapshot = store.snapshot();
+        let commit = writes.next(&snapshot);
+        store.append(commit, at()).unwrap();
+    }
+    let UndoSelection::Candidate {
+        turn_id,
+        targets,
+        omitted_calls,
+    } = store.snapshot().select_undo().unwrap()
+    else {
+        panic!("the not-applied turn is still a candidate")
+    };
+    assert!(
+        targets.is_empty(),
+        "nothing was applied, so nothing restores"
+    );
+    assert!(omitted_calls.is_empty());
+    let empty = UndoIntent {
+        undo_id: UndoId::new(),
+        target_turn_id: turn_id.clone(),
+        anchor_head: store.snapshot().head().cloned(),
+        configuration: store.snapshot().configuration().clone(),
+        policy_revision: store.snapshot().policy_revision().into(),
+        targets: Vec::new(),
+        omitted_calls: Vec::new(),
+    };
+    let snapshot = store.snapshot();
+    store
+        .append(intent_commit(&snapshot, empty.clone()), at())
+        .expect("an empty candidate is a valid intent");
+    let pending = store.snapshot();
+    store
+        .append(terminal(&pending, &empty), at())
+        .expect("an empty successful undo commits");
+    let note = store
+        .snapshot()
+        .entries()
+        .find_map(|(_, stored)| match &stored.entry.payload {
+            EntryPayload::UndoNote(note) => Some(note.text.clone()),
+            _ => None,
+        })
+        .expect("a note");
+    assert!(
+        note.contains("No trusted file changes required restoration."),
+        "{note}"
+    );
+    // The consumed turn no longer hides the earlier one.
+    let UndoSelection::Candidate {
+        turn_id: next,
+        targets,
+        ..
+    } = store.snapshot().select_undo().unwrap()
+    else {
+        panic!("the earlier turn is reachable again")
+    };
+    assert_ne!(next, turn_id);
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].path, "a");
+}
+
+/// Decision 17 compatibility: a committed v4 journal written by a v0.2.0
+/// binary records an `undo_intent` with the old `omitted_calls`. It replays
+/// byte-identical, the corrected selection would differ, and it still resolves
+/// and continues.
+#[test]
+fn a_committed_v0_2_0_undo_intent_replays_byte_identical_and_continues() {
+    let (temp, root) = environment();
+    load_artifacts(&root);
+    let bytes = source("undo-v0.2.0-omitted");
+    let id = install(&root, &bytes);
+    let mut store = JournalStore::open(root.clone(), &id).unwrap();
+    // Opening reconstructs the pending undo without rewriting a byte.
+    assert_eq!(fs::read(journal_path(&root, &id)).unwrap(), bytes);
+    let pending = store
+        .snapshot()
+        .unresolved_undo()
+        .expect("the recorded intent")
+        .clone();
+    assert!(
+        pending.intent.omitted_calls.is_empty(),
+        "the v0.2.0 writer omitted the skipped turn's bash call"
+    );
+    // The v0.2.1 selection would list it, which is why replay accepts both.
+    let UndoSelection::Candidate {
+        turn_id,
+        omitted_calls,
+        ..
+    } = store.snapshot().select_undo().unwrap()
+    else {
+        panic!("a candidate turn")
+    };
+    assert_eq!(turn_id, pending.intent.target_turn_id);
+    assert_eq!(omitted_calls.len(), 1);
+    // The journal continues: its own recorded intent resolves and a new turn
+    // follows in the same chain.
+    let snapshot = store.snapshot();
+    store
+        .append(terminal(&snapshot, &pending.intent), at())
+        .expect("the v0.2.0 intent resolves");
+    let snapshot = store.snapshot();
+    store
+        .append(start_turn(&snapshot, "after"), at())
+        .expect("the session continues");
+    assert!(store.snapshot().sequence() > pending.sequence);
+    let sequence = store.snapshot().sequence();
+    drop(store);
+    // The chain the fixture started is still one valid journal.
+    assert_eq!(
+        JournalStore::open(root, &id).unwrap().snapshot().sequence(),
+        sequence
+    );
+    drop(temp);
 }

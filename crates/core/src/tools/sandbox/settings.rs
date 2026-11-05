@@ -30,12 +30,25 @@ pub struct ToolchainSettings {
     pub env: BTreeMap<String, String>,
 }
 
-/// Same credential-name rule as the user TOML boundary.
+/// Words that name a credential on their own or as the last `_`-separated
+/// segment of a longer name: `TOKEN`/`GITHUB_TOKEN`, `DB_PASSWORD`,
+/// `CLIENT_SECRET`, `AWS_SECRET_ACCESS_KEY`.
+const CREDENTIAL_SEGMENTS: [&str; 7] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+    "key",
+];
+
+/// Same credential-name rule as the user TOML boundary: the whole name or its
+/// last `_`-separated segment, case-insensitively.
 pub fn credential_name(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    key == "api_key"
-        || key.ends_with("_key")
-        || matches!(key.as_str(), "token" | "secret" | "password")
+    let last = key.rsplit('_').next().unwrap_or(key.as_str());
+    CREDENTIAL_SEGMENTS.contains(&last)
 }
 
 impl ToolchainSettings {

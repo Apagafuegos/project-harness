@@ -219,10 +219,13 @@ acceptance.
 - Final-candidate dispatch [42062285842](https://github.com/Apagafuegos/project-harness/actions/runs/42062285842)
   passed on that exact commit: both `verify` jobs, both native musl builds,
   packaging and checksum generation; publish is skipped on dispatch by design.
-- Its `release-assets` artifact was downloaded and checked before tagging:
-  `SHA256SUMS` verified both archives; the archives held the binary, both
-  licences, README, `CHANGELOG.md`, `docs/` and `third-party-notices/`; the
-  aarch64 binary reported `harness 0.2.0`.
+- Its `release-assets` artifact was downloaded before tagging: `SHA256SUMS`
+  verified both archives. Only the **aarch64** archive was opened before
+  tagging; it held the binary, both licences, README, `CHANGELOG.md`, `docs/`
+  and `third-party-notices/`, and its binary reported `harness 0.2.0`. The
+  x86_64 archive's listing was compared **after** publication and holds the
+  same files. (Corrected in v0.2.1: the earlier text claimed both archives
+  were opened before the tag, which did not happen.)
 - Annotated tag `v0.2.0` on that commit started publish run
   [42064489275](https://github.com/Apagafuegos/project-harness/actions/runs/42064489275),
   which passed every job and published the

@@ -732,12 +732,18 @@ mod tests {
         let plan = serde_json::to_vec(&serde_json::json!({
             "name":"bash", "sandbox":{
                 "toolchain_paths":["/opt/rust"], "path_prepend":["/opt/rust/bin"],
+                "cargo_registry":"/opt/registry",
                 "env":{"RUSTUP_TOOLCHAIN":"1.99.1"}
             }
         }))
         .unwrap();
         let rows = text(&sandbox_summary(&plan));
         assert!(rows.contains("toolchain (read-only): /opt/rust"), "{rows}");
+        // Decision 10: every bound mount is in the preview, the registry too.
+        assert_eq!(
+            crate::wiring::sandbox_summary(&plan)[2],
+            "cargo registry (read-only): /opt/registry"
+        );
         assert!(
             rows.contains("sandbox PATH: /opt/rust/bin:/usr/bin:/bin"),
             "{rows}"

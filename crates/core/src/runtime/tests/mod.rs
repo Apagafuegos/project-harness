@@ -1410,3 +1410,43 @@ fn media_metadata_is_checked_before_preflight_and_verification_failure_faults_wa
     let finished = driver.finish();
     check_replay(&finished);
 }
+
+/// ADR 0032 §8: an undo whose records cannot fit is refused with a stable code
+/// before commit A, so a terminal result never becomes unrecordable only after
+/// files moved.
+#[test]
+fn an_undo_that_cannot_fit_one_record_is_refused_before_any_change() {
+    let intent = |targets: usize| UndoIntent {
+        undo_id: UndoId::new(),
+        target_turn_id: TurnId::new(),
+        anchor_head: None,
+        configuration: ArtifactRef {
+            sha256: Digest::of(b"configuration"),
+            bytes: 13,
+        },
+        policy_revision: "p1".into(),
+        targets: (0..targets)
+            .map(|n| {
+                let path = format!("{n:0>4000}");
+                UndoTarget {
+                    post_image: Digest::of(path.as_bytes()),
+                    path,
+                    invocation_ids: vec![InvocationId::new()],
+                    pre_image: None,
+                    pre_mode: None,
+                }
+            })
+            .collect(),
+        omitted_calls: Vec::new(),
+    };
+    assert_eq!(crate::runtime::core::undo_record_limit(&intent(1), 0), None);
+    let refusal = crate::runtime::core::undo_record_limit(&intent(3000), 0)
+        .expect("an intent over 8 MiB is refused");
+    match refusal {
+        Rejection::Undo { code, detail, .. } => {
+            assert_eq!(code, "undo_too_large");
+            assert!(detail.contains("nothing was changed"), "{detail}");
+        }
+        other => panic!("unexpected refusal: {other:?}"),
+    }
+}

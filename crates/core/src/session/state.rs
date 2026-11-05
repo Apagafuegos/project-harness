@@ -1250,11 +1250,21 @@ impl State {
                     return Err(StoreError::Invalid("undo_binding"));
                 };
                 require(
-                    turn_id == intent.target_turn_id
-                        && targets == intent.targets
-                        && omitted_calls == intent.omitted_calls,
+                    turn_id == intent.target_turn_id && targets == intent.targets,
                     "undo_binding",
                 )?;
+                // Decision 17: a v0.2.0 writer emitted only the target turn's
+                // own calls. A journal carrying that list still replays, and no
+                // third list is accepted. History is never rewritten.
+                let legacy = if omitted_calls == intent.omitted_calls {
+                    true
+                } else {
+                    let ancestry = self.ancestry(self.head.as_ref())?;
+                    let invocations = self.invocations_of(&turn_id);
+                    self.omitted_calls(&ancestry, &turn_id, &invocations, &[], false)
+                        == intent.omitted_calls
+                };
+                require(legacy, "undo_binding")?;
                 for target in &intent.targets {
                     require(
                         target.pre_image.is_some() == target.pre_mode.is_some(),
@@ -1281,7 +1291,9 @@ impl State {
                     "undo_recovery_state",
                 )?;
                 require(
-                    !uncertain.reason.is_empty() && uncertain.reason.len() <= 1024,
+                    !uncertain.reason.is_empty()
+                        && uncertain.reason.len()
+                            <= crate::session::undo::MAX_UNCERTAINTY_REASON_BYTES,
                     "undo_recovery_state",
                 )?;
                 pending.uncertain = true;
@@ -1374,11 +1386,15 @@ impl State {
             JournalEvent::UndoResult(result) => {
                 require(
                     commit.entries.len() == 1
+                        && notes.len() == 1
                         && commit.head.reason == HeadReason::Advance
                         && commit.head.from == self.head,
                     "undo_commit_shape",
                 )?;
-                let (entry, note) = notes[0];
+                let (entry, note) = notes
+                    .first()
+                    .copied()
+                    .ok_or(StoreError::Invalid("undo_commit_shape"))?;
                 self.undo_terminal(entry, note, result, sequence)?;
                 Ok(())
             }
@@ -1437,7 +1453,8 @@ impl State {
                     .as_deref()
                     .ok_or(StoreError::Invalid("undo_result_binding"))?;
                 require(
-                    !note.is_empty() && note.len() <= 64 * 1024,
+                    !note.is_empty()
+                        && note.len() <= crate::session::undo::MAX_RESOLUTION_NOTE_BYTES,
                     "undo_result_binding",
                 )?;
             }
@@ -1535,9 +1552,10 @@ impl State {
             }
         }
         let mut skipped: Vec<TurnId> = Vec::new();
-        let selected = turns.iter().rev().find_map(|turn| {
+        let mut selected = None;
+        for turn in turns.iter().rev() {
             if consumed.contains(turn) {
-                return None;
+                continue;
             }
             // Finished turns only; an unfinished one is not undoable evidence.
             if !self
@@ -1545,7 +1563,8 @@ impl State {
                 .get(turn)
                 .is_some_and(|info| info.outcome.is_some())
             {
-                return Some(Ok(UndoSelection::Incomplete(turn.clone())));
+                selected = Some(Ok(UndoSelection::Incomplete(turn.clone())));
+                break;
             }
             let invocations = self.invocations_of(turn);
             let mutations: Vec<&Invocation> = invocations
@@ -1560,13 +1579,18 @@ impl State {
                     .iter()
                     .any(|invocation| invocation.intent.effects.is_none())
                 {
-                    return Some(Ok(UndoSelection::Legacy(turn.clone())));
+                    selected = Some(Ok(UndoSelection::Legacy(turn.clone())));
+                    break;
                 }
                 skipped.push(turn.clone());
-                return None;
+                continue;
             }
-            Some(self.undo_candidate(turn, &ancestry, &invocations, &mutations))
-        });
+            // The newer turns skipped on the way stay in the report (decision
+            // 17): their bash calls are not reversed either.
+            selected =
+                Some(self.undo_candidate(turn, &ancestry, &invocations, &mutations, &skipped));
+            break;
+        }
         match selected {
             Some(selected) => selected,
             None => {
@@ -1607,6 +1631,7 @@ impl State {
         ancestry: &[&StoredEntry],
         invocations: &[&Invocation],
         mutations: &[&Invocation],
+        skipped: &[TurnId],
     ) -> Result<UndoSelection> {
         // The head must contain every recorded entry of the turn: a head
         // navigated into a turn is not the whole turn.
@@ -1625,7 +1650,11 @@ impl State {
         }
         let mut applied: Vec<(&Invocation, FileImage)> = Vec::new();
         for invocation in mutations {
-            let image = invocation.intent.file_image.clone().expect("checked above");
+            let image = invocation
+                .intent
+                .file_image
+                .clone()
+                .ok_or(StoreError::Invalid("undo_image_binding"))?;
             match self.file_effect(invocation) {
                 Some(FileEffect::Applied) => applied.push((invocation, image)),
                 Some(FileEffect::NotApplied) => {}
@@ -1644,8 +1673,12 @@ impl State {
                 .push((*invocation, image));
         }
         for (path, chain) in by_path {
-            let (first_invocation, first) = chain[0];
-            let (_, last) = chain[chain.len() - 1];
+            let Some((_, first)) = chain.first().copied() else {
+                continue;
+            };
+            let Some((_, last)) = chain.last().copied() else {
+                continue;
+            };
             let mode_ok = chain
                 .iter()
                 .all(|(_, image)| image.pre_image.is_some() == image.pre_mode.is_some());
@@ -1676,16 +1709,38 @@ impl State {
                 pre_mode: first.pre_mode,
                 post_image: last.post_image.clone(),
             });
-            let _ = first_invocation;
         }
         if !conflicts.is_empty() {
             return Ok(UndoSelection::Conflict(conflicts));
         }
-        // Omitted calls: every bash proposal of the turn, plus executed calls
-        // with mutation, process, network or external effects.
+        Ok(UndoSelection::Candidate {
+            turn_id: turn.clone(),
+            targets,
+            omitted_calls: self.omitted_calls(ancestry, turn, invocations, skipped, true),
+        })
+    }
+
+    /// The calls an undo does not reverse, in ancestral proposal order and
+    /// unique by `CallRef`: every bash proposal of the target turn and, on the
+    /// way to it, of the newer unconsumed turns that were skipped (decision
+    /// 17); plus executed non-write/edit calls of the target turn declaring a
+    /// mutation, process, network or external effect. `skipped_turns` false is
+    /// the v0.2.0 shape, accepted only when replaying an existing intent.
+    fn omitted_calls(
+        &self,
+        ancestry: &[&StoredEntry],
+        turn: &TurnId,
+        invocations: &[&Invocation],
+        skipped: &[TurnId],
+        skipped_turns: bool,
+    ) -> Vec<CallRef> {
         let mut omitted: Vec<CallRef> = Vec::new();
         for (call, name, at) in self.branch_proposals(ancestry) {
             let in_turn = at.as_ref() == Some(turn);
+            let skipped_turn = skipped_turns
+                && at
+                    .as_ref()
+                    .is_some_and(|other| other != turn && skipped.contains(other));
             // An executed call outside the trusted write/edit pair that
             // declares a mutation, process, network or external effect.
             let other_effect = in_turn
@@ -1704,15 +1759,11 @@ impl State {
                             })
                         })
                 });
-            if other_effect || (in_turn && name == "bash") {
+            if other_effect || ((in_turn || skipped_turn) && name == "bash") {
                 omitted.push(call);
             }
         }
-        Ok(UndoSelection::Candidate {
-            turn_id: turn.clone(),
-            targets,
-            omitted_calls: omitted,
-        })
+        omitted
     }
 
     /// Proposals of the branch, in ancestral proposal/block order.

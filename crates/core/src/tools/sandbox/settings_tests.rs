@@ -41,6 +41,52 @@ fn sandbox_env_names_are_refused_without_values() {
     .unwrap();
 }
 
+/// v0.2.1: credential-shaped names are refused by their last `_`-separated
+/// segment too, so a token that names itself a token never reaches the recorded
+/// configuration, the plan or the Bubblewrap command line.
+#[test]
+fn credential_shaped_env_names_are_refused_by_their_last_segment() {
+    for key in [
+        "GITHUB_TOKEN",
+        "NPM_TOKEN",
+        "DB_PASSWORD",
+        "CLIENT_SECRET",
+        "AWS_SECRET_ACCESS_KEY",
+        "SIGNING_PASSWD",
+        "MY_CREDENTIAL",
+        "SERVICE_CREDENTIALS",
+        "deploy_key",
+        "Token",
+    ] {
+        assert!(credential_name(key), "{key} is credential-shaped");
+        let settings = ToolchainSettings {
+            env: [(key.into(), "ENV_VALUE_SENTINEL".into())].into(),
+            ..Default::default()
+        };
+        let error = settings.validate().unwrap_err();
+        assert!(error.contains(key), "the error names the key: {error}");
+        assert!(!error.contains("ENV_VALUE_SENTINEL"), "{error}");
+    }
+    // Ordinary build-environment names keep working.
+    for key in [
+        "RUSTUP_TOOLCHAIN",
+        "RUSTUP_HOME",
+        "SCCACHE_DIR",
+        "CC",
+        "PKG_CONFIG_PATH",
+        "MONKEY",
+        "KEYBOARD_LAYOUT",
+    ] {
+        assert!(!credential_name(key), "{key} is not credential-shaped");
+        ToolchainSettings {
+            env: [(key.into(), "/tools".into())].into(),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_or_else(|error| panic!("{key}: {error}"));
+    }
+}
+
 #[test]
 fn sandbox_paths_refuse_invalid_spellings_duplicates_and_unmounted_prepends() {
     for path in [

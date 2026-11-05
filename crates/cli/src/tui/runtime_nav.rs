@@ -26,6 +26,8 @@ pub enum NavigationReply {
         startup: Option<Command>,
         /// Coherent replacement view; never compare startup against the old session.
         view: Box<RuntimeView>,
+        /// Remembered grants this session resumed, listed before the first turn.
+        resumed: Vec<super::ResumedGrant>,
     },
 }
 /// Owned navigation future, kept beside command futures in the nonblocking loop.
@@ -67,9 +69,11 @@ pub(super) fn apply(
             warnings,
             startup,
             view,
+            resumed,
         }) => {
             app.navigation_reset();
             app.on_subscription(SubscriptionItem::Reset(ClientView::from(*view)));
+            app.set_resumed_grants(resumed);
             if !warnings.is_empty() {
                 app.set_error(warnings.join("; "));
             }
@@ -112,6 +116,8 @@ pub struct SessionCommands {
     provider: Arc<dyn ModelProvider>,
     changed: watch::Sender<SessionHandle>,
     read_only_approval: bool,
+    /// Grants the current session resumed, listed at open and on handover.
+    resumed: Vec<super::ResumedGrant>,
 }
 impl SessionCommands {
     /// Adopt a session opened by shared wiring.
@@ -131,6 +137,7 @@ impl SessionCommands {
             provider,
             changed,
             read_only_approval: false,
+            resumed: opened.resumed_grants,
         }
     }
     /// Carry the resolved `approve_read_only` decision into every app this
@@ -196,6 +203,7 @@ impl SessionCommands {
         );
         app.set_catalog(self.options.driver.runtime.context.catalog.clone());
         app.set_read_only_approval(self.read_only_approval);
+        app.set_resumed_grants(self.resumed.clone());
         app
     }
 }
@@ -444,6 +452,7 @@ impl Commands for SessionCommands {
                 warnings: opened.warnings,
                 startup,
                 view,
+                resumed: opened.resumed_grants,
             })
         })
     }

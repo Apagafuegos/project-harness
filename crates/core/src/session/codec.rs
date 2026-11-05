@@ -158,9 +158,10 @@ pub(crate) fn decode(line: &[u8]) -> Result<(Record, Digest)> {
     Ok((record, envelope.sha256))
 }
 
-/// Frame `record`, which must be [`CURRENT_VERSION`]: no path writes an older
-/// version. The bytes are decoded again, so they pass the reader's checks.
-pub(crate) fn encode(record: &Record) -> Result<(Vec<u8>, Digest)> {
+/// The exact envelope bytes of `record` without the trailing LF, bounded by
+/// the physical line limit. No schema or payload check: a caller that has not
+/// built the final record (the undo preflight) can still measure it.
+pub(crate) fn frame(record: &Record) -> Result<(Vec<u8>, Digest)> {
     if record.version != CURRENT_VERSION {
         return Err(StoreError::Invalid("write_version"));
     }
@@ -172,10 +173,17 @@ pub(crate) fn encode(record: &Record) -> Result<(Vec<u8>, Digest)> {
     let raw = RawValue::from_string(String::from_utf8(bounded_json(record)?).expect("JSON UTF-8"))
         .map_err(|_| StoreError::Invalid("serialization"))?;
     let digest = Digest::of(raw.get().as_bytes());
-    let mut bytes = bounded_json(&Output {
+    let bytes = bounded_json(&Output {
         record: &raw,
         sha256: &digest,
     })?;
+    Ok((bytes, digest))
+}
+
+/// Frame `record`, which must be [`CURRENT_VERSION`]: no path writes an older
+/// version. The bytes are decoded again, so they pass the reader's checks.
+pub(crate) fn encode(record: &Record) -> Result<(Vec<u8>, Digest)> {
+    let (mut bytes, digest) = frame(record)?;
     decode(&bytes)?;
     bytes.push(b'\n');
     Ok((bytes, digest))

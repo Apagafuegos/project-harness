@@ -67,6 +67,7 @@ struct Fixture {
     workspace: std::path::PathBuf,
     root: Arc<DataRoot>,
     handle: SessionHandle,
+    files: Arc<FsWorkspace>,
 }
 impl Fixture {
     async fn turn(fail_temporary: bool) -> Self {
@@ -103,7 +104,7 @@ impl Fixture {
         config.tools = ToolHost {
             workspace: files.clone(),
             executors: vec![executor],
-            files: Some(files),
+            files: Some(files.clone()),
         };
         let mut steps = vec![ProviderStep::Event(ProviderEvent::Started)];
         for (block_index, path) in ["a", "b"].into_iter().enumerate() {
@@ -179,6 +180,7 @@ impl Fixture {
             workspace,
             root,
             handle,
+            files,
         }
     }
     async fn preview(&self) -> UndoPreview {
@@ -345,5 +347,91 @@ async fn failed_commit_a_discards_executor_staging() {
     for path in ["a", "b"] {
         assert_eq!(fs::read(fixture.workspace.join(path)).unwrap(), b"after");
     }
+    within("the session to shut down", fixture.handle.shutdown()).await;
+}
+
+impl Fixture {
+    /// The exact target set the runtime would restore, prepared as if commit A
+    /// had already been acknowledged.
+    async fn prepared(&self) -> (crate::tools::fs::PreparedUndo, Vec<UndoTarget>) {
+        let snapshot = self.handle.view().await.unwrap().snapshot;
+        let UndoSelection::Candidate { targets, .. } = snapshot.select_undo().unwrap() else {
+            panic!("a candidate turn")
+        };
+        let identity = crate::tools::WorkspaceIdentity(self.workspace.to_string_lossy().into());
+        let prepared = self
+            .files
+            .prepare_undo(&identity, &targets, &self.root)
+            .unwrap_or_else(|conflicts| panic!("preflight refused: {conflicts:?}"));
+        (prepared, targets)
+    }
+}
+
+/// ADR 0032 step 5, both sides: a recheck refusal that happens before any
+/// mutation is `not_applied`; once a rename or unlink is attempted it stays
+/// uncertain.
+#[tokio::test]
+async fn a_first_target_recheck_refusal_is_not_applied_and_a_later_one_is_uncertain() {
+    let fixture = Fixture::turn(false).await;
+    let (prepared, targets) = fixture.prepared().await;
+    let identity = crate::tools::WorkspaceIdentity(fixture.workspace.to_string_lossy().into());
+    // Side A: the first target changes after the whole-set recheck and before
+    // its own recheck. Nothing was mutated, so the undo is refused as
+    // not_applied and no file is claimed unknown.
+    let path = fixture.workspace.join("a");
+    let mut fired = false;
+    let outcome = fixture.files.apply_undo_hooked(
+        prepared,
+        &identity,
+        &targets,
+        &fixture.root,
+        &mut |target, step| {
+            if target == "a" && step == Step::Resolve && !fired {
+                fired = true;
+                fs::write(&path, "user edit").unwrap();
+            }
+            Ok(())
+        },
+    );
+    let crate::tools::UndoExecution::Refused(conflicts) = outcome else {
+        panic!("a recheck refusal before any mutation is not_applied, got {outcome:?}")
+    };
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "a");
+    assert_eq!(conflicts[0].reason, "changed");
+    assert_eq!(fs::read(&path).unwrap(), b"user edit");
+    assert_eq!(fs::read(fixture.workspace.join("b")).unwrap(), b"after");
+
+    // Side B: the first target is rechecked and then the rename attempt fails.
+    // A rename may have happened, so this stays uncertain.
+    fs::write(&path, "after").unwrap();
+    let (prepared, targets) = fixture.prepared().await;
+    let outcome = fixture.files.apply_undo_hooked(
+        prepared,
+        &identity,
+        &targets,
+        &fixture.root,
+        &mut |target, step| {
+            if target == "a" && step == Step::Rename {
+                return Err(crate::tools::Refusal::new(
+                    crate::session::ResultCode::InfrastructureFailure,
+                    "injected rename failure",
+                ));
+            }
+            Ok(())
+        },
+    );
+    let crate::tools::UndoExecution::Done { files, complete } = outcome else {
+        panic!("a failed mutation is uncertainty, got {outcome:?}")
+    };
+    assert!(!complete);
+    assert_eq!(files[0].path, "a");
+    assert_eq!(files[0].outcome, FileOutcome::Unknown);
+    assert!(
+        files[1..]
+            .iter()
+            .all(|row| row.outcome == FileOutcome::Unknown)
+    );
+    assert_eq!(fixture.temporaries(), 0, "staging is never left behind");
     within("the session to shut down", fixture.handle.shutdown()).await;
 }

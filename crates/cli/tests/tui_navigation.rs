@@ -733,3 +733,145 @@ async fn dialogs_render_and_map_keys_without_the_loop() {
 
 #[path = "support/navigation_cases.rs"]
 mod cases;
+
+/// One session whose recorded policy holds `allowances`, ready to be resumed.
+async fn session_with_grants(f: &Fixture, allowances: serde_json::Value) -> SessionId {
+    let root = Arc::new(DataRoot::open(&f.options.data_root, true).unwrap());
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "policy_revision": "tui-test",
+        "enabled_tools": ["read", "write", "edit", "bash"],
+        "workspace_read": "ask",
+        "workspace_mutation": "ask",
+        "process": "ask",
+        "network": "deny",
+        "protected_paths": [],
+        "allowances": allowances
+    }))
+    .unwrap();
+    let configuration = root.put_artifact(&bytes).unwrap();
+    let session = SessionId::new();
+    let handle = SessionHandle::create(
+        root,
+        session.clone(),
+        SessionHeader {
+            workspace: f.options.workspace.to_string_lossy().into(),
+            initial_model: f.options.model.clone(),
+            policy_revision: "tui-test".into(),
+            configuration,
+        },
+        f.provider.clone(),
+        f.options.driver.clone(),
+    )
+    .await
+    .unwrap();
+    handle.shutdown().await;
+    session
+}
+
+/// Decision 18: opening a session with recorded allowances lists every resumed
+/// grant in the transcript before any turn, escaped and bounded, and changes
+/// nothing about the recorded grants.
+#[tokio::test]
+async fn resumed_grants_are_listed_before_any_turn() {
+    let f = Fixture::new(Vec::new());
+    let allowances = serde_json::json!([
+        {"tool": "write", "path": "notes/"},
+        {"tool": "edit", "path": "a.txt"},
+        {"tool": "bash", "command": "cargo test", "cwd": "."}
+    ]);
+    let session = session_with_grants(&f, allowances.clone()).await;
+    let mut options = f.options.clone();
+    options.session = Some(session.clone());
+    let opened = wiring::open_session(&options, f.provider.clone())
+        .await
+        .expect("the TUI resumes its recorded grants");
+    assert_eq!(
+        opened.resumed_grants,
+        vec![
+            harness::tui::ResumedGrant::File {
+                tool: "write".into(),
+                path: "notes/".into(),
+                prefix: true,
+            },
+            harness::tui::ResumedGrant::File {
+                tool: "edit".into(),
+                path: "a.txt".into(),
+                prefix: false,
+            },
+            harness::tui::ResumedGrant::Bash {
+                command: "cargo test".into(),
+                cwd: ".".into(),
+            },
+        ]
+    );
+    let host = SessionCommands::new(opened, options.clone(), f.provider.clone());
+    let mut app = reset(&host).await;
+    assert_eq!(app.resumed_grants().len(), 3);
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        screen.contains("── resumed grants from this session's journal: 3 ──"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("write · path: \"notes/\" (and everything below)"),
+        "{screen}"
+    );
+    assert!(screen.contains("edit · path: \"a.txt\""), "{screen}");
+    assert!(
+        screen.contains("bash · command: \"cargo test\" · cwd: \".\""),
+        "{screen}"
+    );
+    // The recorded grants are untouched by the listing.
+    let root = DataRoot::open(&options.data_root, false).unwrap();
+    let snapshot = host.handle().await.view().await.unwrap().snapshot;
+    let policy: serde_json::Value = serde_json::from_slice(
+        &root
+            .read_artifact(snapshot.configuration(), 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(policy["allowances"], allowances);
+    host.shutdown().await;
+}
+
+/// A session with no recorded grant lists nothing, and a grant that holds a
+/// control character is escaped rather than written to the terminal raw.
+#[tokio::test]
+async fn no_grants_list_nothing_and_a_control_character_is_escaped() {
+    let plain = Fixture::new(Vec::new());
+    let session = session_with_grants(&plain, serde_json::json!([])).await;
+    let mut options = plain.options.clone();
+    options.session = Some(session);
+    let opened = wiring::open_session(&options, plain.provider.clone())
+        .await
+        .unwrap();
+    assert!(opened.resumed_grants.is_empty());
+    let host = SessionCommands::new(opened, options.clone(), plain.provider.clone());
+    let mut app = reset(&host).await;
+    let screen = render(&mut app, 80, 24);
+    assert!(!screen.contains("resumed grants"), "{screen}");
+    host.shutdown().await;
+
+    let f = Fixture::new(Vec::new());
+    let session = session_with_grants(
+        &f,
+        serde_json::json!([{"tool":"write","path":"odd\u{7}.txt"}]),
+    )
+    .await;
+    let mut options = f.options.clone();
+    options.session = Some(session);
+    let opened = wiring::open_session(&options, f.provider.clone())
+        .await
+        .unwrap();
+    assert_eq!(opened.resumed_grants.len(), 1);
+    let host = SessionCommands::new(opened, options.clone(), f.provider.clone());
+    let mut app = reset(&host).await;
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.contains("resumed grants"), "{screen}");
+    assert!(
+        screen.contains(r#"write · path: "odd\u{7}.txt""#),
+        "a control character is escaped: {screen}"
+    );
+    assert!(!screen.contains('\u{7}'), "never written raw: {screen}");
+    host.shutdown().await;
+}

@@ -77,6 +77,16 @@ struct PreImage {
     text: Option<String>,
 }
 
+/// How one target's application failed, for ADR 0032 step 5's classification:
+/// a recheck refusal changed nothing, while a failure at or after a rename or
+/// unlink attempt may have.
+enum ApplyFailure {
+    /// The fresh re-resolution or recheck refused, before any mutation.
+    Recheck(&'static str),
+    /// The mutation itself was attempted or may have happened.
+    Mutation,
+}
+
 /// Executor-owned staging; dropping it removes every uncommitted temporary.
 pub(crate) struct PreparedUndo {
     targets: Vec<UndoTarget>,
@@ -310,6 +320,20 @@ impl FsWorkspace {
         targets: &[UndoTarget],
         artifacts: &DataRoot,
     ) -> UndoExecution {
+        self.apply_undo_hooked(prepared, workspace, targets, artifacts, &mut |_, _| Ok(()))
+    }
+
+    /// [`Self::apply_undo`] with a per-target step hook, so a test can place a
+    /// failure exactly before or after a target's mutation. Production always
+    /// passes a no-op.
+    pub(super) fn apply_undo_hooked(
+        &self,
+        prepared: PreparedUndo,
+        workspace: &WorkspaceIdentity,
+        targets: &[UndoTarget],
+        artifacts: &DataRoot,
+        hook: &mut dyn FnMut(&str, Step) -> Result<(), Refusal>,
+    ) -> UndoExecution {
         if self.identity != *workspace || prepared.targets != targets {
             return UndoExecution::Refused(
                 targets
@@ -325,12 +349,12 @@ impl FsWorkspace {
             targets,
             mut staged,
         } = prepared;
-        let mut hook = |_: Step| Ok(());
+        let mut noop = |_: Step| Ok(());
         let mut control = Control {
             started: Instant::now(),
             timeout: Some(DEADLINE),
             cancellation: None,
-            hook: &mut hook,
+            hook: &mut noop,
         };
         // A conflict arising after preparation is durable not_applied evidence.
         if let Err(conflicts) = self.undo_preflight(&targets, artifacts, &mut control) {
@@ -339,8 +363,19 @@ impl FsWorkspace {
         let mut files: Vec<UndoFileOutcome> = Vec::new();
         for (index, target) in targets.iter().enumerate() {
             let path = target.path.clone();
-            match self.apply(target, staged[index].as_mut(), artifacts, &mut control) {
+            match self.apply(
+                target,
+                staged[index].as_mut(),
+                artifacts,
+                &mut control,
+                hook,
+            ) {
                 Ok(outcome) => files.push(UndoFileOutcome { path, outcome }),
+                // A recheck refusal before any mutation changed nothing: the
+                // whole set is refused as not_applied, never as uncertainty.
+                Err(ApplyFailure::Recheck(reason)) if files.is_empty() => {
+                    return UndoExecution::Refused(vec![UndoConflict { path, reason }]);
+                }
                 Err(_) => {
                     // This target may have changed; nothing after it is tried.
                     files.push(UndoFileOutcome {
@@ -527,17 +562,24 @@ impl FsWorkspace {
     }
 
     /// One target's mutation, after a fresh re-resolution from the pinned root.
+    /// The failure class separates a recheck refusal, which changed nothing,
+    /// from a failure at or after the rename/unlink commit attempt.
     fn apply(
         &self,
         target: &UndoTarget,
         staged: Option<&mut Temporary>,
         artifacts: &DataRoot,
         control: &mut Control<'_>,
-    ) -> Result<FileOutcome, ()> {
+        hook: &mut dyn FnMut(&str, Step) -> Result<(), Refusal>,
+    ) -> Result<FileOutcome, ApplyFailure> {
+        hook(&target.path, Step::Resolve).map_err(|_| ApplyFailure::Recheck("unresolved"))?;
         self.undo_check(target, artifacts, control)
-            .map_err(|_| ())?;
-        let path = WorkspacePath::new(&target.path).map_err(|_| ())?;
-        let resolved = self.resolve(&path, control).map_err(|_| ())?;
+            .map_err(ApplyFailure::Recheck)?;
+        let path =
+            WorkspacePath::new(&target.path).map_err(|_| ApplyFailure::Recheck("invalid_path"))?;
+        let resolved = self
+            .resolve(&path, control)
+            .map_err(|_| ApplyFailure::Recheck("unresolved"))?;
         let parent = open_relative(
             self.root.as_fd(),
             path.parent().as_str(),
@@ -546,16 +588,25 @@ impl FsWorkspace {
             control,
             Step::Resolve,
         )
-        .map_err(|_| ())?;
-        control.check(Step::Stat).map_err(|_| ())?;
-        if ObjectId::of(&fs::fstat(&parent).map_err(|_| ())?)
-            != ObjectId::of(&fs::fstat(&resolved.parent).map_err(|_| ())?)
+        .map_err(|_| ApplyFailure::Recheck("parent_changed"))?;
+        control
+            .check(Step::Stat)
+            .map_err(|_| ApplyFailure::Recheck("unresolved"))?;
+        if ObjectId::of(&fs::fstat(&parent).map_err(|_| ApplyFailure::Recheck("unresolved"))?)
+            != ObjectId::of(
+                &fs::fstat(&resolved.parent).map_err(|_| ApplyFailure::Recheck("unresolved"))?,
+            )
         {
-            return Err(());
+            return Err(ApplyFailure::Recheck("parent_changed"));
         }
         match staged {
             Some(temporary) => {
-                control.check(Step::Rename).map_err(|_| ())?;
+                // Past this point a rename has been attempted: never claim
+                // not_applied for it (ADR 0032 step 5).
+                hook(&target.path, Step::Rename).map_err(|_| ApplyFailure::Mutation)?;
+                control
+                    .check(Step::Rename)
+                    .map_err(|_| ApplyFailure::Mutation)?;
                 fs::renameat_with(
                     &parent,
                     temporary.name.as_str(),
@@ -563,14 +614,15 @@ impl FsWorkspace {
                     resolved.name.as_str(),
                     RenameFlags::empty(),
                 )
-                .map_err(|_| ())?;
+                .map_err(|_| ApplyFailure::Mutation)?;
                 temporary.disarm();
-                fs::fsync(&parent).map_err(|_| ())?;
+                fs::fsync(&parent).map_err(|_| ApplyFailure::Mutation)?;
                 Ok(FileOutcome::Restored)
             }
             None => {
-                fs::unlinkat(&parent, resolved.name.as_str(), AtFlags::empty()).map_err(|_| ())?;
-                fs::fsync(&parent).map_err(|_| ())?;
+                fs::unlinkat(&parent, resolved.name.as_str(), AtFlags::empty())
+                    .map_err(|_| ApplyFailure::Mutation)?;
+                fs::fsync(&parent).map_err(|_| ApplyFailure::Mutation)?;
                 Ok(FileOutcome::Removed)
             }
         }

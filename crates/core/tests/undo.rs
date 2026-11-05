@@ -745,3 +745,226 @@ async fn a_protected_target_never_reaches_capture_or_undo() {
     );
     assert!(event(&fixture.journal(), "execution_intent").is_none());
 }
+
+/// A write turn that created a file inside `d`, then `d` made read-only: the
+/// unlink cannot happen, so the undo stops after changing nothing.
+async fn partial_restore(fixture: &Fixture) -> (SessionHandle, UndoPreview) {
+    fs::create_dir(fixture.path("d")).unwrap();
+    let handle = fixture
+        .turn(&[("write", json!({"path":"d/new.txt","text":"x"}))])
+        .await;
+    let shown = self::preview(&handle).await;
+    fs::set_permissions(fixture.path("d"), fs::Permissions::from_mode(0o555)).unwrap();
+    (handle, shown)
+}
+
+async fn wait_awaiting_undo(handle: &SessionHandle) -> RuntimeView {
+    bounded(async {
+        loop {
+            let view = handle.view().await.unwrap();
+            assert_ne!(view.phase, Phase::Faulted, "a refusal faulted the session");
+            if view.phase == Phase::AwaitingResolution && view.undo.is_some() {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+}
+
+/// v0.2.1: a partial restoration always answers its command, with a stable
+/// code that names the undo and says where it is resolved.
+#[tokio::test]
+async fn a_partial_restore_answers_the_undo_command() {
+    let fixture = Fixture::new();
+    let (handle, shown) = partial_restore(&fixture).await;
+    let reply = tokio::time::timeout(Duration::from_secs(20), undo(&handle, &shown))
+        .await
+        .expect("the undo command must be answered, not hang");
+    let view = wait_awaiting_undo(&handle).await;
+    let pending = view
+        .snapshot
+        .unresolved_undo()
+        .expect("the interrupted undo");
+    match reply {
+        Err(Rejection::Undo { code, detail, .. }) => {
+            assert_eq!(code, "undo_interrupted");
+            assert!(
+                detail.contains(pending.intent.undo_id.as_str()),
+                "the refusal names the undo: {detail}"
+            );
+            assert!(detail.contains("TUI"), "{detail}");
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    // Nothing was restored, and the intent is explicitly uncertain.
+    assert!(pending.uncertain);
+    assert!(event(&fixture.journal(), "undo_result").is_none());
+    assert_eq!(fs::read(fixture.path("d/new.txt")).unwrap(), b"x");
+    fs::set_permissions(fixture.path("d"), fs::Permissions::from_mode(0o755)).unwrap();
+    handle.shutdown().await;
+}
+
+/// v0.2.1: a note over the storage limit is refused before a commit is built;
+/// the session stays resolvable and the dialog's answer is never lost to a
+/// fault.
+#[tokio::test]
+async fn an_over_long_resolution_note_is_refused_and_the_undo_stays_resolvable() {
+    let fixture = Fixture::new();
+    let (handle, shown) = partial_restore(&fixture).await;
+    let _ = tokio::time::timeout(Duration::from_secs(20), undo(&handle, &shown)).await;
+    let view = wait_awaiting_undo(&handle).await;
+    let undo_id = view.undo.as_ref().unwrap().undo_id.clone();
+    let refusal = bounded(handle.command(Command::ResolveUndo {
+        undo_id: undo_id.clone(),
+        resolution: UndoResolution::AcknowledgedUnknown {
+            note: "n".repeat(100 * 1024),
+        },
+    }))
+    .await
+    .expect_err("a note over 64 KiB is refused");
+    assert_eq!(refusal, Rejection::Invalid("resolution_note_too_large"));
+    // Still awaiting resolution: no fault, no lost intent.
+    let view = wait_awaiting_undo(&handle).await;
+    assert_eq!(view.undo.as_ref().unwrap().undo_id, undo_id);
+    // The same undo resolves with a note inside the limit.
+    bounded(handle.command(Command::ResolveUndo {
+        undo_id: undo_id.clone(),
+        resolution: UndoResolution::AcknowledgedUnknown {
+            note: "I checked by hand".into(),
+        },
+    }))
+    .await
+    .unwrap();
+    wait(&handle, idle).await;
+    let records = fixture.journal();
+    let note = entry(&records, "undo_note").expect("a recorded note");
+    assert_eq!(note["outcome"], "acknowledged_unknown");
+    fs::set_permissions(fixture.path("d"), fs::Permissions::from_mode(0o755)).unwrap();
+    handle.shutdown().await;
+}
+
+/// v0.2.1: a row outcome storage would reject is refused before the commit,
+/// instead of reaching storage and faulting the session.
+#[tokio::test]
+async fn an_invalid_observed_row_is_refused_and_the_undo_stays_resolvable() {
+    let fixture = Fixture::new();
+    let (handle, shown) = partial_restore(&fixture).await;
+    let _ = tokio::time::timeout(Duration::from_secs(20), undo(&handle, &shown)).await;
+    let view = wait_awaiting_undo(&handle).await;
+    let undo_id = view.undo.as_ref().unwrap().undo_id.clone();
+    let targets = view
+        .snapshot
+        .unresolved_undo()
+        .unwrap()
+        .intent
+        .targets
+        .clone();
+    // `restored` is only valid for a succeeded undo; an observed row must be
+    // an observation.
+    let refusal = bounded(
+        handle.command(Command::ResolveUndo {
+            undo_id: undo_id.clone(),
+            resolution: UndoResolution::Observed {
+                files: targets
+                    .iter()
+                    .map(|target| UndoFileOutcome {
+                        path: target.path.clone(),
+                        outcome: FileOutcome::Restored,
+                    })
+                    .collect(),
+                note: "I put it back".into(),
+            },
+        }),
+    )
+    .await
+    .expect_err("an invalid row is refused");
+    assert_eq!(refusal, Rejection::Invalid("undo_rows_mismatch"));
+    let view = wait_awaiting_undo(&handle).await;
+    assert_eq!(view.undo.as_ref().unwrap().undo_id, undo_id);
+    bounded(
+        handle.command(Command::ResolveUndo {
+            undo_id: undo_id.clone(),
+            resolution: UndoResolution::Observed {
+                files: targets
+                    .iter()
+                    .map(|target| UndoFileOutcome {
+                        path: target.path.clone(),
+                        outcome: FileOutcome::ObservedRemoved,
+                    })
+                    .collect(),
+                note: "I removed it".into(),
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    wait(&handle, idle).await;
+    fs::set_permissions(fixture.path("d"), fs::Permissions::from_mode(0o755)).unwrap();
+    handle.shutdown().await;
+}
+
+/// Decision 17: undoing an earlier turn reports the bash calls of the newer
+/// turns skipped on the way, in the preview, the note and the result.
+#[tokio::test]
+async fn a_skipped_newer_bash_call_is_reported_as_not_reversed() {
+    let fixture = Fixture::new();
+    fs::write(fixture.path("a"), "before").unwrap();
+    let handle = fixture
+        .create(Arc::new(ScriptedProvider::new([
+            proposal(&[("write", json!({"path":"a","text":"after","overwrite":true}))]),
+            reply(),
+            proposal(&[("bash", json!({"command":"true"}))]),
+            reply(),
+        ])))
+        .await;
+    for _ in 0..2 {
+        start(&handle).await;
+        for _ in 0..3 {
+            let Some(ticket) = wait(&handle, |v| v.pending_approval.is_some() || idle(v))
+                .await
+                .pending_approval
+            else {
+                break;
+            };
+            bounded(handle.command(Command::SubmitApproval {
+                approval_id: ticket.approval_id,
+                plan_digest: ticket.plan_digest,
+                decision: Decision::Allow,
+                remember: false,
+            }))
+            .await
+            .unwrap();
+        }
+        wait(&handle, idle).await;
+    }
+    let shown = preview(&handle).await;
+    let tools: Vec<_> = shown.omitted.iter().map(|call| call.tool.clone()).collect();
+    assert_eq!(tools, ["bash"], "the skipped bash call is listed once");
+    let bash_call = shown.omitted[0].call.clone();
+    let Accepted::UndoCompleted { outcome, .. } = undo(&handle, &shown).await.unwrap() else {
+        panic!("unexpected reply")
+    };
+    assert_eq!(outcome, UndoOutcome::Succeeded);
+    let records = fixture.journal();
+    let note = entry(&records, "undo_note").expect("a recorded note");
+    let text = note["text"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("Not reversed: bash call {}", bash_call.call_id)),
+        "{text}"
+    );
+    // The undo consumed the write turn; the bash-only turn stays "nothing to
+    // undo" and is still reported there.
+    match bounded(handle.command(Command::PreviewUndo)).await {
+        Err(Rejection::Undo { code, omitted, .. }) => {
+            assert_eq!(code, "undo_nothing");
+            assert_eq!(
+                omitted.len(),
+                1,
+                "the skipped turn's bash call stays visible"
+            );
+        }
+        other => panic!("unexpected reply: {other:?}"),
+    }
+    handle.shutdown().await;
+}

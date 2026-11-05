@@ -24,6 +24,12 @@ the v3-only entry kind.
   `context_control` v3 entries: turn 1 pinned, turn 2 excluded, turn 3 pinned
   and then reset to `default`. Every turn stays in history; only projection
   changes, and the control entries are not dialogue.
+- [v0.2.0 undo intent](undo-v0.2.0-omitted.jsonl): v4. A completed captured
+  write, a newer bash-only turn, and an `undo_intent` written by a v0.2.0
+  binary, whose `omitted_calls` lists only the target turn's own calls. v0.2.1
+  writers report the newer turn's bash call too, and replay accepts either list
+  and no other (decision 17). Opening it appends nothing; the storage tests
+  resolve it and continue the same chain.
 
 The [v1](../schema/session-v1.schema.json), [v2](../schema/session-v2.schema.json)
 and [v3](../schema/session-v3.schema.json) schemas each check one record

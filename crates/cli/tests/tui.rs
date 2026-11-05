@@ -175,6 +175,63 @@ impl Fixture {
         self.create_with(scripts, false).await
     }
 
+    async fn open(&self, provider: Arc<ScriptedProvider>) -> Recorded {
+        let handle = tokio::time::timeout(
+            DEADLINE,
+            SessionHandle::open_with_tools(
+                self.root.clone(),
+                self.session.clone(),
+                provider,
+                driver_config(false),
+                &self.host,
+            ),
+        )
+        .await
+        .expect("session open deadline")
+        .expect("session open");
+        Recorded::new(self.info(), handle).await
+    }
+
+    /// Append a durable `undo_intent` with no result, as a crash leaves it.
+    fn inject_pending_undo(&self) {
+        let store = JournalStore::open(self.root.clone(), &self.session).unwrap();
+        let snapshot = store.snapshot();
+        let UndoSelection::Candidate {
+            turn_id,
+            targets,
+            omitted_calls,
+        } = snapshot.select_undo().unwrap()
+        else {
+            panic!("a candidate turn")
+        };
+        drop(store);
+        let mut store = JournalStore::open(self.root.clone(), &self.session).unwrap();
+        store
+            .append(
+                Commit {
+                    command_id: None,
+                    command_fingerprint: None,
+                    head: HeadChange {
+                        from: snapshot.head().cloned(),
+                        to: snapshot.head().cloned(),
+                        reason: HeadReason::Retain,
+                    },
+                    entries: Vec::new(),
+                    events: vec![JournalEvent::UndoIntent(UndoIntent {
+                        undo_id: UndoId::new(),
+                        target_turn_id: turn_id,
+                        anchor_head: snapshot.head().cloned(),
+                        configuration: snapshot.configuration().clone(),
+                        policy_revision: snapshot.policy_revision().into(),
+                        targets,
+                        omitted_calls,
+                    })],
+                },
+                Timestamp::now(),
+            )
+            .unwrap();
+    }
+
     async fn create_with(
         &self,
         scripts: impl IntoIterator<Item = Script>,
@@ -2355,4 +2412,128 @@ async fn m7_06_render_evidence() {
 
     let path = std::env::var("HARNESS_M7_06_EVIDENCE").expect("explicit evidence output path");
     fs::write(path, output).unwrap();
+}
+
+/// Item 7: a newest turn whose mutations are all `not_applied` is a candidate
+/// with no targets. The TUI offers its confirmation so the turn can be
+/// consumed, instead of a dead-end "nothing to undo".
+#[tokio::test]
+async fn an_all_not_applied_candidate_reaches_the_confirm_modal() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("done")]).await;
+    let turn = recorded.start("hello").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let view = app.view().cloned().expect("a reset arrived");
+    let preview = UndoPreview {
+        undo_id: UndoId::new(),
+        target_turn_id: turn.clone(),
+        head: view.snapshot.head().cloned(),
+        sequence: view.snapshot.sequence(),
+        configuration: Digest::of(b"configuration"),
+        targets: Vec::new(),
+        omitted: Vec::new(),
+    };
+    assert!(app.undo_reply(&Ok(Accepted::UndoPreviewed {
+        preview: Box::new(preview)
+    })));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("Undo agent turn"), "{screen}");
+    assert!(
+        screen.contains("No trusted file changes required restoration."),
+        "{screen}"
+    );
+    assert!(screen.contains("y confirms"), "{screen}");
+    recorded.shutdown().await;
+}
+
+/// Item 2: a refused resolution keeps the dialog and its draft, so the user
+/// corrects the answer instead of losing it, and shows the stable code.
+#[tokio::test]
+async fn a_refused_undo_resolution_keeps_the_dialog_and_draft() {
+    let fixture = Fixture::new(false);
+    fs::write(fixture.workspace.join("a"), "before").unwrap();
+    let mut recorded = fixture
+        .create([
+            proposal("write", json!({"path":"a","text":"after","overwrite":true})),
+            reply("done"),
+        ])
+        .await;
+    let turn = recorded.start("write it").await;
+    let ticket = recorded.wait_approval().await;
+    recorded.submit(&ticket, Decision::Allow, false).await;
+    recorded.wait_finished(&turn).await;
+    recorded.shutdown().await;
+    fixture.inject_pending_undo();
+    let mut reopened = fixture.open(Arc::new(ScriptedProvider::new([]))).await;
+    reopened
+        .pump(|view| view.phase == Phase::AwaitingResolution && view.undo.is_some())
+        .await;
+    let mut app = reopened.app();
+    // The recovery dialog opens by itself, then the user types a note. The
+    // dialog's own row keys (r/x/o/u/a) stay commands, so the draft uses
+    // capitals: those never change a row.
+    type_text(&mut app, "NOTE");
+    let actions = app.on_key(key(KeyCode::Enter));
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, Action::Command(Command::ResolveUndo { .. }))),
+        "{actions:?}"
+    );
+    // The engine refuses the answer; the dialog and its draft survive.
+    assert!(app.undo_reply(&Err(Rejection::Invalid("resolution_note_too_large"))));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("resolve interrupted undo"), "{screen}");
+    assert!(screen.contains("note: NOTE"), "{screen}");
+    assert!(
+        screen.contains("error: command rejected: resolution_note_too_large"),
+        "{screen}"
+    );
+    reopened.shutdown().await;
+}
+
+/// Decision 17: the confirmation modal lists the calls the undo will not
+/// reverse, including those of newer skipped turns.
+#[tokio::test]
+async fn the_undo_modal_lists_every_omitted_call() {
+    let fixture = Fixture::new(false);
+    let mut recorded = fixture.create([reply("done")]).await;
+    let turn = recorded.start("hello").await;
+    recorded.wait_finished(&turn).await;
+    let mut app = recorded.app();
+    let view = app.view().cloned().expect("a reset arrived");
+    let call = harness_core::session::CallRef {
+        response_entry_id: harness_core::session::EntryId::new(),
+        call_id: harness_core::session::CallId::new(),
+    };
+    let preview = UndoPreview {
+        undo_id: UndoId::new(),
+        target_turn_id: turn,
+        head: view.snapshot.head().cloned(),
+        sequence: view.snapshot.sequence(),
+        configuration: Digest::of(b"configuration"),
+        targets: vec![harness_core::runtime::UndoPreviewTarget {
+            path: "src/a.rs".into(),
+            restores: true,
+            bytes: Some(12),
+        }],
+        omitted: vec![harness_core::runtime::UndoOmittedCall {
+            call: call.clone(),
+            tool: "bash".into(),
+            arguments: r#"{"command":"cargo test"}"#.into(),
+            status: Some(ToolStatus::Succeeded),
+        }],
+    };
+    assert!(app.undo_reply(&Ok(Accepted::UndoPreviewed {
+        preview: Box::new(preview)
+    })));
+    let screen = text(&render(&mut app, 80, 24));
+    assert!(screen.contains("Restore: \"src/a.rs\""), "{screen}");
+    assert!(
+        screen.contains(&format!("Not reversible: bash {}", call.call_id)),
+        "{screen}"
+    );
+    assert!(screen.contains("cargo test"), "{screen}");
+    recorded.shutdown().await;
 }

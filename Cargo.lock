@@ -804,7 +804,7 @@ dependencies = [
 
 [[package]]
 name = "harness"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-stream",
  "clap",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "harness-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures-core",
  "ignore",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "harness-eval"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "harness",
@@ -861,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "harness-providers"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-stream",
  "base64 0.22.1",

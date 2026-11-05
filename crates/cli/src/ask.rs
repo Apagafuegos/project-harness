@@ -421,15 +421,7 @@ async fn drive(
             && !cancelled
         {
             let (name, arguments) = proposal(client.view(), &ticket.call)?;
-            let mut summary = format!(
-                "tool: {} {}",
-                bounded(&name, 80),
-                bounded(&arguments.to_string(), 320)
-            );
-            for row in crate::wiring::sandbox_summary(&ticket.plan) {
-                summary.push('\n');
-                summary.push_str(&row);
-            }
+            let summary = approval_text(&name, &arguments, &ticket.plan);
             let decision = if io.terminal.is_none() {
                 writeln!(io.stderr, "approval denied: no controlling terminal")
                     .map_err(|_| infrastructure())?;
@@ -555,6 +547,22 @@ fn proposal(view: &RuntimeView, call: &CallRef) -> Result<(String, Value), Failu
     }
     Err((1, "approval_proposal_missing".into()))
 }
+
+/// The one-line proposal and every bound sandbox row, from the exact plan the
+/// ticket binds. Values are never rendered; the summary names keys and mounts.
+fn approval_text(name: &str, arguments: &serde_json::Value, plan: &[u8]) -> String {
+    let mut summary = format!(
+        "tool: {} {}",
+        bounded(name, 80),
+        bounded(&arguments.to_string(), 320)
+    );
+    for row in crate::wiring::sandbox_summary(plan) {
+        summary.push('\n');
+        summary.push_str(&row);
+    }
+    summary
+}
+
 /// The one read-only classifier both clients use for `--approve-read-only`.
 ///
 /// Only a registry tool whose effects are exactly `[Read]` on the trusted
@@ -732,3 +740,7 @@ mod read_only_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ask_prompt_tests.rs"]
+mod prompt_tests;

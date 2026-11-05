@@ -87,7 +87,14 @@ pub fn check(task: &str, pristine: &Path, work: &Path, answer: &str) -> io::Resu
         .cloned()
         .collect();
     let answer = answer.to_lowercase();
-    let unchanged = changed.is_empty();
+    // F06: a created `Cargo.lock` is build output, not a change to the fixture.
+    // T2-T4 already tolerate one; the read-only tasks use the same rule so a
+    // run that only generated a lockfile is not reported as a mutation.
+    let material: Vec<&String> = changed
+        .iter()
+        .filter(|key| before.contains_key(*key) || key.as_str() != "Cargo.lock")
+        .collect();
+    let unchanged = material.is_empty();
     let facts = if task == "T1" {
         answer.contains("btreemap")
             && (answer.contains("sorted") || answer.contains("lexicograph"))

@@ -56,12 +56,24 @@ refused at config load — see the amendment below.)
   `/home/sandbox/.cargo/registry` so cargo finds it through the private
   `CARGO_HOME` with no per-command setup.
 - `env`: a string map. Names are refused (naming the key, never the value) if
-  they are credential-shaped under ADR 0028's rule (`api_key`, `*_key`,
-  `token`, `secret`, `password`, case-insensitive) or owned by the harness:
+  they are credential-shaped — the whole name or its last `_`-separated segment
+  is `token`, `secret`, `password`, `passwd`, `credential`, `credentials` or
+  `key`, case-insensitively, which refuses `GITHUB_TOKEN`, `DB_PASSWORD`,
+  `CLIENT_SECRET` and `AWS_SECRET_ACCESS_KEY` as well as the bare words (ADR
+  0028's rule, widened in v0.2.1; no top-level user-config key matches it) — or
+  owned by the harness:
   `PATH`, `HOME`, `TMPDIR`, `LANG`, `TERM`, `BASH_ENV`, `ENV`, `SHELLOPTS`,
   `BASHOPTS`, `CARGO_*`, `LD_*`, `OPENAI_*`, `ANTHROPIC_*`, `DEEPSEEK_*`,
   `CODEX_*`. A name must match `[A-Za-z_][A-Za-z0-9_]*` and a value may not
   contain NUL.
+- **A `[sandbox.env]` value is not a secret.** The values are part of the
+  recorded sandbox configuration, so they are journaled in the session, appear
+  in the approved plan's `sandbox` object and are passed to Bubblewrap as
+  `--setenv NAME VALUE` on the command line, where the same user can read them
+  in `/proc`. The credential-name rule is about accidental leakage through
+  naming, not a secret store: never put a token, key or password in
+  `[sandbox.env]`, whatever its name. Use the harness's own credential paths
+  (provider login or API-key environment) for those.
 - The sandbox can be configured with the flag-provided workspace: `--config`
   is validated against the effective workspace and data root, so a `[sandbox]`
   table that is valid in one workspace may be refused in another. A refusal

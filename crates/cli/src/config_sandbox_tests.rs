@@ -166,3 +166,28 @@ async fn sandbox_both_clients_record_settings_and_refuse_continuation_changes() 
             .await;
     }
 }
+
+/// v0.2.1: no existing top-level key is credential-shaped, so the widened
+/// `[sandbox.env]` rule never refuses a legitimate user config.
+#[test]
+fn no_top_level_config_key_is_caught_by_the_credential_rule() {
+    for key in KEYS {
+        assert!(
+            !harness_core::tools::sandbox::credential_name(key),
+            "{key} is not a credential name"
+        );
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("config.toml");
+    fs::write(
+        &path,
+        "provider='deepseek'\nauth='api-key'\nmodel='deepseek-flash'\n\
+         summary_model='deepseek-flash'\ncompaction_strategy='rolling_summary'\n\
+         switch_policy='reject'\ndata_root='/tmp/harness-data'\napprove_read_only=true\n",
+    )
+    .unwrap();
+    let values = load(&path, true).unwrap();
+    for key in KEYS {
+        assert!(values.contains_key(key), "missing {key}");
+    }
+}

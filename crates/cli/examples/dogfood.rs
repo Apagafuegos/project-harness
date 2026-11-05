@@ -42,7 +42,7 @@ fn run() -> Result<()> {
             .and_then(|()| journal_selftest(&scratch))
             .and_then(|()| config_selftest(&scratch))
             .and_then(|()| tty_selftest());
-        fs::remove_dir(&scratch)?;
+        clean_scratch(&scratch);
         return result;
     }
     if args.first().map(String::as_str) == Some("--summarize") {
@@ -191,7 +191,7 @@ fn run() -> Result<()> {
         }
     }
     write_summary(&out, &records)?;
-    fs::remove_dir(&scratch)?;
+    clean_scratch(&scratch);
     if skipped {
         std::process::exit(77);
     }
@@ -692,6 +692,16 @@ fn sanitize(raw: &str, ws: &Path, data: &Path, sandbox_paths: &[String]) -> Stri
     clean
 }
 
+/// F09: a leftover scratch file is not a measurement failure. Remove the
+/// whole driver scratch tree, and never fail recorded cells if it survives.
+fn clean_scratch(scratch: &Path) {
+    if let Err(error) = fs::remove_dir_all(scratch)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("dogfood: warning: leftover scratch directory was not removed");
+    }
+}
+
 fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
     for task in ["T1", "T2", "T3", "T4", "T5"] {
         let temp = tempfile::Builder::new()
@@ -720,6 +730,15 @@ fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
             "reference {task}"
         );
         if matches!(task, "T1" | "T5") {
+            // F06 self-test: a created lockfile is build output, not a change,
+            // so the read-only oracle still passes on it.
+            fs::write(ws.join("Cargo.lock"), "version = 4\n")?;
+            assert_eq!(
+                oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],
+                true,
+                "created Cargo.lock only {task}"
+            );
+            fs::remove_file(ws.join("Cargo.lock"))?;
             fs::write(ws.join("extra.txt"), "change")?;
             assert_eq!(
                 oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],

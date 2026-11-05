@@ -1699,6 +1699,12 @@ impl Runtime {
             targets,
             omitted_calls,
         };
+        // ADR 0032 §8: bound the intent and every terminal shape before any
+        // staging or target change, so a result can never be unrecordable only
+        // after files moved.
+        if let Some(refusal) = undo_record_limit(&intent, snapshot.sequence()) {
+            return Some(Err(refusal));
+        }
         self.next_token += 1;
         let token = UndoToken(self.next_token);
         self.out.push(Effect::UndoPrepare {
@@ -1954,7 +1960,7 @@ impl Runtime {
     ) {
         let event = JournalEvent::UndoUncertain(UndoUncertain {
             undo_id: intent.undo_id.clone(),
-            reason: reason.into(),
+            reason: crate::session::undo::bounded_reason(reason),
         });
         let commit = audit(snapshot, vec![event]);
         let mut flight = idle_flight();
@@ -2010,6 +2016,11 @@ impl Runtime {
         if note.is_empty() {
             return Some(Err(Rejection::Invalid("empty_content")));
         }
+        // One shared limit for the note: storage refuses more, so the runtime
+        // must refuse it first rather than let the commit fail and fault.
+        if note.len() > crate::session::undo::MAX_RESOLUTION_NOTE_BYTES {
+            return Some(Err(Rejection::Invalid("resolution_note_too_large")));
+        }
         if note.len() > self.config.max_user_bytes {
             return Some(Err(Rejection::Invalid("content_too_large")));
         }
@@ -2021,6 +2032,11 @@ impl Runtime {
                         .zip(&pending.intent.targets)
                         .any(|(row, target)| row.path != target.path)
                 {
+                    return Some(Err(Rejection::Invalid("undo_rows_mismatch")));
+                }
+                // A row storage would reject is refused here, before a commit
+                // is built: a bad client answer never faults the session.
+                if !crate::session::undo::consistent(UndoOutcome::Observed, &files) {
                     return Some(Err(Rejection::Invalid("undo_rows_mismatch")));
                 }
                 (UndoOutcome::Observed, files)
@@ -2205,10 +2221,22 @@ impl Runtime {
                 undo_id: undo_id_at_head(self.snapshot()),
             });
         }
-        if let Some((request, undo_id, _turn)) = in_flight_undo_uncertain {
+        if let Some((request, undo_id, target_turn)) = in_flight_undo_uncertain {
             self.mode = Mode::Recovering;
-            let _ = request;
-            let _ = undo_id;
+            // The command is answered even though the undo is now unresolved:
+            // a partial restoration is never a silent hang (v0.2.1).
+            self.reply(
+                request,
+                Err(undo_refusal(
+                    "undo_interrupted",
+                    format!(
+                        "undo {undo_id} of turn {target_turn} is interrupted: a target may have \
+                         changed, and it is resolved in the TUI (per-file observations and a note)"
+                    ),
+                    Vec::new(),
+                    Vec::new(),
+                )),
+            );
         }
         // Recovery plans its next step, or leaves it, from the new snapshot.
         let recovering = matches!(self.mode, Mode::Recovering | Mode::AwaitingResolution);
@@ -2349,6 +2377,17 @@ impl Runtime {
         self.sync_phase();
         if let Some(flight) = self.in_flight.take() {
             for (request, _) in flight.waiters {
+                self.reply(request, Err(Rejection::Faulted));
+            }
+            // An undo whose commit failed is still answered: the request is
+            // never dropped because its commit never landed.
+            for request in [
+                flight.undo_close.and_then(|close| close.request),
+                flight.undo_uncertain.map(|(request, _, _)| request),
+            ]
+            .into_iter()
+            .flatten()
+            {
                 self.reply(request, Err(Rejection::Faulted));
             }
             if let Some(start) = flight.compaction_start {
@@ -3351,6 +3390,18 @@ impl Recorded {
             )
         }
     }
+}
+
+/// The stable refusal for an undo whose intent or worst-case terminal commit
+/// would not fit one journal record (ADR 0032 §8). Appending nothing and
+/// changing no file are preconditions: this runs before staging and commit A.
+pub(crate) fn undo_record_limit(intent: &UndoIntent, sequence: u64) -> Option<Rejection> {
+    (!crate::session::undo::fits_record_limit(intent, sequence)).then_some(undo_refusal(
+        "undo_too_large",
+        "this undo would exceed the journal record limit; nothing was changed".into(),
+        Vec::new(),
+        Vec::new(),
+    ))
 }
 
 /// The stable undo refusal shape.

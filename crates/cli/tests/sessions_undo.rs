@@ -109,6 +109,11 @@ impl Fixture {
 
     /// Write `after` over `a`, through a real captured write turn.
     fn write_turn(&self) {
+        self.write_turn_at("a");
+    }
+
+    /// One captured write of `path`, as the CLI's preview and undo expect.
+    fn write_turn_at(&self, path: &str) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -123,7 +128,7 @@ impl Fixture {
                 }),
                 Step::Event(ProviderEvent::ToolArgumentsDelta {
                     block_index: 0,
-                    fragment: json!({"path":"a","text":"after","overwrite":true}).to_string(),
+                    fragment: json!({"path":path,"text":"after","overwrite":true}).to_string(),
                 }),
                 Step::Event(ProviderEvent::ToolCallReady { block_index: 0 }),
                 Step::completed(FinishReason::ToolCalls),
@@ -310,5 +315,67 @@ fn a_live_engine_holds_the_lock_and_the_command_refuses() {
         fs::read_to_string(fixture.workspace.join("a")).unwrap(),
         "after",
         "a locked session is never changed"
+    );
+}
+
+/// v0.2.1: an interrupted undo is answered, and the command exits nonzero with
+/// a message that says the undo is interrupted and resolved in the TUI. The
+/// wait is bounded: v0.2.0 hung here forever.
+#[test]
+fn an_interrupted_undo_exits_nonzero_and_points_at_the_tui() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.workspace.join("d")).unwrap();
+    fixture.write_turn_at("d/new.txt");
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("d/new.txt")).unwrap(),
+        "after"
+    );
+    // The parent directory cannot lose an entry, so the restore stops after
+    // changing nothing.
+    fs::set_permissions(
+        fixture.workspace.join("d"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o555),
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_harness"));
+    command
+        .arg("sessions")
+        .arg("undo")
+        .arg(fixture.session.to_string())
+        .arg("--data-root")
+        .arg(&fixture.state)
+        .arg("--yes");
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("`sessions undo` never answered after a partial restore");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let output = child.wait_with_output().unwrap();
+    fs::set_permissions(
+        fixture.workspace.join("d"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(status.code(), Some(2), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(text.contains("undo_interrupted"), "{text}");
+    assert!(
+        text.contains("interrupted") && text.contains("TUI"),
+        "the message says the undo is interrupted and resolved in the TUI: {text}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("d/new.txt")).unwrap(),
+        "after",
+        "a partial restore never removed the file"
     );
 }

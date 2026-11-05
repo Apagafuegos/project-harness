@@ -190,7 +190,11 @@ rules, not string-based bypasses.
 `omitted_calls` lists every bash proposal (including denied/not-started calls
 and skipped newer bash-only turns), plus executed non-write/edit calls declaring
 mutation/process/network/external effects, in ancestral proposal/block order,
-uniquely by CallRef; never store raw command bytes again. Resolve their displayed names/arguments
+uniquely by CallRef; never store raw command bytes again. A v0.2.0 writer
+recorded only the target turn's own proposals. Record version **4** is unchanged
+and writers emit this list; replay accepts an intent whose list equals this
+selection **or** the v0.2.0 selection, and no other, so a published journal still
+opens and no history is rewritten. Resolve their displayed names/arguments
 from the original proposal. Denied/not-started calls are labelled not executed,
 not effects. Non-write/edit effects are never candidates for restoration.
 
@@ -399,6 +403,8 @@ success is 0, refusal/usage is 2, storage/I/O failure is 1, matching
 | `undo_uncertain_effect` | turn `<TURN>` contains an effect whose application is unknown; manual reconciliation cannot upgrade the immutable result |
 | `undo_incomplete_turn` | selected head does not contain the whole finished target turn |
 | `undo_stale_preview` | session/head/configuration changed; preview again |
+| `undo_interrupted` (v0.2.1) | the undo became uncertain; it names the undo id and says it is resolved in the TUI |
+| `undo_too_large` (v0.2.1) | the intent or a worst-case terminal commit would exceed the 8 MiB record limit; nothing was staged or changed |
 | `session_not_idle` | finish/cancel current work before undo |
 | `session_locked` | another writer owns the session |
 | `session_not_found` | no such session |
@@ -407,7 +413,13 @@ success is 0, refusal/usage is 2, storage/I/O failure is 1, matching
 | `journal_invalid: <code>` | existing invalid/unsupported journal refusal; never repair automatically |
 
 An execution error with possible effects is reported as undo_uncertain_pending
-with its UndoId and per-file hints, not as a harmless undo_conflict.
+with its UndoId and per-file hints, not as a harmless undo_conflict. From v0.2.1
+an undo that reaches uncertainty **during this command** replies with
+`undo_interrupted` (exit 2 for `sessions undo`) instead of leaving the request
+unanswered, and a resolution the runtime would not be able to commit is refused
+with `resolution_note_too_large` (over the 64 KiB note limit) or
+`undo_rows_mismatch` (a row that is not an observation) before any commit is
+built, leaving the pending undo resolvable.
 
 ### 7. Recorded model note and context report
 
@@ -488,6 +500,11 @@ An older binary refuses cleanly at the first v4 record with
 existing rules in `session/codec.rs::{decode,encode}` (`SUPPORTED_VERSIONS`,
 `CURRENT_VERSION`), `State::apply_record`, and `store.rs::scan`.
 Checksum framing, 8 MiB physical record bound and command dedup stay unchanged.
+This preflight was planned here at v0.2.0 but was missing from the
+implementation; v0.2.1 adds it. It serializes the intent and each worst-case
+terminal shape — every target, every omitted call, the maximum 64 KiB resolution
+note and worst-case JSON escaping — before commit A, and refuses
+`undo_too_large` with nothing staged.
 Preflight serializes and bounds both the intent and every possible terminal
 shape before target changes; do not split one undo into multiple intents to
 fit. Bound reason strings to 1 KiB and resolution_note to 64 KiB UTF-8; reserve

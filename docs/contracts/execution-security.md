@@ -80,10 +80,21 @@ the path: `/`, `$HOME` and its ancestors, the workspace and data root and their
 ancestors and descendants, the harness config directory, `~/.ssh`, `~/.gnupg`,
 `~/.codex`, `~/.aws`, `~/.config`, the sandbox's own private mounts, and any
 missing or non-directory path. Credential-shaped and harness-owned variable
-names are refused by name, never by value. `PATH` itself is not settable, the
-host environment is still cleared, network stays denied, and every bash call
-still requires approval whose preview states the bound mounts, sandbox `PATH`
-and environment key names.
+names are refused by name, never by value: a name whose whole spelling or last
+`_`-separated segment is `token`, `secret`, `password`, `passwd`, `credential`,
+`credentials` or `key` is refused case-insensitively, so `GITHUB_TOKEN`,
+`DB_PASSWORD`, `CLIENT_SECRET` and `AWS_SECRET_ACCESS_KEY` never reach a plan.
+`PATH` itself is not settable, the host environment is still cleared, network
+stays denied, and every bash call still requires approval whose preview states
+the bound mounts, sandbox `PATH` and environment key names.
+
+**`[sandbox.env]` values are not secrets.** They are part of the recorded
+sandbox configuration: journaled in the session, present in the approved plan
+and passed to Bubblewrap as `--setenv NAME VALUE`, so they are visible to the
+same user in the process table and to any process inside the sandbox. The
+name rule only prevents accidental leakage through naming; it is not a secret
+store. Credentials belong in the harness's own provider login or API-key
+environment, never in `[sandbox.env]`.
 
 Inside each mounted root — toolchain paths and the registry alike — the fixed
 leaves `credentials`, `credentials.toml` and `.git-credentials` are masked with

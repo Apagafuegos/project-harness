@@ -3,6 +3,64 @@
 Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - Unreleased
+
+Fixes from the v0.2.0 post-release review, plus the two measurement defects it
+found. No new capability and no journal migration: every v1–v4 journal,
+including one a v0.2.0 binary wrote, still opens.
+
+### Fixed
+
+- `harness sessions undo` no longer hangs when a restoration stops partway. An
+  undo that becomes uncertain now answers its command with `undo_interrupted`,
+  which names the undo and says it is resolved in the TUI; the command exits 2.
+  Every undo command is answered when its commit fails or the runtime faults.
+- A resolution that storage would reject is refused in the runtime instead of
+  reaching the journal and faulting the session: a note over 64 KiB
+  (`resolution_note_too_large`) and an `Observed` row that is not an observation
+  (`undo_rows_mismatch`). One shared constant defines the note limit for the
+  refusal and for storage. The session stays awaiting resolution and the TUI
+  keeps the dialog and its draft.
+- A terminal commit whose one entry is not `undo_note` is an invalid record
+  (`undo_commit_shape`), not a panic; the same check holds through journal
+  replay from a file. The undo selection no longer indexes or `expect`s on
+  journal-controlled data.
+- Undoing an earlier turn reports the `bash` calls of newer unconsumed turns
+  skipped on the way, in the preview, the note, the result and both clients, as
+  ADR 0032 requires. Writers emit the corrected list; replay accepts that list
+  or the v0.2.0 one and nothing else, so journals stay on record version 4 and
+  no history is rewritten.
+- A TUI session whose newest turn is all `not_applied` reaches the confirmation
+  modal instead of "nothing to undo", so the turn can be consumed and the turn
+  before it reached, as the CLI already allowed.
+- A recheck refusal on the first undo target, before any mutation, commits
+  `not_applied` instead of uncertainty. Once a rename or unlink was attempted,
+  uncertainty stands.
+- The bash approval preview and the `ask` prompt list the configured
+  `cargo_registry` as a read-only mount, so every bound mount appears in both
+  clients.
+- The TUI lists every remembered grant it resumed when it opens a session, at
+  the top of the transcript before any turn starts, escaped and bounded. The
+  recorded grants are never changed or dropped.
+- An undo whose intent or worst-case terminal commit would exceed the 8 MiB
+  journal record limit is refused before anything is staged or changed
+  (`undo_too_large`), reserving every target, every omitted call, the maximum
+  resolution note and worst-case JSON escaping.
+- Dogfood measurement: a created `Cargo.lock` no longer fails the T1/T5
+  no-change oracle (T2–T4 already exempted it), and a leftover scratch
+  directory no longer turns a finished run into `infrastructure_failure`.
+
+### Security
+
+- `[sandbox.env]` refuses credential-shaped names by their last `_`-separated
+  segment as well as the bare words, case-insensitively: `GITHUB_TOKEN`,
+  `NPM_TOKEN`, `DB_PASSWORD`, `CLIENT_SECRET` and `AWS_SECRET_ACCESS_KEY` are
+  refused by name, and a value is never echoed. No existing top-level user-config
+  key matches the rule.
+- ADR 0033, `execution-security.md` and the user guide now state that
+  `[sandbox.env]` values are not secrets: they are recorded in the session,
+  appear in the approved plan and are passed to Bubblewrap on its command line.
+
 ## [0.2.0] - 2026-11-05
 
 Milestone 8 makes harness a daily driver: search tools, durable undo of the

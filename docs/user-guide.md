@@ -195,10 +195,16 @@ writable, and nothing is discovered automatically. Mount the toolchain's own
 need the rest of your home), and give the registry as `cargo_registry` rather
 than mounting `~/.cargo`, so no credential file is inside a mount.
 
-`[sandbox.env]` accepts ordinary names; it refuses credential-shaped names and
-names the harness owns, including **all `CARGO_*` names** (the harness sets
-`CARGO_HOME` to a private per-command directory). Pass `cargo test --offline`
-instead of setting `CARGO_NET_OFFLINE`; the sandbox denies network anyway.
+`[sandbox.env]` accepts ordinary names; it refuses credential-shaped names —
+the whole name or its last `_`-separated segment is `token`, `secret`,
+`password`, `passwd`, `credential`, `credentials` or `key`, so `GITHUB_TOKEN`,
+`DB_PASSWORD` and `AWS_SECRET_ACCESS_KEY` are refused — and names the harness
+owns, including **all `CARGO_*` names** (the harness sets `CARGO_HOME` to a
+private per-command directory). Pass `cargo test --offline` instead of setting
+`CARGO_NET_OFFLINE`; the sandbox denies network anyway. **These values are not
+secrets:** they are recorded in the session, appear in the approved plan and are
+passed to Bubblewrap on its command line, so anything you would not print in a
+terminal does not belong there.
 
 Every mount and prepend is checked when the config loads, and a refusal exits 2
 naming the path: `/`, `$HOME` or any of its ancestors, the workspace, the data
@@ -240,8 +246,13 @@ them, so a session that records one refuses an `ask` continuation with
 `session_has_remembered_grants` (exit 2) and says to continue it in the TUI.
 The TUI records those grants and resumes exactly them, and a grant never widens
 past the protected paths or its recorded tool/path or exact command/cwd binding.
-Do not edit history or weaken checks; the read-only
-catalog/inspection/export still provide access.
+When it opens a session with recorded grants it lists every resumed one at the
+top of the transcript, before any turn starts — `tool · path: "…"` or
+`bash · command: "…" · cwd: "…"`, escaped and bounded — and says they came from
+this session's journal. A journal copied from elsewhere carries its grants with
+it, and that list is how to notice them; nothing is dropped or changed by it. A
+session with no grants lists nothing. Do not edit history or weaken checks; the
+read-only catalog/inspection/export still provide access.
 
 New sessions record, in order: built-in system instructions (workspace, actual
 tools, one call at a time with approval, no unchanged retry of a denied call, and
@@ -429,19 +440,29 @@ harness sessions undo SESSION_ID --yes     # required without a terminal
 
 Undo is all-or-nothing on preflight: if any target's current content differs
 from what the agent left, or a protected path or workspace check fails, nothing
-changes and every conflicting path is named (`undo_conflict`, exit 2). Nothing
-is offered when the branch has no unconsumed turn with a trusted file edit
-(`undo_nothing`), when the turn predates pre-image capture
-(`undo_unavailable_legacy`), or when an effect's application is unknown
-(`undo_uncertain_effect`).
+changes and every conflicting path is named (`undo_conflict`, exit 2). The
+report names every effect it does not reverse: the target turn's bash calls and
+those of newer turns skipped on the way to it. Nothing is offered when the
+branch has no unconsumed turn with a trusted file edit (`undo_nothing`), when
+the turn predates pre-image capture (`undo_unavailable_legacy`), or when an
+effect's application is unknown (`undo_uncertain_effect`). A newest turn whose
+every mutation is proven `not_applied` changed nothing, so confirming it
+consumes that turn without touching a file and the next Ctrl-Z reaches the turn
+before it.
 
 An undo is one durable intent and one durable result, so an interrupted undo is
-reported as uncertain rather than guessed at: reopen the session in the TUI and
-resolve it with per-file observations and a note, or acknowledge that the
-outcome is unknown. Nothing is retried. Until it is resolved the session
-refuses new turns. History is append-only, and the model's context records the
-undo through a user note, so it never assumes the reverted edits are present.
-There is no redo.
+reported as uncertain rather than guessed at. The command still answers:
+`harness sessions undo` exits 2 with `undo_interrupted` and says the undo is
+resolved in the TUI, where you state per-file observations and a note or
+acknowledge that the outcome is unknown. A resolution that storage would reject
+is refused in the dialog instead of faulting the session — a note over 64 KiB
+(`resolution_note_too_large`) or a row that is not an observation
+(`undo_rows_mismatch`) — and the dialog keeps your note. An undo whose records
+would exceed the 8 MiB journal limit is refused before anything is staged
+(`undo_too_large`). Nothing is retried. Until an interrupted undo is resolved
+the session refuses new turns. History is append-only, and the model's context
+records the undo through a user note, so it never assumes the reverted edits are
+present. There is no redo.
 
 ## Export, delete and reclaim space
 

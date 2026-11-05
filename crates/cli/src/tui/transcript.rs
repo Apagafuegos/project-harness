@@ -80,8 +80,9 @@ impl Renderer {
         toggles: Toggles,
         notices: &[Notice],
         durations: &BTreeMap<TurnId, std::time::Duration>,
+        resumed: &[super::ResumedGrant],
     ) -> Vec<Line<'static>> {
-        let mut rows = Vec::new();
+        let mut rows = resumed_rows(resumed);
         let ancestry = match view.snapshot.ancestry(view.snapshot.head()) {
             Ok(ancestry) => ancestry,
             Err(_) => return rows,
@@ -250,6 +251,44 @@ impl Renderer {
         }
         rows
     }
+}
+
+/// The resumed-grant list that opens a continued session's transcript, before
+/// any turn (decision 18). Every value is escaped and bounded, since a journal
+/// copied from elsewhere carries its own grants and they can hold anything.
+fn resumed_rows(resumed: &[super::ResumedGrant]) -> Vec<Line<'static>> {
+    if resumed.is_empty() {
+        return Vec::new();
+    }
+    let quote = |text: &str| bounded(&format!("{text:?}"), 120);
+    let mut rows = vec![Line::styled(
+        format!(
+            "── resumed grants from this session's journal: {} ──",
+            resumed.len()
+        ),
+        dim_style(),
+    )];
+    for grant in resumed {
+        rows.push(Line::styled(
+            match grant {
+                super::ResumedGrant::File { tool, path, prefix } => format!(
+                    "{tool} · path: {}{}",
+                    quote(path),
+                    if *prefix {
+                        " (and everything below)"
+                    } else {
+                        ""
+                    }
+                ),
+                super::ResumedGrant::Bash { command, cwd } => {
+                    format!("bash · command: {} · cwd: {}", quote(command), quote(cwd))
+                }
+            },
+            dim_style(),
+        ));
+    }
+    rows.push(Line::default());
+    rows
 }
 
 /// Durable facts a header needs, gathered from the branch's tool results.

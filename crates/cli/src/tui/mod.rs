@@ -66,6 +66,28 @@ pub struct SessionInfo {
     pub context_limit: Option<u64>,
 }
 
+/// One remembered grant a continued session resumed, as the transcript lists
+/// it. Only displayed: the recorded allowances are never changed or dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResumedGrant {
+    /// A trusted file tool's grant for one path, or everything below it.
+    File {
+        /// Tool name, such as `write`.
+        tool: String,
+        /// The recorded path spelling.
+        path: String,
+        /// Whether the grant covers everything below `path`.
+        prefix: bool,
+    },
+    /// One exact shell command in one cwd.
+    Bash {
+        /// The exact recorded command line.
+        command: String,
+        /// The recorded cwd.
+        cwd: String,
+    },
+}
+
 /// One instruction for the shell that owns the terminal and the session handle.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -286,6 +308,8 @@ pub struct App {
     /// Commands produced without a key press, taken by the shell and submitted
     /// through the same command path as a key press.
     undecided: Vec<Action>,
+    /// Grants this session's journal resumed, listed before any turn.
+    resumed: Vec<ResumedGrant>,
 }
 
 impl App {
@@ -334,7 +358,24 @@ impl App {
             read_only_approval: false,
             read_only_approved: BTreeSet::new(),
             undecided: Vec::new(),
+            resumed: Vec::new(),
         }
+    }
+
+    /// Record the grants the opened session's journal resumed (decision 18).
+    /// The shell sets this at open and on every durable handover; the app only
+    /// lists them and never alters the recorded allowances.
+    pub fn set_resumed_grants(&mut self, resumed: Vec<ResumedGrant>) {
+        if self.resumed == resumed {
+            return;
+        }
+        self.resumed = resumed;
+        self.rebuild();
+    }
+
+    /// The grants this app lists as resumed. A view of the shell's decisions.
+    pub fn resumed_grants(&self) -> &[ResumedGrant] {
+        &self.resumed
     }
 
     /// Opt in to answering registry-declared read-only tickets automatically.
@@ -569,6 +610,7 @@ impl App {
                 },
                 &self.notices,
                 &self.durations,
+                &self.resumed,
             ),
             None => Vec::new(),
         };
@@ -750,15 +792,10 @@ impl App {
     /// a navigation. Returns false when it is an ordinary reply.
     pub fn undo_reply(&mut self, reply: &Result<Accepted, Rejection>) -> bool {
         match reply {
-            Ok(Accepted::UndoPreviewed { preview })
-                if preview.targets.is_empty() && preview.omitted.is_empty() =>
-            {
-                self.modal = Modal::Notice {
-                    title: "undo".into(),
-                    message: "no unconsumed trusted file-edit turn on the active branch".into(),
-                };
-                true
-            }
+            // Any candidate reaches the confirmation, including a newest turn
+            // whose every mutation is `not_applied`: it has no targets but can
+            // still be consumed so earlier turns are reachable. A turn that is
+            // not a candidate is refused with `undo_nothing`, never previewed.
             Ok(Accepted::UndoPreviewed { preview }) => {
                 self.modal = Modal::UndoConfirm {
                     preview: preview.clone(),
@@ -787,6 +824,15 @@ impl App {
             Err(rejection @ Rejection::Undo { .. }) => {
                 self.set_error(crate::tui::runtime::rejection(rejection.clone()));
                 self.modal = Modal::None;
+                true
+            }
+            // A refused resolution keeps its dialog and the note draft: the
+            // session is still awaiting resolution, and the user corrects the
+            // answer instead of starting over.
+            Err(rejection @ Rejection::Invalid(_))
+                if matches!(self.modal, Modal::UndoResolve { .. }) =>
+            {
+                self.set_error(crate::tui::runtime::rejection(rejection.clone()));
                 true
             }
             _ => false,

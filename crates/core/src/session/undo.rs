@@ -1,7 +1,33 @@
 //! Undo selection facts and the deterministic model note text, shared by
 //! storage validation and the runtime so the two can never disagree.
 
-use super::{CallRef, FileOutcome, TurnId, UndoFileOutcome, UndoId, UndoOutcome, UndoTarget};
+use super::{
+    CURRENT_VERSION, CallRef, Commit, Digest, Entry, EntryId, EntryPayload, FileOutcome,
+    HeadChange, HeadReason, JournalEvent, Record, RecordId, RecordPayload, SessionId, StoreError,
+    Timestamp, TurnId, UndoFileOutcome, UndoId, UndoIntent, UndoNote, UndoOutcome, UndoResult,
+    UndoTarget, codec,
+};
+
+/// The most bytes a resolution note may hold. One constant, used by the
+/// runtime's pre-commit refusal and by storage's record rules, so a client
+/// refusal can never disagree with what the journal accepts.
+pub const MAX_RESOLUTION_NOTE_BYTES: usize = 64 * 1024;
+/// The most bytes an uncertainty reason may hold.
+pub const MAX_UNCERTAINTY_REASON_BYTES: usize = 1024;
+
+/// A reason string of at most [`MAX_UNCERTAINTY_REASON_BYTES`], cut at a UTF-8
+/// boundary. Runtime reasons are fixed short strings; this keeps a future
+/// longer one from faulting a session instead of being recorded.
+pub(crate) fn bounded_reason(reason: &str) -> String {
+    if reason.len() <= MAX_UNCERTAINTY_REASON_BYTES {
+        return reason.to_owned();
+    }
+    let mut end = MAX_UNCERTAINTY_REASON_BYTES;
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_owned()
+}
 
 /// Why one target of a selected turn cannot be undone, without file contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,4 +162,146 @@ pub(crate) fn consistent(outcome: UndoOutcome, files: &[UndoFileOutcome]) -> boo
         ),
         UndoOutcome::AcknowledgedUnknown => row.outcome == FileOutcome::Unknown,
     })
+}
+
+/// Whether the intent and every terminal shape it could produce fit one
+/// journal record (ADR 0032 §8): the intent, then each outcome with a maximum
+/// resolution note under worst-case JSON escaping, every target and every
+/// omitted call. Checked before commit A and before any target changes, so a
+/// terminal commit can never exceed the physical limit only after files moved.
+pub(crate) fn fits_record_limit(intent: &UndoIntent, sequence: u64) -> bool {
+    // One byte per character and six characters of escaping per byte is the
+    // widest a `serde_json` string can get, before the note text is escaped a
+    // second time as it enters the record.
+    let note: String = "\u{1}".repeat(MAX_RESOLUTION_NOTE_BYTES);
+    let omitted: Vec<(CallRef, String)> = intent
+        .omitted_calls
+        .iter()
+        .map(|call| (call.clone(), "bash".into()))
+        .collect();
+    let anchor = intent.anchor_head.clone();
+    let intent_record = record(
+        sequence.saturating_add(1),
+        Commit {
+            command_id: Some(super::CommandId::new()),
+            command_fingerprint: Some(Digest::of(b"preflight")),
+            head: HeadChange {
+                from: anchor.clone(),
+                to: anchor.clone(),
+                reason: HeadReason::Retain,
+            },
+            entries: Vec::new(),
+            events: vec![JournalEvent::UndoIntent(intent.clone())],
+        },
+    );
+    if !bounded(&intent_record) {
+        return false;
+    }
+    // An uncertainty record is small, but it shares the journal.
+    let uncertain = record(
+        sequence.saturating_add(2),
+        Commit {
+            command_id: None,
+            command_fingerprint: None,
+            head: HeadChange {
+                from: anchor.clone(),
+                to: anchor.clone(),
+                reason: HeadReason::Retain,
+            },
+            entries: Vec::new(),
+            events: vec![JournalEvent::UndoUncertain(super::UndoUncertain {
+                undo_id: intent.undo_id.clone(),
+                reason: "r".repeat(MAX_UNCERTAINTY_REASON_BYTES),
+            })],
+        },
+    );
+    if !bounded(&uncertain) {
+        return false;
+    }
+    for outcome in [
+        UndoOutcome::Succeeded,
+        UndoOutcome::NotApplied,
+        UndoOutcome::Observed,
+        UndoOutcome::AcknowledgedUnknown,
+    ] {
+        let rows: Vec<UndoFileOutcome> = intent
+            .targets
+            .iter()
+            .map(|target| UndoFileOutcome {
+                path: target.path.clone(),
+                outcome: match outcome {
+                    UndoOutcome::Succeeded if target.pre_image.is_some() => FileOutcome::Restored,
+                    UndoOutcome::Succeeded => FileOutcome::Removed,
+                    UndoOutcome::NotApplied => FileOutcome::Unchanged,
+                    UndoOutcome::Observed => FileOutcome::ObservedRestored,
+                    UndoOutcome::AcknowledgedUnknown => FileOutcome::Unknown,
+                },
+            })
+            .collect();
+        let resolution = matches!(
+            outcome,
+            UndoOutcome::Observed | UndoOutcome::AcknowledgedUnknown
+        )
+        .then_some(note.as_str());
+        let text = note_text(
+            &intent.target_turn_id,
+            &intent.undo_id,
+            outcome,
+            &intent.targets,
+            &rows,
+            &omitted,
+            resolution,
+        );
+        let note_entry = EntryId::new();
+        let terminal = record(
+            sequence.saturating_add(4),
+            Commit {
+                command_id: None,
+                command_fingerprint: None,
+                head: HeadChange {
+                    from: anchor.clone(),
+                    to: Some(note_entry.clone()),
+                    reason: HeadReason::Advance,
+                },
+                entries: vec![Entry {
+                    id: note_entry.clone(),
+                    parent_id: anchor.clone(),
+                    turn_id: None,
+                    payload: EntryPayload::UndoNote(UndoNote {
+                        undo_id: intent.undo_id.clone(),
+                        target_turn_id: intent.target_turn_id.clone(),
+                        outcome,
+                        text,
+                    }),
+                }],
+                events: vec![JournalEvent::UndoResult(UndoResult {
+                    undo_id: intent.undo_id.clone(),
+                    outcome,
+                    file_outcomes: rows,
+                    note_entry_id: note_entry,
+                    resolution_note: resolution.map(str::to_owned),
+                })],
+            },
+        );
+        if !bounded(&terminal) {
+            return false;
+        }
+    }
+    true
+}
+
+fn record(sequence: u64, commit: Commit) -> Record {
+    Record {
+        version: CURRENT_VERSION,
+        seq: sequence,
+        record_id: RecordId::new(),
+        session_id: SessionId::new(),
+        at: Timestamp::now(),
+        previous_checksum: Some(Digest::of(b"preflight")),
+        payload: RecordPayload::Commit(commit),
+    }
+}
+
+fn bounded(record: &Record) -> bool {
+    !matches!(codec::frame(record), Err(StoreError::Limit))
 }

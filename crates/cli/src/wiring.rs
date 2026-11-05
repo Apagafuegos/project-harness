@@ -105,6 +105,37 @@ pub struct WiredSession {
     pub session: SessionId,
     /// User/project instruction warnings, absent on continuation.
     pub warnings: Vec<String>,
+    /// Remembered grants a continuation resumed, empty for a new session and
+    /// for `ask`, which never inherits them.
+    pub resumed_grants: Vec<crate::tui::ResumedGrant>,
+}
+
+/// The remembered grants a continuation resumes, in recorded order, for the
+/// transcript to list. Display only: nothing here changes or drops a grant.
+pub fn resumed_grants(policy: &Value) -> Vec<crate::tui::ResumedGrant> {
+    policy["allowances"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|allowance| {
+            let tool = allowance["tool"].as_str()?;
+            match tool {
+                "bash" => Some(crate::tui::ResumedGrant::Bash {
+                    command: allowance["command"].as_str()?.to_owned(),
+                    cwd: allowance["cwd"].as_str().unwrap_or(".").to_owned(),
+                }),
+                "write" | "edit" => {
+                    let path = allowance["path"].as_str()?;
+                    Some(crate::tui::ResumedGrant::File {
+                        tool: tool.to_owned(),
+                        path: path.to_owned(),
+                        prefix: path.ends_with('/') || path == ".",
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Create or open with an injected provider and the real policy-owned tool host.
@@ -128,6 +159,7 @@ pub async fn open_session(
         data_root: root.path().to_owned(),
         sandbox: o.sandbox.clone(),
     };
+    let mut resumed = Vec::new();
     let handle = if o.session.is_some() {
         // Refuse imported remembered grants: this client never auto-approves mutations.
         let inspection =
@@ -174,7 +206,11 @@ pub async fn open_session(
         }
         // The TUI resumes exactly the allowances the session recorded: it is the
         // client that granted them, and a grant never widens past the protected
-        // paths or the recorded tool/path or exact command/cwd binding.
+        // paths or the recorded tool/path or exact command/cwd binding. It lists
+        // every one it resumed before the first turn (decision 18).
+        if o.inherit_remembered_grants {
+            resumed = resumed_grants(&policy);
+        }
         // The compaction policy is compared semantically, so an explicit default
         // is not a mismatch and an explicit strategy is refused only when it
         // differs from the recorded one.
@@ -250,6 +286,7 @@ pub async fn open_session(
         handle,
         session,
         warnings,
+        resumed_grants: resumed,
     })
 }
 /// The compaction policy a continuation is allowed to continue with.
@@ -341,6 +378,12 @@ pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
             .iter()
             .map(|p| format!("toolchain (read-only): {}", p.display())),
     );
+    if let Some(registry) = &settings.cargo_registry {
+        rows.push(format!(
+            "cargo registry (read-only): {}",
+            registry.display()
+        ));
+    }
     rows.push(format!("sandbox PATH: {}", settings.path()));
     rows.push(format!(
         "sandbox env keys: {}",

@@ -1,6 +1,8 @@
 # Documentation
 
-v0.2.0 is the current published release, with Milestones 1–8 implemented. Start with the [user guide](user-guide.md) for
+v0.2.0 is the current published release, with Milestones 1–8 implemented; the
+`CHANGELOG.md` entry for v0.2.1 is prepared and unreleased. Start with the
+[user guide](user-guide.md) for
 installation and daily use. A design document alone is not evidence of
 implementation; acceptance documents separate behavioral tests, historical live
 runs and remaining partials.

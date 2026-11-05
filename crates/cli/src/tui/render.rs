@@ -128,18 +128,21 @@ fn hint_text(app: &App) -> &'static str {
 }
 
 fn draw_transcript(app: &mut App, frame: &mut Frame, area: Rect, width: usize) {
-    let empty = app.view().is_none_or(|v| {
-        !v.snapshot
-            .ancestry(v.snapshot.head())
-            .unwrap_or_default()
-            .iter()
-            .any(|e| {
-                matches!(
-                    e.entry.payload,
-                    harness_core::session::EntryPayload::UserMessage(_)
-                )
-            })
-    });
+    // A resumed-grant list is transcript content in its own right, so the
+    // welcome banner never hides it (decision 18).
+    let empty = app.resumed_grants().is_empty()
+        && app.view().is_none_or(|v| {
+            !v.snapshot
+                .ancestry(v.snapshot.head())
+                .unwrap_or_default()
+                .iter()
+                .any(|e| {
+                    matches!(
+                        e.entry.payload,
+                        harness_core::session::EntryPayload::UserMessage(_)
+                    )
+                })
+        });
     let mut rows = if empty {
         vec![
             Line::styled(
