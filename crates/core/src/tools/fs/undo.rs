@@ -127,6 +127,20 @@ impl FsWorkspace {
         if binding.workspace != self.identity.0 {
             return Err(infrastructure("plan workspace mismatch"));
         }
+        let mut hook = |_: Step| Ok(());
+        let mut control = Control {
+            started,
+            timeout: Some(DEADLINE),
+            cancellation: None,
+            hook: &mut hook,
+        };
+        if let Operation::MultiEdit { files } = operation {
+            let targets = binding
+                .targets
+                .as_deref()
+                .ok_or_else(|| infrastructure("multi_edit targets missing from plan"))?;
+            return self.capture_multi_image(files, targets, artifacts, &mut control);
+        }
         let target = binding
             .target
             .ok_or_else(|| infrastructure("unsupported capture plan"))?;
@@ -135,13 +149,6 @@ impl FsWorkspace {
             return Err(infrastructure("plan target mismatch"));
         }
         let want_text = matches!(operation, Operation::Edit { .. });
-        let mut hook = |_: Step| Ok(());
-        let mut control = Control {
-            started,
-            timeout: Some(DEADLINE),
-            cancellation: None,
-            hook: &mut hook,
-        };
         let resolved = self.resolve(&path, &mut control)?;
         refuse_protection(resolved.protection, true)?;
         if !resolved.complete {
@@ -183,6 +190,65 @@ impl FsWorkspace {
             pre_image: pre.image,
             pre_mode: pre.mode,
             post_image,
+            additional_targets: Vec::new(),
+        })
+    }
+
+    fn capture_multi_image(
+        &self,
+        files: &[super::super::builtin::MultiEditFile],
+        targets: &[super::execute::Target],
+        artifacts: &DataRoot,
+        control: &mut Control<'_>,
+    ) -> Result<FileImage, Refusal> {
+        if files.is_empty() || files.len() != targets.len() {
+            return Err(infrastructure("multi_edit capture target count mismatch"));
+        }
+        let mut captured = Vec::with_capacity(files.len());
+        for (file, target) in files.iter().zip(targets) {
+            if target.path != file.path.as_str() || target.pre_image == "absent" {
+                return Err(infrastructure("multi_edit capture plan mismatch"));
+            }
+            let resolved = self.resolve(&file.path, control)?;
+            refuse_protection(resolved.protection, true)?;
+            if !resolved.complete {
+                return Err(stale());
+            }
+            let parent = open_relative(
+                self.root.as_fd(),
+                file.path.parent().as_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY,
+                Mode::empty(),
+                control,
+                Step::Resolve,
+            )?;
+            if ObjectId::of(&fs::fstat(&parent).map_err(errno)?)
+                != ObjectId::of(&fs::fstat(&resolved.parent).map_err(errno)?)
+            {
+                return Err(stale());
+            }
+            let pre = self.capture_pre(&resolved, target, true, artifacts, control)?;
+            let mut text = pre.text.ok_or_else(stale)?;
+            for edit in &file.edits {
+                text = edited_bytes(&text, &edit.old_text, &edit.new_text)?;
+            }
+            let pre_image = pre.image.ok_or_else(stale)?;
+            let pre_mode = pre.mode.ok_or_else(stale)?;
+            captured.push(FileImageTarget {
+                path: file.path.as_str().to_owned(),
+                pre_image: Some(pre_image),
+                pre_mode: Some(pre_mode),
+                post_image: Digest::of(text.as_bytes()),
+            });
+        }
+        let mut captured = captured.into_iter();
+        let first = captured.next().ok_or_else(|| infrastructure("empty multi_edit"))?;
+        Ok(FileImage {
+            path: first.path,
+            pre_image: first.pre_image,
+            pre_mode: first.pre_mode,
+            post_image: first.post_image,
+            additional_targets: captured.collect(),
         })
     }
 
