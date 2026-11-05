@@ -37,6 +37,7 @@ fn image(path: &str, capture: &Capture, pre_mode: Option<u32>, post: &[u8]) -> F
         pre_image: capture.pre.clone(),
         pre_mode,
         post_image: Digest::of(post),
+        additional_targets: Vec::new(),
     }
 }
 
@@ -202,6 +203,7 @@ fn tool_result_with_effect(
                         artifacts: Vec::new(),
                         code,
                         file_effect: effect,
+                        file_paths: Vec::new(),
                     },
                 },
             }),
@@ -860,6 +862,7 @@ fn a_plan_that_disagrees_with_the_captured_image_is_rejected() {
                         pre_image: pre,
                         pre_mode: Some(0o644),
                         post_image: Digest::of(b"after"),
+                        additional_targets: Vec::new(),
                     }),
                 }),
             ],
