@@ -1,1 +1,38 @@
-Not run: DeepSeek key unavailable (exit 77 semantics); no transcript exists.
+I'll start by exploring the workspace structure.tool: list {"path":"."}
+tool: glob {"pattern":"**/*.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"path":"Cargo.toml"}
+tool: read {"path":"src/lib.rs"}
+tool: read {"path":"src/ledger.rs"}
+tool: read {"path":"src/display.rs"}
+...
+```
+
+- **Ordering = insertion order**, never sorted or aggregated: `record` just `push`es. The docs are explicit — "Record a movement without aggregating or sorting history", "Stock movements retain insertion order, including zero quantities." `len()`/`is_empty()` count *movements*, not distinct items.
+- **Zero quantities survive** as first-class history rows (a `record(item, day, 0)` stays in `movements()`).
+- `select(item)` copies one item's movements into a new `Ledger`, preserving insertion order.
+
+## How balances are computed and ordered
+
+Both `balances()` and `balance_through(cutoff)` fold the `Vec` into a **`std::collections::BTreeMap<String, i64>`**, accumulating with `*map.entry(item.clone()).or_default() += quantity`.
+
+- **Ordering: lexicographic by item name** (BTreeMap `Ord` on `String`), which is what makes output "deterministic/stable". `items()` returns `balances().into_keys()` in that same sorted order.
+- **Zero balances survive**: entries are created on first sight and never removed, so an item that nets to 0 (e.g. +2 then −2) still appears with value `0` — asserted in `balances_are_sorted_and_keep_zero` and in `display_round_trip` (`apple: 0`). An entirely empty ledger yields an empty map.
+- One mismatch worth knowing: `balance_through` is documented as "including movements on that day" and `lib.rs` calls it the "inclusive cutoff API", but the filter is `if movement.day < cutoff` — i.e. strictly *exclusive* of `cutoff`. The sibling test `balance_includes_cutoff` (pear on days 1,2,3 → `balance_through(2)` should be 5) does not match the code as written, which would give 2. (Flagging only; I did not run the suite or edit anything.)
+
+## Parsing (`src/display.rs::parse_balance`)
+
+`parse_balance(&str) -> Result<BTreeMap<String, i64>, usize>`:
+
+- **Blank lines are ignored** — each line is `trim()`ed and empty lines `continue` (also, via `str::lines()`, a trailing newline produces no extra line).
+- **Duplicate item lines accumulate** — `*stock.entry(item).or_default() += quantity`, so `"pear: 3\n\npear: -1"` collapses to one entry `pear: 2` (test `parse_combines_duplicates`).
+- Fields are trimmed, so `" apple : 2 "` parses to `apple → 2`.
+- **Rejections are all-or-nothing with a 1-based line number**: missing `:` → `Err(index+1)`, empty item (`": 2"`) → `Err(index+1)`, unparsable quantity → `Err(index+1)`. `lib::from_snapshot` propagates that number (`from_snapshot("pear: 3\nbroken", 7) == Err(2)`) and, on success, replays the parsed map as movements — so snapshot movements land in **sorted item order**, all stamped with the supplied `day`.
+
+## Public formatting function
+
+**`display::render_balance(stock: &BTreeMap<String, i64>) -> String`** — the crate's public formatter, reachable as `stock_notebook::display::render_balance`. It emits one `"{item}: {quantity}\n"` line per map entry (hence sorted, and every row newline-terminated), and returns `""` for an empty map. `lib::summary` and `lib::summary_through` are thin wrappers over it; `render_balance`/`parse_balance` round-trip exactly, including zero-valued rows.
+turn: completed

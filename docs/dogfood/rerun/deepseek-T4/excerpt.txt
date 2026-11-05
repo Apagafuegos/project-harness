@@ -1,1 +1,38 @@
-Not run: DeepSeek key unavailable (exit 77 semantics); no transcript exists.
+I'll start by exploring the workspace structure.tool: list {"path":"."}
+tool: grep {"pattern":"render_balance"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+Six occurrences across two files. Let me read the relevant files.tool: read {"path":"src/display.rs"}
+tool: read {"path":"src/lib.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+...
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+tool result: Succeeded succeeded
+Not a git repo, so there's no diff to show — but the grep and a clean compile confirm the state. Done.
+
+## Summary
+
+Renamed the public `display::render_balance` → `display::format_balance`, with no compatibility alias.
+
+**Changes (6 occurrences in 2 files):**
+
+`src/display.rs`
+- L5: the definition — `pub fn format_balance(stock: &BTreeMap<String, i64>) -> String`
+- L39, L46: test call sites in `empty_display` and `sorted_display_with_newlines`
+- L71: test call site in `display_round_trip`
+
+`src/lib.rs`
+- L12: `summary` → `display::format_balance(&ledger.balances())`
+- L17: `summary_through` → `display::format_balance(&ledger.balance_through(day))`
+
+**Verification**
+- `grep -rn 'render_balance' .` → **no matches**, so the old name is fully gone (no alias, no leftover docs/refs).
+- Signature, body, and doc comment are byte-identical apart from the name, so behavior is preserved; no test logic was altered.
+
+**`cargo test --offline`: 15 passed, 1 failed**
+- The single failure is the seeded `ledger::tests::balance_includes_cutoff` at `src/ledger.rs:125` — `balance_through(2)` yields `2` where `5` is expected (exclusive vs. inclusive cutoff boundary). This is unrelated to the display rename, so I left it unchanged as instructed.
+turn: completed

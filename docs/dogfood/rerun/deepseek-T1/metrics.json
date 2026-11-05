@@ -5,44 +5,152 @@
       "requests": 0
     },
     "read_only": {
-      "auto_approved": 0,
+      "auto_approved": 7,
       "prompts": 0,
-      "requests": 0
+      "requests": 7
     }
   },
   "approval_prompts": 0,
   "approval_split_consistent": true,
   "approvals": 0,
-  "approvals_by_tool": {},
+  "approvals_by_tool": {
+    "glob": 1,
+    "grep": 1,
+    "list": 1,
+    "read": 4
+  },
   "config": "file",
   "errors": {},
-  "exit_code": null,
-  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
-  "inferences": 0,
-  "input_tokens": null,
+  "exit_code": 0,
+  "harness_commit": "b93f61d43977f1035c4c1161a9ae1713b6fc2bc2",
+  "inferences": 4,
+  "input_tokens": 5615,
   "model": "deepseek-flash",
   "model_errors": {},
-  "oracle": null,
-  "output_tokens": null,
+  "oracle": {
+    "answer_facts": true,
+    "cargo_exit": null,
+    "changed_files": [],
+    "pass": true,
+    "tests_preserved": true
+  },
+  "output_tokens": 1945,
   "provider": "deepseek",
   "provider_code": null,
-  "readonly_segment_tool_ms": 0.0,
-  "readonly_segments": 0,
-  "readonly_segments_detail": [],
-  "reason": "key_unavailable",
+  "readonly_segment_tool_ms": 62.93920600414276,
+  "readonly_segments": 2,
+  "readonly_segments_detail": [
+    {
+      "calls": 2,
+      "inference": 1,
+      "percent": 0.13759784822787166,
+      "tool_ms": 18.888778015971184,
+      "turn_wall_ms": 13727.524273991585
+    },
+    {
+      "calls": 4,
+      "inference": 2,
+      "percent": 0.320891277326898,
+      "tool_ms": 44.05042798817158,
+      "turn_wall_ms": 13727.524273991585
+    }
+  ],
+  "reason": null,
   "refusals": {},
-  "result_code": null,
+  "result_code": "completed",
   "retry_after_ms": null,
   "sandbox": {
-    "configured": false
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
   },
   "schema": 2,
-  "status": "not_run",
+  "status": "run",
   "task": "T1",
-  "tool_calls": {},
-  "tool_facts": [],
-  "tool_ms": 0.0,
-  "tool_time_percent": null,
-  "turn_wall_ms": null,
-  "wall_ms": null
+  "tool_calls": {
+    "glob": 1,
+    "grep": 1,
+    "list": 1,
+    "read": 4
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 8.68104499578476,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "list"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 10.207733020186424,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "glob"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 7.601879000663757,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 15.622360989451408,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 9.426728993654251,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 11.39945900440216,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 9.753410011529922,
+      "exit_code": null,
+      "inference": 3,
+      "status": "succeeded",
+      "tool": "grep"
+    }
+  ],
+  "tool_ms": 72.69261601567268,
+  "tool_time_percent": 0.5295391548015502,
+  "turn_wall_ms": 13727.524273991585,
+  "wall_ms": 14120
 }

@@ -1,1 +1,38 @@
-Not run: DeepSeek key unavailable (exit 77 semantics); no transcript exists.
+I'll start by exploring the workspace and then running the tests.tool: list {"path":"."}
+tool: bash {"command":"cargo test --offline 2>&1 | tail -60","timeout_ms":300000}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: bash {"command":"cargo test --offline 2>&1 | tail -60","timeout_ms":300000}
+sandbox: network denied; private per-command caches
+toolchain (read-only): <toolchain>
+sandbox PATH: <toolchain>/bin:/usr/bin:/bin
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+...
+thread 'ledger::tests::balance_includes_cutoff' panicked at src/ledger.rs:125:9:
+assertion `left == right` failed
+  left: 2
+ right: 5
+```
+
+- **Observed:** `2` (the actual value returned by `ledger.balance_through(2)["pear"]`)
+- **Expected:** `5` (the literal asserted in the test)
+
+Overall summary: `test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`.
+
+## Root cause (observed from source, not inferred output)
+
+The test records `pear` movements of `+2` on day 1, `+3` on day 2, and `+100` on day 3, then asserts the balance through day 2 is `5` (i.e. days 1 and 2 cumulative).
+
+`Ledger::balance_through` in `src/ledger.rs` filters with a strict comparison:
+
+```rust
+if movement.day < cutoff {
+```
+
+This excludes movements recorded *on* the cutoff day, so only the day-1 movement (`2`) is summed — hence `left: 2`. The method's own doc comment contradicts this: *"Stock at the end of `cutoff`, including movements on that day."* The correct predicate would be `movement.day <= cutoff`, which would yield `2 + 3 = 5` and satisfy the test.
+
+The day-3 movement (`100`) is irrelevant to the shortfall; the discrepancy is exactly the excluded day-2 movement of `3` (`2 + 3 = 5`).
+
+**No files were changed.**
+turn: completed

@@ -166,8 +166,10 @@ Carried forward unchanged; none is weakened by this step.
 
 - **Partial:** Anthropic live compatibility and live cross-provider switching
   (no Anthropic key was ever supplied; fixture conformance is not live proof).
-- **Partial:** the DeepSeek half of the dogfood measurement (`not_run` /
-  `key_unavailable`), so no cross-provider statement exists.
+- **Partial at release, since measured:** the DeepSeek half of the dogfood rerun
+  was `not_run` when v0.2.0 was accepted, and ran afterwards on the same product
+  code (see the [rerun addendum](dogfood/m8-rerun.md#addendum-deepseek-half-added-2026-11-05-after-v020-was-published)).
+  There is still no v0.1 DeepSeek baseline.
 - **Deferred:** m8-04, parallel read-only tools — 0% of the 10% threshold in both
   measurements; sequential execution and the one-unresolved-intent storage rule
   stay. Not a post-v0.2.0 candidate on this evidence.

@@ -10,8 +10,9 @@ transcripts and scratch workspaces were deleted after the metrics and the
 friction notes were extracted; only the sanitized files under
 [`docs/dogfood/rerun/`](rerun/) are committed.
 
-**The DeepSeek half is still not measured.** No DeepSeek key was available for
-this step, so those five cells are `not_run` / `key_unavailable` (exit-77
+**The DeepSeek half was not measured in this run; see the
+[addendum](#addendum-deepseek-half-added-2026-11-05-after-v020-was-published),
+added after publication.** No DeepSeek key was available for this step, so those five cells are `not_run` / `key_unavailable` (exit-77
 semantics), exactly as in the baseline. Any cross-provider statement is
 therefore still impossible, and the DeepSeek half of M8 acceptance is partial.
 
@@ -283,3 +284,40 @@ turns anyway.
   afterwards with no product code change (see the deviations above).
 - The rerun says nothing about turns longer than the 10-minute deadline (none
   hit it) or about toolchains other than rustup's `1.99.1` on this host.
+
+
+## Addendum: DeepSeek half (added 2026-11-05, after v0.2.0 was published)
+
+The user supplied a new key after publication, so the DeepSeek half was run with
+the rerun's configuration, on commit `b93f61d43977f1035c4c1161a9ae1713b6fc2bc2`
+(the published v0.2.0 product code plus a docs-only record). One run per task, no
+retries. Its cells replace the `not_run` placeholders under
+[`docs/dogfood/rerun/`](rerun/), and its aggregate is
+[`summary-deepseek.json`](rerun/summary-deepseek.json). The tables above are left
+as written.
+
+| Task | Oracle | Inferences | Tool calls | Prompts (RO/other) | Auto-RO | Refusals | Wall | Tokens in/out |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| T1 | pass | 4 | glob 1, grep 1, list 1, read 4 | 0 (0/0) | 7 | 0 | 14.1 s | 5,615 / 1,945 |
+| T2 | pass | 7 | bash 2, edit 1, glob 1, list 1, read 5 | 3 (0/3) | 7 | 0 | 11.5 s | 8,082 / 891 |
+| T3 | pass | 9 | bash 3, edit 4, glob 1, list 1, read 6 | 7 (0/7) | 8 | 0 | 21.4 s | 11,772 / 2,732 |
+| T4 | pass | 8 | bash 4, grep 1, list 1, read 3 | 4 (0/4) | 5 | 0 | 15.1 s | 6,082 / 1,484 |
+| T5 | **fail** (answer correct; `Cargo.lock` created) | 3 | bash 1, list 1, read 1 | 1 (0/1) | 2 | 0 | 6.8 s | 3,914 / 682 |
+
+- **Totals:** 4/5 oracles, 31 inferences, 44 tool calls
+  (10 `bash`), 15 prompts, 29 read-only auto-approvals, 68.9 s wall, 35,465 / 7,734
+  tokens. OpenAI's rerun totals, for reference: 4/5, 27, 22 (4 `bash`), 9, 13,
+  148.6 s, 75,266 / 2,245.
+- **T5** fails for the same reason as OpenAI's: `cargo` created a `Cargo.lock`.
+- **Cargo in the sandbox:** 5 attempts, none `command not found`. Their recorded
+  exit status is 0, but that doesn't mean the tests passed: the model piped cargo
+  through `tail`, so the status is `tail`'s. The answers report 16 passed in T2 after
+  the fix, and in T3, T4 and T5 the fixture's seeded test still failing.
+- **Decision 7:** 0.40% against the 10% threshold, across
+  4 eligible turns and 9 read-only segments. Unlike
+  OpenAI's rerun, this model did make consecutive read-only calls, so the share is a
+  real measurement rather than an empty one. It is still far below the threshold.
+
+**Limits.** There is no DeepSeek baseline: v0.1 was never measured on this provider,
+so nothing here shows improvement over time. Two providers on one run each is not a
+model comparison, and token counts aren't comparable across them.

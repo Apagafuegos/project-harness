@@ -1,48 +1,101 @@
 {
   "approval_classes": {
     "other": {
-      "prompts": 0,
-      "requests": 0
+      "prompts": 1,
+      "requests": 1
     },
     "read_only": {
-      "auto_approved": 0,
+      "auto_approved": 2,
       "prompts": 0,
-      "requests": 0
+      "requests": 2
     }
   },
-  "approval_prompts": 0,
+  "approval_prompts": 1,
   "approval_split_consistent": true,
-  "approvals": 0,
-  "approvals_by_tool": {},
+  "approvals": 1,
+  "approvals_by_tool": {
+    "bash": 1,
+    "list": 1,
+    "read": 1
+  },
   "config": "file",
   "errors": {},
-  "exit_code": null,
-  "harness_commit": "d270512d02243ddfeb01d46b8127a5d4b8008a31",
-  "inferences": 0,
-  "input_tokens": null,
+  "exit_code": 0,
+  "harness_commit": "b93f61d43977f1035c4c1161a9ae1713b6fc2bc2",
+  "inferences": 3,
+  "input_tokens": 3914,
   "model": "deepseek-flash",
   "model_errors": {},
-  "oracle": null,
-  "output_tokens": null,
+  "oracle": {
+    "answer_facts": true,
+    "cargo_exit": null,
+    "changed_files": [
+      "Cargo.lock"
+    ],
+    "pass": false,
+    "tests_preserved": true
+  },
+  "output_tokens": 682,
   "provider": "deepseek",
   "provider_code": null,
   "readonly_segment_tool_ms": 0.0,
   "readonly_segments": 0,
   "readonly_segments_detail": [],
-  "reason": "key_unavailable",
+  "reason": null,
   "refusals": {},
-  "result_code": null,
+  "result_code": "completed",
   "retry_after_ms": null,
   "sandbox": {
-    "configured": false
+    "cargo_registry": false,
+    "configured": true,
+    "env_keys": [
+      "RUSTUP_TOOLCHAIN"
+    ],
+    "path_prepend_entries": 1,
+    "toolchain_mounts": 1
   },
   "schema": 2,
-  "status": "not_run",
+  "status": "run",
   "task": "T5",
-  "tool_calls": {},
-  "tool_facts": [],
-  "tool_ms": 0.0,
-  "tool_time_percent": null,
-  "turn_wall_ms": null,
-  "wall_ms": null
+  "tool_calls": {
+    "bash": 1,
+    "list": 1,
+    "read": 1
+  },
+  "tool_facts": [
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 7.869521990418434,
+      "exit_code": null,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "list"
+    },
+    {
+      "cargo_attempt": true,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 1013.9240690022707,
+      "exit_code": 0,
+      "inference": 1,
+      "status": "succeeded",
+      "tool": "bash"
+    },
+    {
+      "cargo_attempt": false,
+      "cargo_not_found": false,
+      "code": "none",
+      "duration_ms": 8.618726000189781,
+      "exit_code": null,
+      "inference": 2,
+      "status": "succeeded",
+      "tool": "read"
+    }
+  ],
+  "tool_ms": 1030.412316992879,
+  "tool_time_percent": 16.04996594785812,
+  "turn_wall_ms": 6420.028057008982,
+  "wall_ms": 6800
 }

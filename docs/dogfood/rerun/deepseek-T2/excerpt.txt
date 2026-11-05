@@ -1,1 +1,38 @@
-Not run: DeepSeek key unavailable (exit 77 semantics); no transcript exists.
+I'll start by exploring the workspace structure.tool: list {"path":"."}
+tool: glob {"pattern":"**/*.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+tool: read {"path":"Cargo.toml"}
+tool: read {"path":"src/ledger.rs"}
+tool: read {"path":"src/lib.rs"}
+tool: read {"path":"src/display.rs"}
+...
+toolchain (read-only): <toolchain>
+sandbox PATH: <toolchain>/bin:/usr/bin:/bin
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+tool result: Succeeded succeeded
+tool: bash {"command":"git status --porcelain; echo '--- diff ---'; git diff","cwd":"."}
+tool: bash {"command":"git status --porcelain; echo '--- diff ---'; git diff","cwd":"."}
+sandbox: network denied; private per-command caches
+toolchain (read-only): <toolchain>
+sandbox PATH: <toolchain>/bin:/usr/bin:/bin
+sandbox env keys: RUSTUP_TOOLCHAIN
+approve? [y/N] y
+tool result: Failed nonzero_exit
+tool: read {"max_bytes":400,"offset_bytes":1540,"path":"src/ledger.rs"}
+approval: read-only auto-approved
+tool result: Succeeded succeeded
+Fixed. Summary:
+
+**Bug:** `Ledger::balance_through` in `src/ledger.rs` filtered with `movement.day < cutoff`, excluding movements recorded on the cutoff day, contradicting its documented contract ("Stock at the end of `cutoff`, including movements on that day") and the `balance_includes_cutoff` test.
+
+**Fix:** one comparison changed to inclusive:
+```rust
+if movement.day <= cutoff {
+```
+
+**Verification:** `cargo test --offline` → 16 passed, 0 failed, 0 ignored (plus 0 doc-tests). No tests were modified, ignored, or weakened; no other code, APIs, or names were touched.
+turn: completed
