@@ -7,6 +7,7 @@
 #
 # Usage (every run spends provider quota; one run per cell, no retries):
 #   scripts/dogfood.sh --provider all --task all --out DIR
+#   scripts/dogfood.sh --provider openai --task T6 --out DIR
 #   scripts/dogfood.sh --provider openai --task T3 --out DIR \
 #     --config /absolute/private/defaults.toml
 #
@@ -15,6 +16,8 @@
 # can measure a user's own TOML (`approve_read_only`, `[sandbox]`). The file is
 # the user's: never commit it, and no value from it belongs in evidence except
 # key names and sanitized mount counts.
+# T6 is a separate three-file rename probe. After scoring, the driver invokes
+# `sessions undo --yes` and records whether trusted edits restored the fixture.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --locked --quiet -p harness --bin harness --example dogfood
