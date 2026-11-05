@@ -20,6 +20,8 @@ struct Wire {
     mounts: Vec<Mount>,
     #[serde(default)]
     sandbox: super::ToolchainSettings,
+    #[serde(default)]
+    shell: Option<super::ShellOptions>,
 }
 #[derive(Deserialize)]
 struct Arguments {
@@ -147,6 +149,7 @@ pub(super) fn probe_spec(config: &SandboxConfig, root: &Path) -> Result<Spec, Sa
                 mode: "rw".into(),
             }],
             sandbox: config.toolchains.clone(),
+            shell: None,
         },
         root,
     )
@@ -374,9 +377,11 @@ fn build_wire(config: &SandboxConfig, wire: Wire, root: &Path) -> Result<Spec, S
         config.bash.as_os_str().into(),
         "--noprofile".into(),
         "--norc".into(),
-        "-c".into(),
-        wire.arguments.command.into(),
     ]);
+    if wire.shell.is_some_and(|shell| shell.pipefail) {
+        args.extend(["-o".into(), "pipefail".into()]);
+    }
+    args.extend(["-c".into(), wire.arguments.command.into()]);
     Ok(Spec {
         args,
         timeout: Duration::from_millis(wire.timeout_ms),
@@ -564,6 +569,65 @@ mod tests {
                     Vec::new()
                 }
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn recorded_shell_options_control_exact_argv_and_pipeline_status() {
+        let root = tempfile::tempdir().unwrap();
+        let config = SandboxConfig::default();
+        for (shell, expected) in [(None, 0), (Some(false), 0), (Some(true), 7)] {
+            let mut wire: Wire = serde_json::from_str(include_str!("../golden/bash.json")).unwrap();
+            wire.shell = shell.map(|pipefail| super::super::ShellOptions { pipefail });
+            wire.arguments.command = "(exit 7) | cat".into();
+            let spec = build_wire(&config, wire, root.path()).unwrap();
+            let start = spec.args.iter().position(|s| s == "/bin/bash").unwrap();
+            let argv = &spec.args[start + 1..];
+            let expected_argv = if shell == Some(true) {
+                vec![
+                    "--noprofile",
+                    "--norc",
+                    "-o",
+                    "pipefail",
+                    "-c",
+                    "(exit 7) | cat",
+                ]
+            } else {
+                vec!["--noprofile", "--norc", "-c", "(exit 7) | cat"]
+            };
+            assert_eq!(
+                argv,
+                expected_argv.iter().map(OsString::from).collect::<Vec<_>>()
+            );
+            // Tests only the trusted shell suffix; S02 separately exercises Bubblewrap.
+            let status = std::process::Command::new(&config.bash)
+                .args(argv)
+                .env_clear()
+                .status()
+                .unwrap();
+            assert_eq!(status.code(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn shell_options_are_strict_and_legacy_bytes_are_unchanged() {
+        let legacy = include_bytes!("../golden/bash.json");
+        let value: serde_json::Value = serde_json::from_slice(legacy).unwrap();
+        let wire: Wire = serde_json::from_slice(legacy).unwrap();
+        assert!(wire.shell.is_none());
+        for shell in [
+            serde_json::json!({}),
+            serde_json::json!({"pipefail":"true"}),
+            serde_json::json!({"pipefail":true,"extra":true}),
+        ] {
+            let mut invalid = value.clone();
+            invalid["shell"] = shell;
+            assert!(serde_json::from_value::<Wire>(invalid).is_err());
         }
     }
 }
