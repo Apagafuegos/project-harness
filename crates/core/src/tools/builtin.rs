@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -7,6 +7,7 @@ use super::{Plan, PolicySnapshot, Refusal, WorkspacePath, WorkspaceView};
 use crate::session::{CallRef, EffectClass, EffectSet, ExecutionBackend, ResultCode};
 
 pub(super) const MIB: u64 = 1024 * 1024;
+const MULTI_EDIT_LIMIT: u64 = 64;
 
 /// Provider-facing description of a compiled-in capability.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -61,6 +62,9 @@ pub(super) enum Operation {
         old_text: String,
         new_text: String,
     },
+    MultiEdit {
+        files: Vec<MultiEditFile>,
+    },
     List {
         path: WorkspacePath,
     },
@@ -86,6 +90,18 @@ pub(super) enum Operation {
     },
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct MultiEditFile {
+    pub(super) path: WorkspacePath,
+    pub(super) edits: Vec<MultiEditReplacement>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct MultiEditReplacement {
+    pub(super) old_text: String,
+    pub(super) new_text: String,
+}
+
 impl Operation {
     pub(super) fn index(&self) -> usize {
         match self {
@@ -96,6 +112,7 @@ impl Operation {
             Self::List { .. } => 4,
             Self::Glob { .. } => 5,
             Self::Grep { .. } => 6,
+            Self::MultiEdit { .. } => 7,
         }
     }
     pub(super) fn path(&self) -> Option<&WorkspacePath> {
@@ -106,7 +123,7 @@ impl Operation {
             | Self::List { path }
             | Self::Glob { path, .. }
             | Self::Grep { path, .. } => Some(path),
-            Self::Bash { .. } => None,
+            Self::Bash { .. } | Self::MultiEdit { .. } => None,
         }
     }
     pub(super) fn search(&self) -> bool {
@@ -116,7 +133,7 @@ impl Operation {
         )
     }
     pub(super) fn mutation(&self) -> bool {
-        matches!(self, Self::Write { .. } | Self::Edit { .. })
+        matches!(self, Self::Write { .. } | Self::Edit { .. } | Self::MultiEdit { .. })
     }
 }
 
@@ -129,7 +146,7 @@ struct Builtin {
 /// A fixed registry. It has no registration or replacement API.
 #[derive(Clone, Debug)]
 pub struct Registry {
-    tools: [Builtin; 7],
+    tools: [Builtin; 8],
 }
 
 impl Registry {
@@ -161,14 +178,14 @@ impl Registry {
         Ok(tool)
     }
 
-    /// All definitions in fixed read/write/edit/bash/list/glob/grep order.
+    /// All definitions in fixed read/write/edit/bash/list/glob/grep/multi_edit order.
     pub fn definitions(&self) -> impl Iterator<Item = &ToolDefinition> {
         self.tools.iter().map(|t| &t.definition)
     }
 }
 
 fn definition(index: usize) -> ToolDefinition {
-    if index >= 4 {
+    if (4..=6).contains(&index) {
         return super::search::definition(index);
     }
     let path = json!({"type":"string", "minLength":1, "description":"Workspace-relative Linux path; no absolute paths, traversal, NUL, or symlinks. At most 4096 UTF-8 bytes."});
@@ -194,13 +211,21 @@ fn definition(index: usize) -> ToolDefinition {
             json!(["path", "old_text", "new_text"]),
             EffectClass::FilesystemMutation,
         ),
-        _ => (
+        3 => (
             "bash",
             "Plan a nonempty shell command (at most 64 KiB UTF-8) inside Bubblewrap, without network. cwd defaults to workspace root; timeout_ms defaults to 120000 (1..600000). No elevation or host-environment inheritance.",
             json!({"command":{"type":"string","minLength":1,"maxLength":65536},"cwd":path,"timeout_ms":{"type":"integer","minimum":1,"maximum":600000}}),
             json!(["command"]),
             EffectClass::Process,
         ),
+        7 => (
+            "multi_edit",
+            "Apply up to 64 exact literal replacements across existing workspace files in one approval. Repeated paths are grouped in input order; files are previewed and committed in sorted path order. Every replacement must match exactly once. No symlinks or hard links. A commit failure can leave a reported partial result; use undo to reverse committed files.",
+            json!({"edits":{"type":"array","minItems":1,"maxItems":MULTI_EDIT_LIMIT,"items":{"type":"object","properties":{"path":path,"old_text":{"type":"string","minLength":1,"maxLength":MIB},"new_text":{"type":"string","maxLength":MIB}},"required":["path","old_text","new_text"],"additionalProperties":false}}}),
+            json!(["edits"]),
+            EffectClass::FilesystemMutation,
+        ),
+        _ => unreachable!("unknown built-in tool index"),
     };
     ToolDefinition {
         name: name.into(),
@@ -216,7 +241,7 @@ fn definition(index: usize) -> ToolDefinition {
 }
 
 fn schema(index: usize) -> &'static jsonschema::Validator {
-    static SCHEMAS: [OnceLock<jsonschema::Validator>; 7] = [const { OnceLock::new() }; 7];
+    static SCHEMAS: [OnceLock<jsonschema::Validator>; 8] = [const { OnceLock::new() }; 8];
     SCHEMAS[index].get_or_init(|| {
         jsonschema::validator_for(&definition(index).input_schema).expect("built-in schema")
     })
@@ -332,6 +357,39 @@ impl Tool for Builtin {
                 old_text: string("old_text"),
                 new_text: string("new_text"),
             },
+            7 => {
+                let mut grouped: BTreeMap<WorkspacePath, Vec<MultiEditReplacement>> =
+                    BTreeMap::new();
+                for (index, edit) in arguments["edits"]
+                    .as_array()
+                    .expect("schema array")
+                    .iter()
+                    .enumerate()
+                {
+                    let path = WorkspacePath::new(edit["path"].as_str().expect("schema path"))
+                        .map_err(|error| {
+                            argument_refusal(&format!("/edits/{index}/path"), &error.detail)
+                        })?;
+                    let old_text = edit["old_text"].as_str().expect("schema old_text");
+                    let new_text = edit["new_text"].as_str().expect("schema new_text");
+                    if old_text.len() > MIB as usize || new_text.len() > MIB as usize {
+                        return Err(argument_refusal(
+                            &format!("/edits/{index}"),
+                            "replacement text exceeds 1048576 UTF-8 bytes",
+                        ));
+                    }
+                    grouped.entry(path).or_default().push(MultiEditReplacement {
+                        old_text: old_text.to_owned(),
+                        new_text: new_text.to_owned(),
+                    });
+                }
+                Operation::MultiEdit {
+                    files: grouped
+                        .into_iter()
+                        .map(|(path, edits)| MultiEditFile { path, edits })
+                        .collect(),
+                }
+            }
             4 => Operation::List {
                 path: path("path")?,
             },
