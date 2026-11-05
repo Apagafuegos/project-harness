@@ -214,6 +214,7 @@ fn observed(status: ToolStatus, text: &str) -> UserResolution {
         status,
         text: text.into(),
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
@@ -586,6 +587,7 @@ pub mod bodies {
                                 artifacts: Vec::new(),
                                 code: Some("policy_denied".into()),
                                 file_effect: None,
+                                file_paths: Vec::new(),
                             },
                         },
                     }),
