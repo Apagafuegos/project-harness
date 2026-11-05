@@ -1936,6 +1936,7 @@ async fn uncertain_invocation_waits_for_the_user_through_the_handle() {
                 status: ToolStatus::Succeeded,
                 text: "README.md was read".into(),
                 file_effect: None,
+                file_paths: Vec::new(),
             },
         })
         .await
