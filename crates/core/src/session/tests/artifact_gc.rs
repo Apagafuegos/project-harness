@@ -137,3 +137,58 @@ fn journal_export_checks_the_copied_bytes_not_only_the_verified_source() {
     assert!(!destination.join("sessions").exists());
     assert!(!destination.join("artifacts").exists());
 }
+
+/// Audit follow-up: a failed journal export removes only what it created.
+#[test]
+fn failed_journal_export_removes_the_empty_directory_it_created() {
+    let (temp, root, store) = fresh();
+    let id = store.snapshot().session_id().clone();
+    drop(store);
+    // Injected after the destination and its children were created.
+    root.io.test.lock().unwrap().fail = Some(Point::ExportArtifactVerified);
+    let destination = temp.path().join("exported");
+    assert!(root.export_journal(&id, &destination).is_err());
+    assert!(
+        !destination.exists(),
+        "the destination directory this export created must be gone"
+    );
+    assert!(
+        temp.path().is_dir(),
+        "the parent directory it did not create must survive"
+    );
+}
+
+#[test]
+fn a_failed_export_never_removes_a_preexisting_empty_destination() {
+    let (temp, root, store) = fresh();
+    let id = store.snapshot().session_id().clone();
+    drop(store);
+    let destination = temp.path().join("mine");
+    fs::create_dir(&destination).unwrap();
+    root.io.test.lock().unwrap().fail = Some(Point::ExportArtifactVerified);
+    assert!(matches!(
+        root.export_journal(&id, &destination),
+        Err(MaintenanceError::Exists)
+    ));
+    assert!(
+        destination.is_dir(),
+        "a pre-existing directory is untouched"
+    );
+    assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+}
+
+#[test]
+fn a_failed_export_never_touches_a_preexisting_nonempty_destination() {
+    let (temp, root, store) = fresh();
+    let id = store.snapshot().session_id().clone();
+    drop(store);
+    let destination = temp.path().join("mine");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep"), b"user data").unwrap();
+    root.io.test.lock().unwrap().fail = Some(Point::ExportArtifactVerified);
+    assert!(matches!(
+        root.export_journal(&id, &destination),
+        Err(MaintenanceError::Exists)
+    ));
+    assert_eq!(fs::read(destination.join("keep")).unwrap(), b"user data");
+}

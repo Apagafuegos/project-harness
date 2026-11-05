@@ -360,6 +360,13 @@ impl DataRoot {
         })();
         if result.is_err() {
             discard_export(&created);
+            // The destination directory is this export's own creation, so remove
+            // it too when it is left empty. Unlinking by the parent descriptor and
+            // the exact name never re-resolves a path, and REMOVEDIR atomically
+            // refuses a non-empty directory, a symlink or anything else that
+            // replaced it. A pre-existing directory never reaches here: mkdirat
+            // above returns `Exists` and the export has created nothing.
+            let _ = fs::unlinkat(&parent_file, name, AtFlags::REMOVEDIR);
         }
         result
     }
