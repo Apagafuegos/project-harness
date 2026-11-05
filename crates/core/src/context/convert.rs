@@ -163,6 +163,7 @@ mod tests {
                 artifacts: vec![],
                 code: Some("failed".into()),
                 file_effect: None,
+                file_paths: Vec::new(),
             },
         };
         let rendered = tool_result("read", &result);
