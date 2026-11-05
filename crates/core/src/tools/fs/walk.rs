@@ -314,6 +314,7 @@ impl FsWorkspace {
             output_truncated: value["truncated"] == true,
             artifacts,
             file_effect: None,
+            file_paths: Vec::new(),
         }
     }
 
