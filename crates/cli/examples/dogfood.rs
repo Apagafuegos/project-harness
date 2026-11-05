@@ -39,7 +39,7 @@ fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--self-test"] {
         let result = self_test(&suite, &scratch)
-            .and_then(|()| journal_selftest(&scratch))
+            .and_then(|()| journal_selftest(&scratch, &root.join("target/debug/harness")))
             .and_then(|()| config_selftest(&scratch))
             .and_then(|()| tty_selftest());
         clean_scratch(&scratch);
@@ -79,7 +79,7 @@ fn run() -> Result<()> {
         }
     }
     if !["all", "openai", "deepseek"].contains(&provider)
-        || !["all", "T1", "T2", "T3", "T4", "T5"].contains(&task)
+        || !["all", "T1", "T2", "T3", "T4", "T5", "T6"].contains(&task)
     {
         return Err("usage".into());
     }
@@ -101,13 +101,16 @@ fn run() -> Result<()> {
             p == "deepseek" && std::env::var_os("DEEPSEEK_API_KEY").is_none_or(|k| k.is_empty());
         skipped |= missing;
         let mut blocked = missing;
-        for t in ["T1", "T2", "T3", "T4", "T5"]
+        for t in ["T1", "T2", "T3", "T4", "T5", "T6"]
             .into_iter()
             .filter(|t| task == "all" || task == *t)
         {
             let dir = out.join(format!("{p}-{t}"));
             fs::create_dir(&dir)?; // Never overwrite a measurement or silently retry.
             let mut record = skeleton(p, t, &commit);
+            if t == "T6" {
+                record["undo"] = json!({"attempted":false,"result":"not_run"});
+            }
             record["config"] = json!(if config.is_some() {
                 "file"
             } else {
@@ -158,6 +161,14 @@ fn run() -> Result<()> {
                     Ok(value) => value,
                     Err(_) => json!({"pass":false,"error":"oracle_failed"}),
                 };
+                if t == "T6" {
+                    record["undo"] = undo_metrics(
+                        &binary,
+                        &data,
+                        &ws,
+                        &suite.join("fixture"),
+                    )?;
+                }
                 let clean = sanitize(&execution.transcript, &ws, &data, &sandbox_paths);
                 let lines: Vec<_> = clean
                     .lines()
@@ -703,7 +714,7 @@ fn clean_scratch(scratch: &Path) {
 }
 
 fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
-    for task in ["T1", "T2", "T3", "T4", "T5"] {
+    for task in ["T1", "T2", "T3", "T4", "T5", "T6"] {
         let temp = tempfile::Builder::new()
             .prefix("oracle-")
             .tempdir_in(scratch)?;
@@ -729,6 +740,33 @@ fn self_test(suite: &Path, scratch: &Path) -> Result<()> {
             true,
             "reference {task}"
         );
+        if task == "T6" {
+            let display_path = ws.join("src/display.rs");
+            let display = fs::read_to_string(&display_path)?;
+            fs::write(&display_path, display.replacen("product", "item", 1))?;
+            assert_eq!(
+                oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],
+                false,
+                "incomplete rename T6"
+            );
+            let original = fs::read_to_string(suite.join("fixture/src/display.rs"))?;
+            let (reference, _) = rename_fixture_words(&original);
+            fs::write(&display_path, reference)?;
+            let display = fs::read_to_string(&display_path)?;
+            let unsafe_change = display.replace(
+                "text.push_str(&format!(\"{product}: {quantity}\\n\"));",
+                "text.push_str(&format!(\"unsafe {product}: {quantity}\\n\"));",
+            );
+            fs::write(&display_path, unsafe_change)?;
+            assert_eq!(
+                oracle::check(task, &suite.join("fixture"), &ws, &answer)?["pass"],
+                false,
+                "behavior change T6"
+            );
+            println!("T6: pristine fails; reference passes; incomplete and unsafe edits fail");
+            temp.close()?;
+            continue;
+        }
         if matches!(task, "T1" | "T5") {
             // F06 self-test: a created lockfile is build output, not a change,
             // so the read-only oracle still passes on it.
