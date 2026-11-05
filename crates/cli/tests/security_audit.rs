@@ -205,6 +205,7 @@ async fn sentinel_credentials_stay_out_of_journals_exports_config_and_tui() {
             summary_model: None,
             compaction_strategy: wiring::creation_compaction_strategy(),
             explicit_strategy: false,
+            inherit_remembered_grants: true,
             driver,
             sandbox: None,
         };

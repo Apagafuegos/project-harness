@@ -86,6 +86,7 @@ impl Fixture {
                 summary_model: None,
                 compaction_strategy: harness::wiring::creation_compaction_strategy(),
                 explicit_strategy: false,
+                inherit_remembered_grants: true,
                 driver,
                 sandbox: None,
             },
@@ -250,6 +251,60 @@ async fn read_only_approval_setting_reaches_every_app_the_shell_builds() {
         "the resolved flag/config value must reach the pure app"
     );
     host.shutdown().await;
+}
+
+/// Audit L06: the client that records a grant resumes it; `ask` refuses it.
+#[tokio::test]
+async fn a_recorded_grant_is_resumed_by_the_tui() {
+    let f = Fixture::new(Vec::new());
+    let root = Arc::new(DataRoot::open(&f.options.data_root, true).unwrap());
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "policy_revision": "tui-test",
+        "enabled_tools": ["read", "write", "edit"],
+        "workspace_read": "ask",
+        "workspace_mutation": "ask",
+        "process": "ask",
+        "network": "deny",
+        "protected_paths": [],
+        "allowances": [{"tool": "write", "path": "."}]
+    }))
+    .unwrap();
+    let configuration = root.put_artifact(&bytes).unwrap();
+    let session = SessionId::new();
+    let handle = SessionHandle::create(
+        root,
+        session.clone(),
+        SessionHeader {
+            workspace: f.options.workspace.to_string_lossy().into(),
+            initial_model: f.options.model.clone(),
+            policy_revision: "tui-test".into(),
+            configuration,
+        },
+        f.provider.clone(),
+        f.options.driver.clone(),
+    )
+    .await
+    .unwrap();
+    handle.shutdown().await;
+
+    let mut options = f.options.clone();
+    options.session = Some(session);
+    let opened = wiring::open_session(&options, f.provider.clone())
+        .await
+        .expect("the TUI resumes the grants it recorded");
+    let snapshot = opened.handle.view().await.unwrap().snapshot;
+    let policy: serde_json::Value = serde_json::from_slice(
+        &DataRoot::open(&options.data_root, false)
+            .unwrap()
+            .read_artifact(snapshot.configuration(), 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        policy["allowances"],
+        serde_json::json!([{"tool": "write", "path": "."}])
+    );
+    opened.handle.shutdown().await;
 }
 
 #[tokio::test]

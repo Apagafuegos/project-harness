@@ -117,6 +117,7 @@ async fn sandbox_both_clients_record_settings_and_refuse_continuation_changes() 
                 explicit_strategy: ask.explicit_strategy,
                 driver: ask.driver,
                 sandbox: ask.sandbox,
+                inherit_remembered_grants: false,
             }
         };
         assert_eq!(options.sandbox.as_ref().unwrap().toolchains, sandbox);

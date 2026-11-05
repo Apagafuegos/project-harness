@@ -70,6 +70,10 @@ pub struct SessionOptions {
     pub driver: DriverConfig,
     /// Real host assembly settings (tests can disable the shell).
     pub sandbox: Option<SandboxConfig>,
+    /// Whether a continuation resumes the remembered grants the session already
+    /// recorded. The TUI records them and resumes them; `ask` never inherits
+    /// them (audit L06) and refuses with `session_has_remembered_grants`.
+    pub inherit_remembered_grants: bool,
 }
 /// Sanitized client-facing failure: process classification and stable diagnostic.
 pub type Failure = (u8, String);
@@ -145,13 +149,32 @@ pub async fn open_session(
             "workspace_mutation",
             "process",
             "network",
-            "allowances",
             "sandbox",
         ] {
             if policy[field] != expected[field] {
                 return Err(configuration("session_policy_mismatch"));
             }
         }
+        // This client never inherits remembered grants (audit L06). Say so
+        // instead of the generic policy mismatch: the session is intact, and the
+        // TUI, which recorded the grants, resumes them.
+        if !o.inherit_remembered_grants {
+            if policy["allowances"]
+                .as_array()
+                .is_some_and(|grants| !grants.is_empty())
+            {
+                return Err(configuration(
+                    "session_has_remembered_grants: ask never uses remembered grants; \
+                     continue this session in the TUI",
+                ));
+            }
+            if policy["allowances"] != expected["allowances"] {
+                return Err(configuration("session_policy_mismatch"));
+            }
+        }
+        // The TUI resumes exactly the allowances the session recorded: it is the
+        // client that granted them, and a grant never widens past the protected
+        // paths or the recorded tool/path or exact command/cwd binding.
         // The compaction policy is compared semantically, so an explicit default
         // is not a mismatch and an explicit strategy is refused only when it
         // differs from the recorded one.

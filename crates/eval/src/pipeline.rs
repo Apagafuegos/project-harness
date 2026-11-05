@@ -329,6 +329,8 @@ async fn drive(
             workspace_root: workspace.to_path_buf(),
             ..SandboxConfig::default()
         }),
+        // The offline eval follows the headless client's rule.
+        inherit_remembered_grants: false,
     };
     let wired = wiring::open_session(&session_options, phase.clone())
         .await

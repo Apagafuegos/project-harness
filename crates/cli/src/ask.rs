@@ -712,6 +712,8 @@ fn session_options(o: &Options) -> crate::wiring::SessionOptions {
         explicit_strategy: o.explicit_strategy,
         driver: o.driver.clone(),
         sandbox: o.sandbox.clone(),
+        // `ask` never inherits remembered grants (audit L06).
+        inherit_remembered_grants: false,
     }
 }
 

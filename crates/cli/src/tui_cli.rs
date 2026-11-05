@@ -179,6 +179,8 @@ pub(crate) fn options(
         known_instances: instances,
         driver,
         sandbox: Some(settings.sandbox_config()),
+        // The TUI records remembered grants, so it resumes them on continuation.
+        inherit_remembered_grants: true,
     }
 }
 

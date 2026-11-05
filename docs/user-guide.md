@@ -181,10 +181,14 @@ workspace/data root. Omitted model/provider selections retain the branch model;
 explicit values (including TOML values) request a switch. Recorded strategy is
 retained unless explicitly selected; a differing continuation strategy is
 refused, not installed. Continue with the same summary-model/automatic policy
-and auth/provider availability. `session_policy_mismatch` also refuses changed
-allowances: a TUI `r` remembered grant can prevent reopening through either
-client. Do not edit history or weaken checks to bypass this limitation; the
-read-only catalog/inspection/export still provide access.
+and auth/provider availability. `session_policy_mismatch` refuses any other
+changed policy field. Remembered grants are client-specific: `ask` never uses
+them, so a session that records one refuses an `ask` continuation with
+`session_has_remembered_grants` (exit 2) and says to continue it in the TUI.
+The TUI records those grants and resumes exactly them, and a grant never widens
+past the protected paths or its recorded tool/path or exact command/cwd binding.
+Do not edit history or weaken checks; the read-only
+catalog/inspection/export still provide access.
 
 New sessions record, in order: built-in system instructions (workspace, actual
 tools, one call at a time with approval, no unchanged retry of a denied call, and

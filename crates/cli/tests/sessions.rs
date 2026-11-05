@@ -95,6 +95,7 @@ fn catalog_json_and_context_include_new_session_instructions_without_modificatio
                 summary_model: None,
                 compaction_strategy: harness::wiring::creation_compaction_strategy(),
                 explicit_strategy: false,
+                inherit_remembered_grants: false,
                 driver: DriverConfig::default(),
                 sandbox: None,
             },

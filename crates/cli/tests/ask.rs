@@ -1046,6 +1046,86 @@ async fn pre_search_session_keeps_recorded_tools_and_rejects_new_tools() {
         EntryPayload::ToolResult(result) if result.result.metadata.code.as_deref() == Some("tool_disabled"))));
 }
 
+/// A session recorded with a remembered grant, exactly as the TUI's `r` writes
+/// one, plus a variant whose policy differs in another field.
+async fn session_with_policy(f: &Fixture, allowances: Value, mutation: &str) -> SessionId {
+    let root = Arc::new(DataRoot::open(&f.options.data_root, true).unwrap());
+    let bytes = serde_json::to_vec(&json!({
+        "policy_revision": "ask-v1",
+        "enabled_tools": ["read", "write", "edit"],
+        "workspace_read": "ask",
+        "workspace_mutation": mutation,
+        "process": "ask",
+        "network": "deny",
+        "protected_paths": [],
+        "allowances": allowances
+    }))
+    .unwrap();
+    let artifact = root.put_artifact(&bytes).unwrap();
+    let session = SessionId::new();
+    let handle = SessionHandle::create(
+        root,
+        session.clone(),
+        SessionHeader {
+            workspace: f.options.workspace.to_str().unwrap().into(),
+            initial_model: f.options.model.clone(),
+            policy_revision: "ask-v1".into(),
+            configuration: artifact,
+        },
+        Arc::new(ScriptedProvider::new([])),
+        f.options.driver.clone(),
+    )
+    .await
+    .unwrap();
+    handle.shutdown().await;
+    session
+}
+
+/// Audit L06: ask keeps refusing remembered grants, but names the reason.
+#[tokio::test]
+async fn ask_continuation_names_remembered_grants_and_points_to_the_tui() {
+    let mut f = Fixture::new();
+    let granted = session_with_policy(&f, json!([{"tool": "write", "path": "."}]), "ask").await;
+    let before = journal_bytes(&f, &granted);
+    f.options.session = Some(granted.clone());
+    let (code, out, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("session_has_remembered_grants"), "{err}");
+    assert!(
+        err.contains("ask never uses remembered grants")
+            && err.contains("continue this session in the TUI"),
+        "{err}"
+    );
+    assert!(!err.contains("session_policy_mismatch"), "{err}");
+    // A refusal opens nothing and writes nothing.
+    assert_eq!(journal_bytes(&f, &granted), before);
+}
+
+#[tokio::test]
+async fn another_policy_difference_still_reports_session_policy_mismatch() {
+    let mut f = Fixture::new();
+    let changed = session_with_policy(&f, json!([]), "deny").await;
+    f.options.session = Some(changed);
+    let (code, out, err) = f.run(Arc::new(ScriptedProvider::new([])), None).await;
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("session_policy_mismatch"), "{err}");
+    assert!(!err.contains("session_has_remembered_grants"), "{err}");
+}
+
+#[tokio::test]
+async fn a_session_without_grants_is_still_accepted() {
+    let mut f = Fixture::new();
+    let no_grants = session_with_policy(&f, json!([]), "ask").await;
+    f.options.session = Some(no_grants);
+    let (code, _, err) = f
+        .run(Arc::new(ScriptedProvider::new([reply("continued")])), None)
+        .await;
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("session_has_remembered_grants"), "{err}");
+}
+
 fn configuration_changes(bytes: &[u8]) -> usize {
     String::from_utf8_lossy(bytes)
         .matches("\"configuration_changed\"")
