@@ -37,6 +37,7 @@ fn image(path: &str, capture: &Capture, pre_mode: Option<u32>, post: &[u8]) -> F
         pre_image: capture.pre.clone(),
         pre_mode,
         post_image: Digest::of(post),
+        additional_targets: Vec::new(),
     }
 }
 
@@ -51,6 +52,7 @@ struct Writes {
     post: &'static [u8],
     capture: Option<FileImage>,
     effect: FileEffect,
+    file_paths: Vec<FilePathEffect>,
 }
 impl Writes {
     /// A completed turn with one captured write. `commits` covers the twelve
@@ -87,15 +89,17 @@ impl Writes {
                 let decision_id = DecisionId::new();
                 let invocation_id = InvocationId::new();
                 self.invocation = Some(invocation_id.clone());
-                self.capture = Some(image(
-                    self.path,
-                    &Capture {
-                        plan: self.plan.clone(),
-                        pre: self.pre.clone(),
-                    },
-                    self.pre.as_ref().map(|_| 0o644),
-                    self.post,
-                ));
+                if self.capture.is_none() {
+                    self.capture = Some(image(
+                        self.path,
+                        &Capture {
+                            plan: self.plan.clone(),
+                            pre: self.pre.clone(),
+                        },
+                        self.pre.as_ref().map(|_| 0o644),
+                        self.post,
+                    ));
+                }
                 audit(
                     snapshot,
                     vec![
@@ -125,13 +129,14 @@ impl Writes {
                 )
             }
             5 => transition(snapshot, Authorizing, Executing),
-            6 => tool_result_with_effect(
+            6 => tool_result_with_paths(
                 snapshot,
                 self.call.clone().unwrap(),
                 self.invocation.clone(),
                 ToolStatus::Succeeded,
                 Provenance::Executor,
                 Some(self.effect),
+                self.file_paths.clone(),
             ),
             7 => transition(snapshot, Executing, Continuing),
             8 => transition(snapshot, Continuing, Preparing),
@@ -162,6 +167,26 @@ fn tool_result_with_effect(
     status: ToolStatus,
     provenance: Provenance,
     effect: Option<FileEffect>,
+) -> Commit {
+    tool_result_with_paths(
+        snapshot,
+        call,
+        invocation,
+        status,
+        provenance,
+        effect,
+        Vec::new(),
+    )
+}
+
+fn tool_result_with_paths(
+    snapshot: &SessionSnapshot,
+    call: CallRef,
+    invocation: Option<InvocationId>,
+    status: ToolStatus,
+    provenance: Provenance,
+    effect: Option<FileEffect>,
+    file_paths: Vec<FilePathEffect>,
 ) -> Commit {
     let turn = snapshot.active_turn().unwrap().clone();
     let entry = EntryId::new();
@@ -202,6 +227,7 @@ fn tool_result_with_effect(
                         artifacts: Vec::new(),
                         code,
                         file_effect: effect,
+                        file_paths,
                     },
                 },
             }),
@@ -228,6 +254,7 @@ fn written(
         post,
         capture: None,
         effect: FileEffect::Applied,
+        file_paths: Vec::new(),
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
@@ -691,6 +718,7 @@ fn a_compaction_may_not_cover_an_undo_note_or_anything_before_it() {
         post: b"created",
         capture: None,
         effect: FileEffect::Applied,
+        file_paths: Vec::new(),
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
@@ -860,6 +888,7 @@ fn a_plan_that_disagrees_with_the_captured_image_is_rejected() {
                         pre_image: pre,
                         pre_mode: Some(0o644),
                         post_image: Digest::of(b"after"),
+                        additional_targets: Vec::new(),
                     }),
                 }),
             ],
@@ -1133,6 +1162,7 @@ fn an_all_not_applied_candidate_is_consumed_and_reaches_the_earlier_turn() {
         post: b"new",
         capture: None,
         effect: FileEffect::NotApplied,
+        file_paths: Vec::new(),
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
@@ -1193,6 +1223,67 @@ fn an_all_not_applied_candidate_is_consumed_and_reaches_the_earlier_turn() {
     assert_ne!(next, turn_id);
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].path, "a");
+}
+
+#[test]
+fn partially_applied_multi_edit_selects_only_committed_paths_for_undo() {
+    let (_temp, root, mut store) = fresh();
+    let pre_a = root.put_artifact(b"a-before").unwrap();
+    let pre_b = root.put_artifact(b"b-before").unwrap();
+    let plan_bytes = serde_json::to_vec(&json!({
+        "version": 2,
+        "name": "multi_edit",
+        "targets": [
+            {"path":"a", "pre_image":pre_a.sha256},
+            {"path":"b", "pre_image":pre_b.sha256}
+        ]
+    }))
+    .unwrap();
+    let plan = root.put_artifact(&plan_bytes).unwrap();
+    let multi_image = FileImage {
+        path: "a".into(),
+        pre_image: Some(pre_a.clone()),
+        pre_mode: Some(0o644),
+        post_image: Digest::of(b"a-after"),
+        additional_targets: vec![FileImageTarget {
+            path: "b".into(),
+            pre_image: Some(pre_b),
+            pre_mode: Some(0o644),
+            post_image: Digest::of(b"b-after"),
+        }],
+    };
+    let mut writes = Writes {
+        call: None,
+        invocation: None,
+        step: 0,
+        plan,
+        pre: Some(pre_a),
+        path: "a",
+        post: b"a-after",
+        capture: Some(multi_image),
+        effect: FileEffect::Applied,
+        file_paths: vec![
+            FilePathEffect {
+                path: "a".into(),
+                effect: FileEffect::Applied,
+            },
+            FilePathEffect {
+                path: "b".into(),
+                effect: FileEffect::NotApplied,
+            },
+        ],
+    };
+    for _ in 0..TOOL_TURN_COMMITS {
+        let snapshot = store.snapshot();
+        store.append(writes.next(&snapshot), at()).unwrap();
+    }
+    let UndoSelection::Candidate { targets, .. } = store.snapshot().select_undo().unwrap() else {
+        panic!("partially applied batch should have one reversible target");
+    };
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].path, "a");
+    assert_eq!(targets[0].pre_image, Some(pre_a));
+    assert_eq!(targets[0].post_image, Digest::of(b"a-after"));
 }
 
 /// Decision 17 compatibility: a committed v4 journal written by a v0.2.0
