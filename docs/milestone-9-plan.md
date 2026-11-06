@@ -1,17 +1,21 @@
 # Milestone 9 plan — proposed
 
-**Status: proposal, not accepted.** Nothing here is implemented. The steps,
-the decisions marked *open* and the release target need the owner's acceptance
-before any code changes. When it is accepted, the settled decisions get numbers
-and the M9 acceptance document maps them to tests, as M8 did.
+**Status: implementation authorized, in progress.** The owner requested
+implementation on 2026-11-05 and continued work until milestone acceptance.
+The recommended options are the implementation baseline: A1, B1+B2, C1+C2,
+D (no headline capability), E (v0.3.0) and F (opt-in live runs with the M8 budget).
+Authorization to run is not evidence that credentials or live results exist.
+No release or milestone-completion claim is made here.
 
 ## Starting point
 
 - v0.2.0 is published. The v0.2.1 fixes are on `v021-fixes` (`b541554`, CI
-  42114190337 green on both jobs) and are **not merged yet**. That commit changes
+  42114190337 green on both jobs). Since planning, the fixes were integrated on
+  `main` as `406cda4` plus review follow-up `6467b9f`. The original commit changes
   the undo runtime, the sandbox settings and the dogfood driver, so M9
-  implementation starts from the v0.2.1 head once it reaches `main`. Only
-  documentation and design steps (m9-00, the ADRs) can start before that.
+  implementation now builds on the integrated v0.2.1 head. The published release
+  remains v0.2.0; live baseline availability must be recorded, not inferred from
+  the version number.
 - The M8 rerun ([report](dogfood/m8-rerun.md)) and its DeepSeek addendum left
   these items open, and they are the evidence for this plan:
   - **F07:** T4's rename ran as one `bash` call with a `python3` heredoc, so undo
@@ -51,7 +55,7 @@ Order: m9-00 and m9-02a can run in parallel once accepted. m9-01, m9-02b and
 m9-03 need v0.2.1 on `main` and touch separate files, except for the shared tool
 registry, which m9-02b and m9-03 must edit in sequence. m9-05 comes last.
 
-## Decisions for the owner
+## Implementation decisions
 
 **A. Masked exit status (m9-01).** Recommended: **A1**.
 
