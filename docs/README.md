@@ -15,8 +15,8 @@ Key current documents:
 - [M8 acceptance](milestone-8-acceptance.md): decisions 1–16, the daily-driver
   features, their tests, offline/S02 evidence, the dogfood baseline and rerun,
   and v0.2.0 readiness with its partials and deferred item.
-- [M9 plan](milestone-9-plan.md): the **proposed**, unaccepted Milestone 9
-  steps and the owner's open decisions A–F; nothing in it is implemented.
+- [M9 plan](milestone-9-plan.md): the authorized Milestone 9 scope, currently
+  **in progress**. Implementation, live measurements and acceptance are distinct.
 - [M7 acceptance](milestone-7-acceptance.md): decisions 1–17, the v0.1 features,
   full offline/S02 evidence, release dry runs, audit and the release record.
 - [Security audit](security/v0.1-audit.md): accepted findings, fixes and residual risks.
@@ -30,6 +30,8 @@ Key current documents:
   in-process `list`/`glob`/`grep`, walk rules, limits and read-only policy.
 - [Undo](decisions/0032-undo-agent-edits.md): turn-scoped, all-or-nothing undo of
   trusted `write`/`edit` effects and record version 4.
+- [Trusted multi-edit](decisions/0034-trusted-multi-edit.md): a bounded exact
+  edit batch, per-file approval preview, path-specific effects and v5 undo images.
 - [Sandbox toolchains](decisions/0033-sandbox-toolchains.md): opt-in read-only
   toolchain mounts, a fixed sandbox environment, masking and the offline Rust
   recipe.
