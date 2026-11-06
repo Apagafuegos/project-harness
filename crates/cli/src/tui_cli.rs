@@ -208,6 +208,37 @@ fn providers(selected: &str, codex_hint: bool) -> Result<wiring::Providers, wiri
                 max_output_tokens: None,
             },
         );
+        if std::env::var("HARNESS_TUI_TEST_PROVIDER").as_deref() == Ok("m9-edits") {
+            let arguments = serde_json::json!({"edits": [
+                {"path":"a.rs", "old_text":"old_name", "new_text":"new_name"},
+                {"path":"b.rs", "old_text":"old_name", "new_text":"new_name"},
+                {"path":"c.rs", "old_text":"old_name", "new_text":"new_name"}
+            ]});
+            let call = Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::Event(ProviderEvent::ToolCallStarted {
+                    block_index: 0,
+                    name: "multi_edit".into(),
+                    provider_call_id: None,
+                }),
+                Step::Event(ProviderEvent::ToolArgumentsDelta {
+                    block_index: 0,
+                    fragment: arguments.to_string(),
+                }),
+                Step::Event(ProviderEvent::ToolCallReady { block_index: 0 }),
+                Step::completed(FinishReason::ToolCalls),
+            ]);
+            let answer = Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::text(0, "Batch edit finished."),
+                Step::completed(FinishReason::Stop),
+            ]);
+            return Ok(wiring::Providers {
+                provider: Arc::new(ScriptedProvider::new([call, answer])),
+                driver,
+                instances: vec![selected.into()],
+            });
+        }
         let end = if std::env::var("HARNESS_TUI_TEST_PROVIDER").as_deref() == Ok("stall") {
             Step::Stall
         } else {

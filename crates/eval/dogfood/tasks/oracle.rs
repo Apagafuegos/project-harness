@@ -95,6 +95,9 @@ pub fn check(task: &str, pristine: &Path, work: &Path, answer: &str) -> io::Resu
         .filter(|key| before.contains_key(*key) || key.as_str() != "Cargo.lock")
         .collect();
     let unchanged = material.is_empty();
+    if task == "T6" {
+        return check_t6(&before, &after, &changed, &material, &answer, work);
+    }
     let facts = if task == "T1" {
         answer.contains("btreemap")
             && (answer.contains("sorted") || answer.contains("lexicograph"))
@@ -182,4 +185,81 @@ pub fn check(task: &str, pristine: &Path, work: &Path, answer: &str) -> io::Resu
     Ok(
         json!({"pass":result.status.success(),"changed_files":changed,"cargo_exit":result.status.code(),"tests_preserved":preserved,"safe":safe,"feature":feature}),
     )
+}
+
+/// T6 permits only the whole-word rename, in all three source files.
+fn check_t6(
+    before: &BTreeMap<String, Vec<u8>>,
+    after: &BTreeMap<String, Vec<u8>>,
+    changed: &[String],
+    material: &[&String],
+    answer: &str,
+    work: &Path,
+) -> io::Result<Value> {
+    let expected: std::collections::BTreeSet<String> =
+        ["src/display.rs", "src/ledger.rs", "src/lib.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    let material_names: std::collections::BTreeSet<String> =
+        material.iter().map(|name| (*name).clone()).collect();
+    let safe = before.get("Cargo.toml") == after.get("Cargo.toml")
+        && after
+            .keys()
+            .all(|path| before.contains_key(path) || path == "Cargo.lock");
+    let mut feature = material_names == expected;
+    for path in &expected {
+        let old = String::from_utf8_lossy(before.get(path).map(Vec::as_slice).unwrap_or_default());
+        let new = String::from_utf8_lossy(after.get(path).map(Vec::as_slice).unwrap_or_default());
+        let (renamed, count) = replace_word(&old, "item", "product");
+        feature &= count > 0 && new == renamed;
+    }
+    let tests_preserved = feature;
+    let answer = answer.to_lowercase();
+    let answer_facts = answer.contains("item") && answer.contains("product");
+    if !safe || !feature || !answer_facts {
+        return Ok(
+            json!({"pass":false,"changed_files":changed,"cargo_exit":null,"tests_preserved":tests_preserved,"safe":safe,"feature":feature,"answer_facts":answer_facts}),
+        );
+    }
+    let result = Command::new("cargo")
+        .current_dir(work)
+        .args([
+            "test",
+            "--offline",
+            "--",
+            "--skip",
+            "ledger::tests::balance_includes_cutoff",
+        ])
+        .output()?;
+    Ok(
+        json!({"pass":result.status.success(),"changed_files":changed,"cargo_exit":result.status.code(),"tests_preserved":tests_preserved,"safe":safe,"feature":feature,"answer_facts":answer_facts}),
+    )
+}
+
+fn replace_word(source: &str, from: &str, to: &str) -> (String, usize) {
+    let chars: Vec<char> = source.chars().collect();
+    let word: Vec<char> = from.chars().collect();
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut replaced = 0;
+    while index < chars.len() {
+        let end = index + word.len();
+        let matches = end <= chars.len() && chars[index..end] == word;
+        let left_boundary = index == 0 || !identifier_char(chars[index - 1]);
+        let right_boundary = end >= chars.len() || !identifier_char(chars[end]);
+        if matches && left_boundary && right_boundary {
+            output.push_str(to);
+            index = end;
+            replaced += 1;
+        } else {
+            output.push(chars[index]);
+            index += 1;
+        }
+    }
+    (output, replaced)
+}
+
+fn identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
 }
