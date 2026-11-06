@@ -107,6 +107,7 @@ pub(crate) fn outcome(status: ToolStatus, code: Option<ResultCode>) -> Execution
         output_truncated: false,
         artifacts: vec![b"full stub capture".to_vec()],
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 impl Driver {
