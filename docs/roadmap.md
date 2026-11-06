@@ -331,15 +331,17 @@ to the implementation, its tests and recorded evidence. Partial or deferred:
 - Undo covers trusted `write`/`edit` effects only; a mutation performed through
   `bash` (seen in the rerun, F07) is reported as not reversible.
 
-## 9. Reliable edits, honest results, cheaper context — proposed
+## 9. Reliable edits, honest results, cheaper context — in progress
 
-Not accepted and not implemented. The [M9 plan](milestone-9-plan.md) proposes
+Implementation was authorized on 2026-11-05. The [M9 plan](milestone-9-plan.md) covers
 honest `bash` exit status (pipelines currently report only the last command's
 status), a trusted multi-file edit plus result feedback so mutations stay
 reviewable and undoable (F07), line-addressed and multi-path `read` (F08), a
 conditional Anthropic live check, and a dogfood baseline and rerun on the same
-method, ending in v0.3.0. Implementation waits for v0.2.1 to reach `main`.
-Its decisions A–F are open for the owner.
+method, targeting v0.3.0 readiness. Work builds on the v0.2.1 changes now on
+`main`; the recommended options A1, B1+B2, C1+C2 and D–F are the implementation
+baseline. This is not a completion or release record. Live measurements and the
+required real-sandbox gates need their own evidence.
 
 ## Outside v0.2
 
