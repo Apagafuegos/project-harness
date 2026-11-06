@@ -180,6 +180,7 @@ pub(super) fn authorize(
                 pre_image: Some(pre),
                 pre_mode: Some(0o644),
                 post_image: post,
+                additional_targets: Vec::new(),
             }),
         }));
         events.push(state(
@@ -360,14 +361,14 @@ fn versions(d: &Driver) -> Vec<u64> {
 }
 
 #[test]
-fn recovery_over_a_v1_turn_answers_its_calls_as_v4() {
+fn recovery_over_a_v1_turn_answers_its_calls_as_v5() {
     // The v1 prefix ends in `processing`: the proposal, and no intent.
     scenario_from(
         || fixture_prefix(4),
         |d| {
             d.settle();
             assert!(idle(d));
-            assert_eq!(versions(d), [1, 1, 1, 1, 4]);
+            assert_eq!(versions(d), [1, 1, 1, 1, 5]);
             let snapshot = d.runtime.snapshot();
             let ancestry = snapshot.ancestry(snapshot.head()).unwrap();
             let [.., proposal, answer] = &ancestry[..] else {
@@ -390,10 +391,10 @@ fn recovery_over_a_v1_turn_answers_its_calls_as_v4() {
 }
 
 #[test]
-fn recovery_over_a_v1_intent_records_v4_and_unknown_effects() {
+fn recovery_over_a_v1_intent_records_v5_and_unknown_effects() {
     scenario_from(fixture, |d| {
         d.settle();
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 4], "execution_uncertain is v4");
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 5], "execution_uncertain is v5");
         let [invocation] = &d.runtime.snapshot().unresolved_invocations()[..] else {
             panic!("one invocation waits")
         };
@@ -401,7 +402,7 @@ fn recovery_over_a_v1_intent_records_v4_and_unknown_effects() {
         let request = resolve(d, observed(ToolStatus::Succeeded, "read"));
         d.accepted(request);
         assert!(idle(d));
-        assert_eq!(versions(d), [1, 1, 1, 1, 1, 4, 4]);
+        assert_eq!(versions(d), [1, 1, 1, 1, 1, 5, 5]);
         let [result] = &results(d)[..] else {
             panic!("one result")
         };
@@ -586,6 +587,7 @@ pub mod bodies {
                                 artifacts: Vec::new(),
                                 code: Some("policy_denied".into()),
                                 file_effect: None,
+                                file_paths: Vec::new(),
                             },
                         },
                     }),
