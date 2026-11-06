@@ -348,7 +348,7 @@ pub fn continuation_switch(o: &SessionOptions) -> Option<(ModelRef, Portability)
 }
 
 fn policy_json(summary: Option<&ModelRef>, strategy: StrategyId) -> Value {
-    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash","list","glob","grep"],
+    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash","list","glob","grep","multi_edit"],
         "workspace_read":"ask", "workspace_mutation":"ask", "process":"ask", "network":"deny",
         "protected_paths":[], "allowances":[],
         "compaction":{"strategy":strategy.as_str(),"summary_model":summary,"automatic":summary.is_some()}})
@@ -363,15 +363,30 @@ pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
     if value["name"] != "bash" {
         return Vec::new();
     }
+    let mut rows = Vec::new();
+    if let Some(pipefail) = value
+        .get("shell")
+        .and_then(|s| s.get("pipefail"))
+        .and_then(Value::as_bool)
+    {
+        rows.push(format!(
+            "bash pipefail: {}",
+            if pipefail {
+                "enabled (rightmost failing pipeline status)"
+            } else {
+                "disabled (last pipeline status)"
+            }
+        ));
+    }
     let Some(sandbox) = value.get("sandbox") else {
-        return Vec::new();
+        return rows;
     };
     let Ok(settings) =
         serde_json::from_value::<harness_core::tools::sandbox::ToolchainSettings>(sandbox.clone())
     else {
-        return Vec::new();
+        return rows;
     };
-    let mut rows = vec!["sandbox: network denied; private per-command caches".into()];
+    rows.push("sandbox: network denied; private per-command caches".into());
     rows.extend(
         settings
             .toolchain_paths
