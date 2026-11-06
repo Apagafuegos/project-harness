@@ -41,3 +41,16 @@ fn approval_text_names_every_bound_sandbox_mount() {
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(!text.contains("cargo registry"), "{text}");
 }
+
+#[test]
+fn approval_text_shows_bound_shell_options_without_toolchains() {
+    let arguments = serde_json::json!({"command":"false | cat"});
+    for (pipefail, label) in [(true, "enabled"), (false, "disabled")] {
+        let plan =
+            serde_json::to_vec(&serde_json::json!({"name":"bash","shell":{"pipefail":pipefail}}))
+                .unwrap();
+        assert!(
+            approval_text("bash", &arguments, &plan).contains(&format!("bash pipefail: {label}"))
+        );
+    }
+}
