@@ -1,4 +1,4 @@
-# Milestone 9 plan — proposed
+# Milestone 9 plan — implementation in progress
 
 **Status: implementation authorized, in progress.** The owner requested
 implementation on 2026-11-05 and continued work until milestone acceptance.

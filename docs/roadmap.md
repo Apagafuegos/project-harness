@@ -7,8 +7,8 @@ compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
 bounded experiments (Milestone 6), v0.1 documentation/release readiness
 (Milestone 7) and the daily-driver features of Milestone 8 are implemented
-within their recorded scope. `v0.1.0` is released; the v0.2.0 release of
-Milestone 8 is pending. Anthropic live compatibility and live
+within their recorded scope. `v0.1.0` and M8's `v0.2.0` are published;
+Milestone 9 is in progress on the unreleased v0.3.0 workspace. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
 M5 quota limit; it does not claim a live coding/tool workflow.
