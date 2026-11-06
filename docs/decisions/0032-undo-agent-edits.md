@@ -4,6 +4,10 @@ Status: Accepted and implemented (M8 step 03b, record version 4).
 
 Date: 2026-11-04
 
+The trusted multi-file exact-edit extension and its v5 path images/outcomes
+are specified by [ADR 0034](0034-trusted-multi-edit.md); this decision's v4
+single-path format remains readable without migration.
+
 ## Context
 
 M8 decision 6 requires user-initiated undo, not history navigation or a model
