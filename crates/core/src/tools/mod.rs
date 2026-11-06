@@ -9,6 +9,7 @@ pub mod fs;
 mod path;
 mod plan;
 mod policy;
+mod read_many;
 mod recovery;
 pub mod sandbox;
 mod search;

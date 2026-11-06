@@ -122,7 +122,11 @@ struct WirePlan {
     policy_revision: String,
     target: Option<Target>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    targets: Option<Vec<Target>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sandbox: Option<super::sandbox::ToolchainSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shell: Option<super::sandbox::ShellOptions>,
 }
 
 /// An exact immutable plan. No public construction or deserialization is possible.
@@ -157,7 +161,122 @@ impl Plan {
             cwd: cwd_protection,
         };
         let mut mounts = Vec::new();
-        let target = if operation.search() {
+        let targets = if let Operation::MultiEdit { files } = operation {
+            let mut targets = Vec::with_capacity(files.len());
+            for file in files {
+                let current = workspace.inspect(&file.path)?;
+                facts.target = facts
+                    .target
+                    .max(policy.protection(&file.path, current.protection));
+                refuse_protection(facts.target, true)?;
+                if current.kind != FileKind::Regular {
+                    return Err(Refusal::new(
+                        if current.kind == FileKind::Absent {
+                            ResultCode::NotFound
+                        } else {
+                            ResultCode::NotRegularFile
+                        },
+                        "multi_edit target must be an existing regular file",
+                    ));
+                }
+                if current.nlink > 1 {
+                    return Err(Refusal::new(
+                        ResultCode::HardLinkRejected,
+                        "multiply linked files are not supported",
+                    ));
+                }
+                if current.size > MIB {
+                    return Err(Refusal::new(ResultCode::TooLarge, "file exceeds 1 MiB"));
+                }
+                let mut text = workspace.read_text(&file.path, MIB)?;
+                if text.len() as u64 > MIB {
+                    return Err(Refusal::new(ResultCode::TooLarge, "file exceeds 1 MiB"));
+                }
+                for edit in &file.edits {
+                    text = exact_edit(&text, &edit.old_text, &edit.new_text)?;
+                }
+                let pre_image = PreImage::Digest(current.digest.ok_or_else(|| {
+                    Refusal::new(
+                        ResultCode::InfrastructureFailure,
+                        "workspace view omitted a regular file digest",
+                    )
+                })?);
+                targets.push(Target {
+                    path: file.path.clone(),
+                    pre_image,
+                    content_sha256: None,
+                });
+            }
+            Some(targets)
+        } else if let Operation::ReadMany { paths } = operation {
+            let mut metadata = Vec::with_capacity(paths.len());
+            for spec in paths {
+                let current = workspace.inspect_metadata(&spec.path)?;
+                facts.target = facts
+                    .target
+                    .max(policy.protection(&spec.path, current.protection));
+                refuse_protection(facts.target, false)?;
+                if current.kind != FileKind::Regular {
+                    return Err(Refusal::new(
+                        if current.kind == FileKind::Absent {
+                            ResultCode::NotFound
+                        } else {
+                            ResultCode::NotRegularFile
+                        },
+                        "read target must be an existing regular file",
+                    ));
+                }
+                if current.nlink > 1 {
+                    return Err(Refusal::new(
+                        ResultCode::HardLinkRejected,
+                        "multiply linked files are not supported",
+                    ));
+                }
+                metadata.push(current);
+            }
+            let mut targets = Vec::with_capacity(paths.len());
+            for (spec, metadata) in paths.iter().zip(metadata) {
+                let current = workspace.inspect(&spec.path)?;
+                facts.target = facts
+                    .target
+                    .max(policy.protection(&spec.path, current.protection));
+                refuse_protection(facts.target, false)?;
+                if current.kind != FileKind::Regular || current.nlink > 1 {
+                    return Err(Refusal::new(
+                        if current.nlink > 1 {
+                            ResultCode::HardLinkRejected
+                        } else if current.kind == FileKind::Absent {
+                            ResultCode::NotFound
+                        } else {
+                            ResultCode::NotRegularFile
+                        },
+                        "read target changed during planning",
+                    ));
+                }
+                if current.size != metadata.size || current.nlink != metadata.nlink {
+                    return Err(Refusal::new(
+                        ResultCode::StalePlan,
+                        "workspace pre-image changed",
+                    ));
+                }
+                targets.push(Target {
+                    path: spec.path.clone(),
+                    pre_image: PreImage::Digest(current.digest.ok_or_else(|| {
+                        Refusal::new(
+                            ResultCode::InfrastructureFailure,
+                            "workspace view omitted a regular file digest",
+                        )
+                    })?),
+                    content_sha256: None,
+                });
+            }
+            Some(targets)
+        } else {
+            None
+        };
+        let target = if targets.is_some() {
+            None
+        } else if operation.search() {
             let path = operation.path().expect("search path");
             if policy.protected_paths().iter().any(|p| path.beneath(p))
                 || path.as_str().split('/').any(|p| p == ".git")
@@ -223,7 +342,7 @@ impl Plan {
                     require_directory(&parent)?;
                     content_sha256 = Some(Digest::of(text.as_bytes()));
                 }
-                Operation::Read { .. } => {}
+                Operation::Read { .. } | Operation::ReadLines { .. } => {}
                 Operation::Edit {
                     old_text, new_text, ..
                 } => {
@@ -265,6 +384,7 @@ impl Plan {
                         ));
                     }
                 }
+                Operation::MultiEdit { .. } | Operation::ReadMany { .. } => unreachable!(),
                 Operation::Bash { .. }
                 | Operation::List { .. }
                 | Operation::Glob { .. }
@@ -325,9 +445,12 @@ impl Plan {
             },
             policy_revision: policy.revision().into(),
             target,
+            targets,
             sandbox: (definition.backend == ExecutionBackend::Bubblewrap
                 && !policy.sandbox().is_empty())
             .then(|| policy.sandbox().clone()),
+            shell: (definition.backend == ExecutionBackend::Bubblewrap)
+                .then_some(super::sandbox::ShellOptions { pipefail: true }),
         };
         let bytes =
             serde_json::to_vec(&wire).expect("plan contains only infallibly serializable values");
@@ -389,6 +512,34 @@ impl Plan {
             && self.policy_revision() == policy.revision()
             && self.facts == *facts
     }
+}
+
+fn exact_edit(text: &str, old: &str, new: &str) -> Result<String, Refusal> {
+    let mut matches = text
+        .as_bytes()
+        .windows(old.len())
+        .enumerate()
+        .filter(|(_, window)| *window == old.as_bytes());
+    let (offset, _) = matches
+        .next()
+        .ok_or_else(|| Refusal::new(ResultCode::NoMatch, "old_text has no literal match"))?;
+    if matches.next().is_some() {
+        return Err(Refusal::new(
+            ResultCode::MultipleMatches,
+            "old_text has multiple literal matches",
+        ));
+    }
+    if text.len() - old.len() + new.len() > MIB as usize {
+        return Err(Refusal::new(
+            ResultCode::TooLarge,
+            "edited contents exceed 1 MiB",
+        ));
+    }
+    let mut edited = String::with_capacity(text.len() - old.len() + new.len());
+    edited.push_str(&text[..offset]);
+    edited.push_str(new);
+    edited.push_str(&text[offset + old.len()..]);
+    Ok(edited)
 }
 
 pub(super) fn refuse_protection(protection: Protection, mutation: bool) -> Result<(), Refusal> {
