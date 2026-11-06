@@ -14,8 +14,10 @@ No release or milestone-completion claim is made here.
   `main` as `406cda4` plus review follow-up `6467b9f`. The original commit changes
   the undo runtime, the sandbox settings and the dogfood driver, so M9
   implementation now builds on the integrated v0.2.1 head. The published release
-  remains v0.2.0; live baseline availability must be recorded, not inferred from
-  the version number.
+  is now v0.2.1 (published 2026-11-06 from `6467b9f`; see the
+  [release record](milestone-8-acceptance.md#v021-release-record)). Live baseline
+  runs remain pending by owner direction; release availability does not establish
+  provider access or measurements.
 - The M8 rerun ([report](dogfood/m8-rerun.md)) and its DeepSeek addendum left
   these items open, and they are the evidence for this plan:
   - **F07:** T4's rename ran as one `bash` call with a `python3` heredoc, so undo
