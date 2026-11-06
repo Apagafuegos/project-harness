@@ -382,6 +382,7 @@ fn intent(
                 pre_image: Some(pre),
                 pre_mode: Some(0o644),
                 post_image: post,
+                additional_targets: Vec::new(),
             },
         )
     });
