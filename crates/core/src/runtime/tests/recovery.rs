@@ -180,6 +180,7 @@ pub(super) fn authorize(
                 pre_image: Some(pre),
                 pre_mode: Some(0o644),
                 post_image: post,
+                additional_targets: Vec::new(),
             }),
         }));
         events.push(state(
@@ -586,6 +587,7 @@ pub mod bodies {
                                 artifacts: Vec::new(),
                                 code: Some("policy_denied".into()),
                                 file_effect: None,
+                                file_paths: Vec::new(),
                             },
                         },
                     }),
