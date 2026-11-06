@@ -235,3 +235,32 @@ acceptance.
   with `sha256sum -c` and are byte-identical to the dry-run artifact.
 - Final binary reproducibility is not claimed; the partials, deferred item and
   residual risks above still apply.
+
+## v0.2.1 release record
+
+A review after v0.2.0 was published found that the acceptance reviews had covered
+less product code than reported, and confirmed defects in undo and the sandbox
+settings. v0.2.1 fixes them; see `CHANGELOG.md`.
+
+- `main` integrated the reviewed fixes at
+  `6467b9f2f1b4f4b081c6722cd16c2c752f55f20e` after CI 42123914766 passed (Rust
+  workspace and Host sandbox security (S02)).
+- Final-candidate dispatch [42127706131](https://github.com/Apagafuegos/project-harness/actions/runs/42127706131)
+  passed on that exact commit; publish is skipped on dispatch by design.
+- Its `release-assets` artifact was checked before tagging: `SHA256SUMS` verified
+  both archives, and **both** were opened. Each held the binary, both licences,
+  README, `CHANGELOG.md`, `docs/user-guide.md` and `third-party-notices/`, with the
+  top-level documents byte-identical across the two. The aarch64 binary reported
+  `harness 0.2.1`. The x86_64 binary was identified by file type but not run, because
+  this host is aarch64.
+- Annotated tag `v0.2.1` on that commit started publish run
+  [42156184521](https://github.com/Apagafuegos/project-harness/actions/runs/42156184521),
+  which passed every job and published the
+  [v0.2.1 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.1) at 2026-11-06T03:32:39Z (not a draft or prerelease).
+- The published `SHA256SUMS` and both archives were re-downloaded, verified with
+  `sha256sum -c` and are byte-identical to the dry-run artifact.
+- The published v0.2.0 binary opens the v0.2.0-shape compatibility fixture with no
+  diagnostic. That a v0.2.0 binary refuses a journal where v0.2.1 recorded an undo
+  with skipped bash calls follows from reading its equality check; it was not run.
+- Final binary reproducibility is not claimed. The partials, deferred item and
+  residual risks above still apply.

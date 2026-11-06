@@ -1,7 +1,6 @@
 # Documentation
 
-v0.2.0 is the current published release, with Milestones 1–8 implemented; the
-`CHANGELOG.md` entry for v0.2.1 is prepared and unreleased. Start with the
+v0.2.1 is the current published release, with Milestones 1–8 implemented. Start with the
 [user guide](user-guide.md) for
 installation and daily use. A design document alone is not evidence of
 implementation; acceptance documents separate behavioral tests, historical live
@@ -179,9 +178,9 @@ user/nested instructions (0022 amendment), TUI UX/GFM/highlighting (0023 Parts
 security audit baseline is `5b89aa2f0f3b038b73993d4c1d137da494c6027f`.
 M8 implements trusted search tools (0031), durable undo of trusted file edits
 and record version 4 (0032), and opt-in read-only sandbox toolchains (0033).
-Workspace version is 0.2.0, published as the public
-[`v0.2.0` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.0)
-with both musl archives and their checksums. A v0.2.0 binary reads v1–v4
+Workspace version is 0.2.1, published as the public
+[`v0.2.1` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.1)
+with both musl archives and their checksums. A v0.2.1 binary reads v1–v4
 journals and writes v4, which v0.1.0 refuses. The
 [`v0.1.0` release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.1.0)
 remains available.
