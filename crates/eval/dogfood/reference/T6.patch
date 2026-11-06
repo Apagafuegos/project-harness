@@ -1,0 +1,67 @@
+--- a/src/display.rs
++++ b/src/display.rs
+@@ -1 +1 @@
+-//! Stable text output: one `item: quantity` line per item.
++//! Stable text output: one `product: quantity` line per product.
+@@ -7,2 +7,2 @@
+-    for (item, quantity) in stock {
+-        text.push_str(&format!("{item}: {quantity}\n"));
++    for (product, quantity) in stock {
++        text.push_str(&format!("{product}: {quantity}\n"));
+@@ -22,3 +22,3 @@
+-        let (item, quantity) = line.split_once(':').ok_or(index + 1)?;
+-        let item = item.trim();
+-        if item.is_empty() {
++        let (product, quantity) = line.split_once(':').ok_or(index + 1)?;
++        let product = product.trim();
++        if product.is_empty() {
+@@ -28 +28 @@
+-        *stock.entry(item.to_owned()).or_default() += quantity;
++        *stock.entry(product.to_owned()).or_default() += quantity;
+--- a/src/ledger.rs
++++ b/src/ledger.rs
+@@ -7 +7 @@
+-    pub item: String,
++    pub product: String,
+@@ -25 +25 @@
+-    pub fn record(&mut self, item: &str, day: u32, quantity: i64) {
++    pub fn record(&mut self, product: &str, day: u32, quantity: i64) {
+@@ -27 +27 @@
+-            item: item.to_owned(),
++            product: product.to_owned(),
+@@ -38 +38 @@
+-    /// Number of recorded movements, not distinct item names.
++    /// Number of recorded movements, not distinct product names.
+@@ -48 +48 @@
+-    /// Current stock by item, sorted lexicographically, retaining zero stock.
++    /// Current stock by product, sorted lexicographically, retaining zero stock.
+@@ -52 +52 @@
+-            *stock.entry(movement.item.clone()).or_default() += movement.quantity;
++            *stock.entry(movement.product.clone()).or_default() += movement.quantity;
+@@ -62 +62 @@
+-                *stock.entry(movement.item.clone()).or_default() += movement.quantity;
++                *stock.entry(movement.product.clone()).or_default() += movement.quantity;
+@@ -68 +68 @@
+-    /// Distinct item names in lexicographic order.
++    /// Distinct product names in lexicographic order.
+@@ -73,2 +73,2 @@
+-    /// Copy only the movements for a single item, preserving insertion order.
+-    pub fn select(&self, item: &str) -> Self {
++    /// Copy only the movements for a single product, preserving insertion order.
++    pub fn select(&self, product: &str) -> Self {
+@@ -79 +79 @@
+-                .filter(|m| m.item == item)
++                .filter(|m| m.product == product)
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10 +10 @@
+-/// A current, sorted summary of every item, retaining zero balances.
++/// A current, sorted summary of every product, retaining zero balances.
+@@ -25,2 +25,2 @@
+-    for (item, quantity) in balances {
+-        ledger.record(&item, day, quantity);
++    for (product, quantity) in balances {
++        ledger.record(&product, day, quantity);
+@@ -52 +52 @@
+-        assert_eq!(ledger.movements()[0].item, "apple");
++        assert_eq!(ledger.movements()[0].product, "apple");
