@@ -41,8 +41,9 @@ new option and require the existing authorization path.
 ## Verification
 
 - Legacy bash goldens are retained; new goldens contain the bound shell option.
-- Exact argv tests cover absent, false and true options, and run the trusted
-  shell suffix on a failing pipeline without pretending to prove isolation.
+- Exact argv tests cover absent, false and true options. A separate integration
+  target runs the native shell suffix: process spawning must not share a test
+  process with journal-lock tests (ADR 0012). This does not prove isolation.
 - Plan tests require changed digests when shell semantics change.
 - Shared approval-summary tests cover new and legacy plans without toolchains.
 - The ignored S02 test `s02_pipeline_failure_survives_output_filtering` runs

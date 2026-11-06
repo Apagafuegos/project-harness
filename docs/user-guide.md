@@ -549,7 +549,8 @@ trusted changes. Every target is checked and staged first, but a later rename or
 sync can fail after an earlier file changed. The result records per-file effects;
 uncertainty still requires explicit resolution. There is no remembered grant for
 this batch and no promise of a cross-file atomic commit or bash rollback.
-Arguments are an `edits` array of `{path, old_text, new_text}` objects (up to 64
+The headless approval lists every planned file and literal replacement below
+the bounded argument line. Arguments are an `edits` array of `{path, old_text, new_text}` objects (up to 64
 replacements, at most 1 MiB of aggregate JSON).
 
 `read` still accepts `path`, `offset_bytes` and `max_bytes`. For line ranges use

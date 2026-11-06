@@ -47,7 +47,8 @@ remain historical and do not stand in for M9 measurements.
   metrics, trusted undo restoration, config forwarding and `/dev/tty`.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings` passes.
 - The real-terminal test `batch_approval_and_undo_in_the_running_tui` passes:
-  three explicit file previews, one approval, all files changed, `y` undo,
+  an auto-approved batched line read, three explicit file previews, one human
+  mutation approval, all files changed, `y` undo,
   all files restored, a durable successful three-path undo result and restored
   termios. Fresh terminal captures were inspected; they use the debug-only
   scripted provider, not a live-provider compatibility claim.

@@ -407,6 +407,46 @@ pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
     rows
 }
 
+/// Per-file scope from a bound batch plan; JSON quoting escapes terminal controls.
+pub fn file_scope_summary(plan: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<Value>(plan) else {
+        return Vec::new();
+    };
+    let arguments = &value["arguments"];
+    let mut rows = Vec::new();
+    if value["name"] == "multi_edit" {
+        for file in arguments["files"].as_array().into_iter().flatten() {
+            rows.push(format!("file (mutation): {}", file["path"]));
+            for (index, edit) in file["edits"].as_array().into_iter().flatten().enumerate() {
+                rows.push(format!(
+                    "replacement {}: {} => {}",
+                    index + 1,
+                    edit["old_text"],
+                    edit["new_text"]
+                ));
+            }
+        }
+    } else if value["name"] == "read" {
+        if let Some(paths) = arguments["paths"].as_array() {
+            for path in paths {
+                rows.push(format!(
+                    "file (read-only): {} · range {}",
+                    path["path"], path["range"]
+                ));
+            }
+        } else if arguments.get("start_line").is_some() {
+            rows.push(format!(
+                "file (read-only): {} · lines {}+{} · max_bytes {}",
+                arguments["path"],
+                arguments["start_line"],
+                arguments["line_count"],
+                arguments["max_bytes"]
+            ));
+        }
+    }
+    rows
+}
+
 fn configured_policy(o: &SessionOptions) -> Value {
     let mut policy = policy_json(o.summary_model.as_ref(), o.compaction_strategy);
     if let Some(sandbox) = &o.sandbox

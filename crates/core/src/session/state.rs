@@ -765,6 +765,15 @@ impl State {
                                 "undo_image_binding",
                             )?;
                         }
+                        if record.version >= 5
+                            && result.metadata.provenance == Provenance::Executor
+                            && invocation
+                                .image()
+                                .is_some_and(|image| !image.additional_targets.is_empty())
+                            && result.metadata.file_effect != Some(FileEffect::NotApplied)
+                        {
+                            require(!result.metadata.file_paths.is_empty(), "undo_image_binding")?;
+                        }
                         if record.version < 5 {
                             require(result.metadata.file_paths.is_empty(), "undo_image_binding")?;
                         } else if !result.metadata.file_paths.is_empty() {

@@ -233,8 +233,27 @@ fn providers(selected: &str, codex_hint: bool) -> Result<wiring::Providers, wiri
                 Step::text(0, "Batch edit finished."),
                 Step::completed(FinishReason::Stop),
             ]);
+            let read = Script::new([
+                Step::Event(ProviderEvent::Started),
+                Step::Event(ProviderEvent::ToolCallStarted {
+                    block_index: 0,
+                    name: "read".into(),
+                    provider_call_id: None,
+                }),
+                Step::Event(ProviderEvent::ToolArgumentsDelta {
+                    block_index: 0,
+                    fragment: serde_json::json!({"paths":[
+                        {"path":"a.rs","start_line":1,"line_count":1},
+                        {"path":"b.rs","start_line":1,"line_count":1},
+                        {"path":"c.rs","start_line":1,"line_count":1}
+                    ]})
+                    .to_string(),
+                }),
+                Step::Event(ProviderEvent::ToolCallReady { block_index: 0 }),
+                Step::completed(FinishReason::ToolCalls),
+            ]);
             return Ok(wiring::Providers {
-                provider: Arc::new(ScriptedProvider::new([call, answer])),
+                provider: Arc::new(ScriptedProvider::new([read, call, answer])),
                 driver,
                 instances: vec![selected.into()],
             });

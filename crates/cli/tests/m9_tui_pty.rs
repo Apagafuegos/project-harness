@@ -28,7 +28,7 @@ fn batch_approval_and_undo_in_the_running_tui() {
     let before = pair.master.get_termios().unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_harness"));
     command.cwd(&work);
-    command.args(["--no-config", "--data-root"]);
+    command.args(["--no-config", "--approve-read-only", "--data-root"]);
     command.arg(temp.path().join("state"));
     command.env("HOME", temp.path());
     command.env("HARNESS_TUI_TEST_PROVIDER", "m9-edits");
@@ -120,7 +120,21 @@ fn batch_approval_and_undo_in_the_running_tui() {
     let inspection =
         harness_core::session::JournalStore::inspect(&root, &sessions[0].session_id).unwrap();
     assert!(inspection.diagnostic.is_none());
-    assert!(inspection.snapshot.unwrap().events().any(|(_, _, event)| matches!(event,
+    let snapshot = inspection.snapshot.unwrap();
+    let results = snapshot
+        .entries()
+        .filter_map(|(_, entry)| match &entry.entry.payload {
+            harness_core::session::EntryPayload::ToolResult(result) => Some(&result.result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.status == harness_core::session::ToolStatus::Succeeded)
+    );
+    assert!(snapshot.events().any(|(_, _, event)| matches!(event,
         harness_core::session::JournalEvent::UndoResult(result)
         if result.outcome == harness_core::session::UndoOutcome::Succeeded && result.file_outcomes.len() == 3
     )));

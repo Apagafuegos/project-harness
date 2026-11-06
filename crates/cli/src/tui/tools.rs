@@ -170,6 +170,16 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
             )),
             code,
         )],
+        "read" if arguments.get("paths").is_some() => vec![Span::styled(
+            format!(
+                "{} files",
+                arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            ),
+            plain,
+        )],
         "read" => {
             let mut spans = vec![Span::styled(
                 bounded(string(arguments, "path").unwrap_or("?"), 120),
@@ -354,6 +364,9 @@ pub(super) fn approval(
             ));
             rows
         }
+        "read" if arguments.get("paths").is_some() || arguments.get("start_line").is_some() => {
+            read_preview(arguments)
+        }
         "multi_edit" => multi_edit_preview(arguments),
         "write" => {
             let text = string(arguments, "text").unwrap_or_default();
@@ -406,6 +419,41 @@ pub(super) fn approval(
             ]
         }
     }
+}
+
+fn read_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
+    let files = arguments
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_object)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![arguments]);
+    let mut rows = vec![Line::raw(format!("{} files · read-only", files.len()))];
+    for file in files {
+        rows.push(Line::raw(format!(
+            "path {}",
+            bounded(&display_path(string(file, "path").unwrap_or("?")), 120)
+        )));
+        let max = number(file, "max_bytes").unwrap_or(1024 * 1024);
+        if file.get("start_line").is_some() {
+            rows.push(Line::raw(format!(
+                "lines {}+{} · max_bytes {max}",
+                number(file, "start_line").unwrap_or(1),
+                number(file, "line_count").unwrap_or(0)
+            )));
+        } else {
+            let offset = number(file, "offset_bytes").unwrap_or(0);
+            rows.push(Line::raw(format!(
+                "bytes {offset}-{}",
+                offset.saturating_add(max)
+            )));
+        }
+    }
+    rows
 }
 
 // Display grouping only; validation and authorization remain in the engine.
@@ -488,7 +536,16 @@ fn string<'a>(arguments: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 }
 
 fn number(arguments: &Map<String, Value>, key: &str) -> Option<u64> {
-    arguments.get(key).and_then(Value::as_u64)
+    arguments.get(key).and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| {
+                    *number >= 0.0 && number.fract() == 0.0 && *number < u64::MAX as f64
+                })
+                .map(|number| number as u64)
+        })
+    })
 }
 
 fn boolean(arguments: &Map<String, Value>, key: &str) -> bool {
@@ -944,5 +1001,24 @@ mod tests {
             preview.contains("replacement 2 of 2\n- two\n+ three"),
             "{preview}"
         );
+    }
+    #[test]
+    fn batched_and_line_read_previews_show_every_path_and_range() {
+        let batch = arguments(serde_json::json!({"paths":[
+            {"path":"./a.rs","start_line":2.0,"line_count":3.0},
+            {"path":"b.rs","offset_bytes":4,"max_bytes":20}
+        ]}));
+        let preview = text(&approval(Path::new("/work"), "read", &batch, false));
+        for expected in [
+            "2 files · read-only",
+            "path a.rs",
+            "lines 2+3",
+            "path b.rs",
+            "bytes 4-24",
+        ] {
+            assert!(preview.contains(expected), "{preview}");
+        }
+        let single = arguments(serde_json::json!({"path":"c.rs","start_line":5,"line_count":2}));
+        assert!(text(&approval(Path::new("/work"), "read", &single, false)).contains("lines 5+2"));
     }
 }

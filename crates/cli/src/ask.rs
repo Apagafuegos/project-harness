@@ -548,17 +548,19 @@ fn proposal(view: &RuntimeView, call: &CallRef) -> Result<(String, Value), Failu
     Err((1, "approval_proposal_missing".into()))
 }
 
-/// The one-line proposal and every bound sandbox row, from the exact plan the
-/// ticket binds. Values are never rendered; the summary names keys and mounts.
+/// Per-file and sandbox scope from the bound plan; never sandbox environment values.
 fn approval_text(name: &str, arguments: &serde_json::Value, plan: &[u8]) -> String {
     let mut summary = format!(
         "tool: {} {}",
         bounded(name, 80),
         bounded(&arguments.to_string(), 320)
     );
-    for row in crate::wiring::sandbox_summary(plan) {
+    for row in crate::wiring::file_scope_summary(plan)
+        .into_iter()
+        .chain(crate::wiring::sandbox_summary(plan))
+    {
         summary.push('\n');
-        summary.push_str(&row);
+        summary.push_str(&crate::text::line(&row));
     }
     summary
 }

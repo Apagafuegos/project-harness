@@ -1275,7 +1275,20 @@ fn partially_applied_multi_edit_selects_only_committed_paths_for_undo() {
     };
     for _ in 0..TOOL_TURN_COMMITS {
         let snapshot = store.snapshot();
-        store.append(writes.next(&snapshot), at()).unwrap();
+        let commit = writes.next(&snapshot);
+        let mut missing_rows = commit.clone();
+        for entry in &mut missing_rows.entries {
+            if let EntryPayload::ToolResult(result) = &mut entry.payload {
+                result.result.metadata.file_paths.clear();
+            }
+        }
+        if missing_rows != commit {
+            assert!(matches!(
+                store.append(missing_rows, at()),
+                Err(StoreError::Invalid("undo_image_binding"))
+            ));
+        }
+        store.append(commit, at()).unwrap();
     }
     let UndoSelection::Candidate { targets, .. } = store.snapshot().select_undo().unwrap() else {
         panic!("partially applied batch should have one reversible target");
