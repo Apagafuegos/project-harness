@@ -922,6 +922,7 @@ impl Runtime {
                 artifacts: outcome.artifacts.iter().map(|b| artifact(b)).collect(),
                 code: outcome.code.map(|c| c.as_str().into()),
                 file_effect: outcome.file_effect,
+                file_paths: outcome.file_paths,
             },
         };
         let flight = InFlight {

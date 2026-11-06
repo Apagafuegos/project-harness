@@ -8,14 +8,14 @@ real files, approval, a process crash, recovery advice and user resolution.
 ## Implemented: validation, plans, and policy
 
 The fixed `harness_core::tools::Registry` validates and plans `read`, `write`,
-`edit`, and `bash`. See [ADR 0009](decisions/0009-tool-policy.md) for canonical
+`edit`, `multi_edit`, and `bash`. See [ADR 0009](decisions/0009-tool-policy.md) for canonical
 plans, policy, allowances, and approval bindings. Validation and policy are pure;
 planning uses a trusted `WorkspaceView`.
 
 ## Implemented: trusted file backend
 
 `harness_core::tools::fs` supplies a real Linux `WorkspaceView` and a low-level
-executor for authorized read/write/edit plans. See
+executor for authorized read/write/edit/multi-edit plans. See
 [ADR 0011](decisions/0011-trusted-file-tools.md) for security guarantees, costs,
 known limits, and S01 coverage. Step 7b assembles and dispatches this backend
 through `SessionHandle`; bash is not executed by the file backend.
@@ -70,6 +70,15 @@ plan. Bash and other non-`TrustedFs` plans fail with `infrastructure_failure`.
 - **Edit:** Recheck the pre-image and reapply exactly one literal occurrence,
   counting overlaps. Source and resulting text are bounded to 1 MiB and must be
   UTF-8. Replacement uses the same atomic procedure as write.
+- **Multi-edit:** One authorized `multi_edit` call groups paths in lexical
+  order and preserves the supplied edit order for repeated paths. Each old
+  string must be nonempty and match exactly once in the result of the previous
+  edit; each source and final file is at most 1 MiB. Execution preflights and
+  stages every target before the first rename, then replaces files one at a
+  time in lexical order. Each replacement is atomic, but the batch is not: a
+  later failure reports per-file `applied`, `not_applied`, or `unknown` effects.
+  The approval surface shows every path and literal replacement. ADR 0034
+  extends durable images and undo so only paths known applied are restored.
 
 Write/edit success text reports `sha256=POST_IMAGE; bytes=N`. A stale pre-image
 returns `failed`/`stale_plan`. Other execution-time access errors are `failed`
@@ -312,3 +321,13 @@ Tests that spawn run in separate integration targets, not the core unit binary.
 The single probe unit test that spawns takes the test-only spawn gate that also
 guards every journal lock acquisition, so a child cannot hold an inherited
 journal lock across another test's reopen (ADR 0012).
+
+### Bash pipelines (M9)
+
+New bash plans explicitly bind `shell.pipefail = true`. An output filter such
+as `cargo test --offline | tail` no longer hides a failing producer: bash uses
+the rightmost failing pipeline status. Approval shows this option from the
+bound plan. `errexit` is not enabled, so later commands or explicit status
+handling can still change the final shell status; an exit code is not a parsed
+test report. Legacy plan artifacts are unchanged. See
+[ADR 0036](decisions/0036-bash-pipeline-status.md).
