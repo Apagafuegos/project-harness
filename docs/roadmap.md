@@ -7,8 +7,9 @@ compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
 bounded experiments (Milestone 6), v0.1 documentation/release readiness
 (Milestone 7) and the daily-driver features of Milestone 8 are implemented
-within their recorded scope. `v0.1.0`, M8's `v0.2.0` and its `v0.2.1` fixes are published;
-Milestone 9 is in progress on the unreleased v0.3.0 workspace. Anthropic live compatibility and live
+within their recorded scope. `v0.1.0`, `v0.2.0` and `v0.2.1` are released, and
+`v0.2.1` is the current published release. Milestone 9 is in progress on the
+unreleased v0.3.0 workspace. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
 M5 quota limit; it does not claim a live coding/tool workflow.
@@ -283,9 +284,12 @@ relevant C01/C02/RFC 6.1 clauses to gate tests. Known partials/limits:
 The two-target release dry run passed before tagging, and `v0.1.0` was then
 released: the tag and its [release record](milestone-7-acceptance.md#release-record)
 were published on 2026-11-04, and `CHANGELOG.md` dates the released section
-2026-11-03. Later work does not change that record. Release workflow
-dispatch/tag/asset verification for **v0.2.0** belongs to the orchestrator after
-[M8 acceptance](milestone-8-acceptance.md).
+2026-11-03. Later work does not change that record. **v0.2.0** was tagged and
+published after [M8 acceptance](milestone-8-acceptance.md) on 2026-11-05, and
+**v0.2.1** on 2026-11-06; each dispatch, publish run, re-downloaded archive and
+checksum verification is recorded in the [M8 release
+record](milestone-8-acceptance.md#release-record) and its [v0.2.1
+record](milestone-8-acceptance.md#v021-release-record).
 
 ## 8. Daily-driver agent — complete, v0.2.0 published 2026-11-05, v0.2.1 fixes published 2026-11-06
 
@@ -311,23 +315,32 @@ is reduced without weakening any check.
   remembered-grant refusal with TUI resumption, and cleanup of an empty export
   directory a failed export created (m8-05, decisions 12 and 16).
 - **Measurement** — the [m8-01 baseline](dogfood/m8-baseline.md) and the
-  [m8-06 rerun](dogfood/m8-rerun.md) with the same fixture, tasks, oracles and
-  providers, and the sanitized evidence under `docs/dogfood/`.
+  [m8-06 rerun](dogfood/m8-rerun.md) with the same fixture, tasks and oracles,
+  and the sanitized evidence under `docs/dogfood/`. OpenAI ran in both; the
+  rerun's five DeepSeek cells were measured on 2026-11-05, after publication, on
+  the same v0.2.0 product code (see the rerun report's DeepSeek addendum).
 
 [M8 acceptance](milestone-8-acceptance.md) maps every goal and decisions 1–16
 to the implementation, its tests and recorded evidence. Partial or deferred:
 
 - Anthropic live compatibility and live cross-provider switching stay partial
   (no Anthropic key was supplied in M8 either).
-- The DeepSeek half of the dogfood measurement is `not_run` /
-  `key_unavailable`, so no cross-provider comparison exists.
+- The DeepSeek half of the dogfood rerun was not part of acceptance (`not_run`
+  / `key_unavailable`). It ran afterwards, on 2026-11-05 and on the same v0.2.0
+  product code (`82f1908`): 4/5 oracles, T5 failing on the same `Cargo.lock`
+  no-change oracle defect as OpenAI, 15 prompts with no read-only prompt, 29
+  read-only auto-approvals and a decision-7 share of 0.40%. This is not a
+  cross-provider comparison: one run per task on each provider, no v0.1
+  DeepSeek baseline, and token counts are not comparable across providers.
 - **m8-04 (parallel read-only tools) is deferred**, by decision 11 and again by
   the rerun: decision 7's measure is **0%** against the 10% threshold in both
-  measurements (baseline: no turn had two or more consecutive read-only calls;
-  rerun: 13 read-only calls, but never two in one model response, and total tool
-  time 2.72% of turn wall time). Sequential tool execution and the
-  one-unresolved-intent storage rule stay. The revisit condition (share at or
-  above 10%) is not met, so it is not a post-v0.2.0 candidate on this evidence.
+  OpenAI measurements (baseline: no turn had two or more consecutive read-only
+  calls; rerun: 13 read-only calls, but never two in one model response, and
+  total tool time 2.72% of turn wall time) and **0.40%** in the
+  post-publication DeepSeek rerun, which did make consecutive read-only calls.
+  Sequential tool execution and the one-unresolved-intent storage rule stay. The
+  revisit condition (share at or above 10%) is not met, so it is not a
+  post-v0.2.0 candidate on this evidence.
 - Undo covers trusted `write`/`edit` effects only; a mutation performed through
   `bash` (seen in the rerun, F07) is reported as not reversible.
 

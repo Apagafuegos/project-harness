@@ -8,9 +8,10 @@ Branching and compaction never undo workspace changes.
 
 The repository is public and licensed `MIT OR Apache-2.0`. v0.2.1 assets are
 built and published from the `v0.2.1` tag by the release workflow; see the
-[GitHub Release](https://github.com/Apagafuegos/project-harness/releases).
-v0.2.1 is the latest published release; the v0.3.0 workspace is unreleased.
-No Rust toolchain is needed to run a prebuilt binary.
+[GitHub Release](https://github.com/Apagafuegos/project-harness/releases). A
+missing archive means that release run has not finished yet. `v0.2.1` is the
+latest published release; `v0.2.0` and `v0.1.0` remain available. The v0.3.0
+workspace is unreleased. No Rust toolchain is needed to run a prebuilt binary.
 
 Choose `x86_64-unknown-linux-musl` for Linux x86_64 (`uname -m`: `x86_64`), or
 `aarch64-unknown-linux-musl` for Linux ARM64 (`aarch64`). Download the matching
