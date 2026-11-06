@@ -234,18 +234,18 @@ analysis and the reasons deletion and reclamation are separate commands.
 
 ## Record versions
 
-Each record carries its own `version`. Readers accept versions 1, 2, 3 and 4
+Each record carries its own `version`. Readers accept versions 1 through 5
 (`SUPPORTED_VERSIONS`) and validate every record against its own version's
-bundled schema. Writers write only version 4 (`CURRENT_VERSION`), including
+bundled schema. Writers write only version 5 (`CURRENT_VERSION`), including
 when they append to a session created under an earlier version. A v1 journal
-therefore continues as a v1 prefix and a v4 suffix, one unbroken checksum
-chain; the tail-repair commit is an ordinary v4 commit. An older binary refuses
-at the first v4 record with `unsupported_version`; it never ignores an undo or
+therefore continues as a v1 prefix and a v5 suffix, one unbroken checksum
+chain; the tail-repair commit is an ordinary v5 commit. An older binary refuses
+at the first v5 record with `unsupported_version`; it never ignores an undo or
 appends past one. Opening never rewrites or migrates a record.
 
 | Rule | Error code |
 | --- | --- |
-| `version` is not the integer 1, 2, 3 or 4 (`0`, `5`, `"2"`, `2.0`, missing) | `unsupported_version` |
+| `version` is not an integer from 1 through 5 (`0`, `6`, `"2"`, `2.0`, missing) | `unsupported_version` |
 | A record's shape is not that of its own version | `schema_violation` |
 | A record's version is lower than the previous record's | `version_regression` |
 | A writer is handed a record whose version is not `CURRENT_VERSION` | `write_version` |
@@ -310,6 +310,15 @@ record always carries one, and every other call always carries `null`; its
 result carries a `file_effect` classification exactly for those calls. The
 classification is the executor's observation of the rename commit point, never
 an inference from the result's status or text.
+
+v5 extends those images for ADR 0034's trusted `multi_edit`. The original
+`path`, `pre_image`, `pre_mode` and `post_image` fields remain the first target;
+optional `additional_targets` carries the remaining sorted path images. A v5
+tool result may include sorted `file_paths` rows (`path`, `effect`) when a batch
+has per-target outcomes. The top-level `file_effect` is their aggregate. Undo
+selects only paths known applied; an unknown path still requires explicit
+recovery, and independent rename commits are not described as one atomic
+filesystem transaction. The independent v1-v4 schemas remain unchanged.
 
 An `undo_intent` is `{undo_id, target_turn_id, anchor_head, configuration,
 policy_revision, targets, omitted_calls}`. A target is
