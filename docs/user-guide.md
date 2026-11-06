@@ -531,3 +531,12 @@ and [M8 acceptance](https://github.com/Apagafuegos/project-harness/blob/main/doc
 Subagents, MCP/plugins, remote workspaces, semantic memory, filesystem checkpoints
 and constrained shell networking are planned beyond v0.2. A parallel read-only
 tool executor is deferred, not planned.
+
+### Pipeline exit status (M9)
+
+New bash approvals show `bash pipefail: enabled`. Pipelines report the
+rightmost failing component's status, so a successful `tail` no longer masks a
+failing test command. This does not stop command lists at the first failure or
+parse test output. An intentionally early-ending filter can cause SIGPIPE;
+handle that explicitly when it is expected. Old plan artifacts keep their
+recorded behavior, and uncertain commands are never replayed on reopen.
