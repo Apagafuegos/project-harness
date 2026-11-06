@@ -80,7 +80,7 @@ fn shipped_schema_bytes_are_pinned() {
 fn only_integer_supported_versions_select_a_schema() {
     // A header has no versioned field, so it is a valid record of each version.
     let header = records(&source("branching")).remove(0);
-    for version in [json!(1), json!(2), json!(3), json!(4)] {
+    for version in [json!(1), json!(2), json!(3), json!(4), json!(5)] {
         let mut record = header.clone();
         record["version"] = version.clone();
         assert_eq!(
@@ -253,14 +253,14 @@ fn writers_refuse_any_version_but_the_current_one() {
 }
 
 #[test]
-fn new_sessions_write_every_record_as_v4() {
+fn new_sessions_write_every_record_as_v5() {
     assert_eq!(
-        CURRENT_VERSION, 4,
+        CURRENT_VERSION, 5,
         "the writer's version is the record format"
     );
     let records = current_records();
     assert_eq!(records.len(), TOOL_TURN_COMMITS + 1);
-    assert!(records.iter().all(|r| r["version"] == json!(4)));
+    assert!(records.iter().all(|r| r["version"] == json!(5)));
     let (intent, _, index) = holding(&records, "execution_intent");
     assert_eq!(
         intent["payload"]["events"][index]["effects"],
@@ -382,6 +382,7 @@ fn intent(
                 pre_image: Some(pre),
                 pre_mode: Some(0o644),
                 post_image: post,
+                additional_targets: Vec::new(),
             },
         )
     });
@@ -571,15 +572,15 @@ fn a_lower_version_after_a_higher_one_is_corrupt() {
             code: "version_regression".into(),
         })
     );
-    assert_eq!(inspection.versions, [(4, 2)].into());
-    // Equal or higher is fine: v1, v1, v4 replays.
+    assert_eq!(inspection.versions, [(5, 2)].into());
+    // Equal or higher is fine: v1, v1, v5 replays.
     values[0]["version"] = json!(1);
     values[1]["version"] = json!(1);
-    values[2]["version"] = json!(4);
+    values[2]["version"] = json!(5);
     fs::write(&path, reframe(&values)).unwrap();
     let inspection = JournalStore::inspect(&root, &id).unwrap();
     assert_eq!(inspection.diagnostic, None);
-    assert_eq!(inspection.versions, [(1, 2), (4, 1)].into());
+    assert_eq!(inspection.versions, [(1, 2), (5, 1)].into());
 }
 
 /// The versions of a journal's records, in order.
@@ -591,7 +592,7 @@ fn versions(root: &DataRoot, id: &SessionId) -> Vec<u64> {
 }
 
 #[test]
-fn a_repaired_v1_tail_continues_as_v4() {
+fn a_repaired_v1_tail_continues_as_v5() {
     let (_temp, root, id) = fixture("compaction");
     let v1 = records(&source("compaction")).len();
     let mut file = fs::OpenOptions::new()
@@ -623,9 +624,9 @@ fn a_repaired_v1_tail_continues_as_v4() {
     let reopened = JournalStore::open(root.clone(), &id).unwrap().snapshot();
     assert_eq!(reopened.checksum(), live.checksum());
     let mut expected = vec![1; v1];
-    expected.extend([4, 4, 4]);
-    assert_eq!(versions(&root, &id), expected, "the repair commit is v4");
+    expected.extend([5, 5, 5]);
+    assert_eq!(versions(&root, &id), expected, "the repair commit is v5");
     let inspection = JournalStore::inspect(&root, &id).unwrap();
     assert_eq!(inspection.diagnostic, None);
-    assert_eq!(inspection.versions, [(1, v1 as u64), (4, 3)].into());
+    assert_eq!(inspection.versions, [(1, v1 as u64), (5, 3)].into());
 }
