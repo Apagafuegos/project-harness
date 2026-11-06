@@ -48,7 +48,7 @@ No release or published-asset claim is made here.
 - Advisory bash scans do not consume the command timeout, and cancellation is
   rechecked before dispatch. Overall tool duration includes scan overhead.
 
-## [0.2.1] - Unreleased
+## [0.2.1] - 2026-11-06
 
 Fixes from the v0.2.0 post-release review, plus the two measurement defects it
 found. No new capability and no journal migration: every v1–v4 journal,

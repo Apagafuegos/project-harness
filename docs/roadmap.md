@@ -7,7 +7,7 @@ compaction and headless ask (Milestone 4), the Ratatui terminal client
 (Milestone 5), and context controls, strategies, the DeepSeek profile and the
 bounded experiments (Milestone 6), v0.1 documentation/release readiness
 (Milestone 7) and the daily-driver features of Milestone 8 are implemented
-within their recorded scope. `v0.1.0` and M8's `v0.2.0` are published;
+within their recorded scope. `v0.1.0`, M8's `v0.2.0` and its `v0.2.1` fixes are published;
 Milestone 9 is in progress on the unreleased v0.3.0 workspace. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
@@ -287,7 +287,7 @@ were published on 2026-11-04, and `CHANGELOG.md` dates the released section
 dispatch/tag/asset verification for **v0.2.0** belongs to the orchestrator after
 [M8 acceptance](milestone-8-acceptance.md).
 
-## 8. Daily-driver agent — complete, v0.2.0 published 2026-11-05
+## 8. Daily-driver agent — complete, v0.2.0 published 2026-11-05, v0.2.1 fixes published 2026-11-06
 
 M8 makes the harness usable for day-to-day coding work: the agent can find code
 without a process, take back its own file edits, and run a project's tests

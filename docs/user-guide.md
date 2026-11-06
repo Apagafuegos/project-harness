@@ -6,26 +6,25 @@ Branching and compaction never undo workspace changes.
 
 ## Install a prebuilt binary
 
-The repository is public and licensed `MIT OR Apache-2.0`. v0.2.0 assets are
-built and published from the `v0.2.0` tag by the release workflow; see the
-[GitHub Release](https://github.com/Apagafuegos/project-harness/releases). A
-missing archive means that release run has not finished yet — `v0.1.0` is the
-latest published release as this guide is written. No Rust toolchain is needed
-to run a prebuilt binary.
+The repository is public and licensed `MIT OR Apache-2.0`. v0.2.1 assets are
+built and published from the `v0.2.1` tag by the release workflow; see the
+[GitHub Release](https://github.com/Apagafuegos/project-harness/releases).
+v0.2.1 is the latest published release; the v0.3.0 workspace is unreleased.
+No Rust toolchain is needed to run a prebuilt binary.
 
 Choose `x86_64-unknown-linux-musl` for Linux x86_64 (`uname -m`: `x86_64`), or
 `aarch64-unknown-linux-musl` for Linux ARM64 (`aarch64`). Download the matching
-`harness-0.2.0-TARGET.tar.gz` and `SHA256SUMS` from the **same release**. In the
+`harness-0.2.1-TARGET.tar.gz` and `SHA256SUMS` from the **same release**. In the
 download directory, for example on ARM64:
 
 ```sh
-grep '  harness-0.2.0-aarch64-unknown-linux-musl.tar.gz$' SHA256SUMS > selected.sha256
+grep '  harness-0.2.1-aarch64-unknown-linux-musl.tar.gz$' SHA256SUMS > selected.sha256
 test -s selected.sha256
 sha256sum -c selected.sha256
-tar -tzf harness-0.2.0-aarch64-unknown-linux-musl.tar.gz
-tar -xzf harness-0.2.0-aarch64-unknown-linux-musl.tar.gz
+tar -tzf harness-0.2.1-aarch64-unknown-linux-musl.tar.gz
+tar -xzf harness-0.2.1-aarch64-unknown-linux-musl.tar.gz
 mkdir -p "$HOME/.local/bin"
-install -m 755 harness-0.2.0-aarch64-unknown-linux-musl/harness "$HOME/.local/bin/harness"
+install -m 755 harness-0.2.1-aarch64-unknown-linux-musl/harness "$HOME/.local/bin/harness"
 export PATH="$HOME/.local/bin:$PATH"
 harness --version
 harness --help
