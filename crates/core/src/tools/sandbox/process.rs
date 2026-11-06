@@ -307,6 +307,13 @@ pub(super) fn run(
     cancel: &CancelToken,
     start: Instant,
 ) -> ExecutionOutcome {
+    if cancel.is_cancelled() || start.elapsed() >= spec.timeout {
+        return super::stopped_before_dispatch(
+            start,
+            !cancel.is_cancelled(),
+            sandbox.config.model_text_limit,
+        );
+    }
     let (mut supervisor, mut info, mut status, capture) = match spawn(sandbox, &spec) {
         Ok(parts) => parts,
         Err(error) => {
@@ -486,6 +493,7 @@ pub(super) fn run(
         output_truncated: overflow || elided,
         artifacts,
         file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
@@ -550,5 +558,42 @@ mod tests {
         }
         assert!(check_init_identity(pid, None, Ok(42), || true).is_err());
         assert!(check_init_identity(pid, Some(42), Ok(42), || false).unwrap());
+    }
+    #[test]
+    fn cancelled_or_expired_commands_never_attempt_spawn() {
+        let sandbox = Sandbox {
+            config: super::super::SandboxConfig {
+                bwrap: "/no-such-bwrap-must-not-spawn".into(),
+                ..super::super::SandboxConfig::default()
+            },
+            report: serde_json::json!({}),
+            scope_runtime: None,
+            gap: None,
+        };
+        for timed_out in [false, true] {
+            let cancel = CancelToken::new();
+            if !timed_out {
+                cancel.cancel();
+            }
+            let outcome = run(
+                &sandbox,
+                Spec {
+                    args: vec![],
+                    timeout: Duration::from_millis(1),
+                    absent: vec![],
+                },
+                &cancel,
+                Instant::now() - Duration::from_millis(10),
+            );
+            assert_eq!(
+                outcome.code,
+                Some(if timed_out {
+                    ResultCode::Timeout
+                } else {
+                    ResultCode::Cancelled
+                })
+            );
+            assert_eq!(outcome.exit_code, None);
+        }
     }
 }
