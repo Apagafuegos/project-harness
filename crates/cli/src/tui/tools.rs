@@ -225,6 +225,7 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
                     edits
                         .iter()
                         .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+                        .map(display_path)
                         .collect::<std::collections::BTreeSet<_>>()
                         .len()
                 })
@@ -407,6 +408,19 @@ pub(super) fn approval(
     }
 }
 
+// Display grouping only; validation and authorization remain in the engine.
+fn display_path(path: &str) -> String {
+    if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return path.to_owned();
+    }
+    let path = path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if path.is_empty() { ".".into() } else { path }
+}
+
 fn multi_edit_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
     let edits = arguments
         .get("edits")
@@ -427,7 +441,7 @@ fn multi_edit_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
             .and_then(Value::as_str)
             .unwrap_or_default();
         grouped
-            .entry(path.to_owned())
+            .entry(display_path(path))
             .or_default()
             .push((old.to_owned(), new.to_owned()));
     }
@@ -912,7 +926,7 @@ mod tests {
         let arguments = arguments(serde_json::json!({"edits":[
             {"path":"z.txt","old_text":"one","new_text":"two"},
             {"path":"a.txt","old_text":"left","new_text":"right"},
-            {"path":"z.txt","old_text":"two","new_text":"three"}
+            {"path":"./z.txt","old_text":"two","new_text":"three"}
         ]}));
         let preview = text(&approval(
             Path::new("/work"),
