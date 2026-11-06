@@ -11,7 +11,7 @@ this document does not predict a pending run's outcome.
 
 | Requirement | Acceptance evidence | Current state |
 | --- | --- | --- |
-| m9-00: v0.2.1 baseline, T1–T5 unchanged, separate T6 | Sanitized original provider cells and report pinned to the exact base/config/model/oracle; one run per cell, no silent retries | Pending: Codex login and DeepSeek key unavailable in this workspace; v0.2.1 not yet published |
+| m9-00: v0.2.1 baseline, T1–T5 unchanged, separate T6 | Sanitized original provider cells and report pinned to the exact base/config/model/oracle; one run per cell, no silent retries | Pending by owner direction (2026-11-06): Codex login and DeepSeek key unavailable in this workspace; v0.2.1 is published |
 | T6 mechanical oracle | Pristine/reference and negative oracle self-tests; per-call undoability counts from actual journal evidence | Implemented; see exact-head CI in PR #2 |
 | A1/m9-01: honest pipeline status | Exact legacy/new argv tests, bound digest/goldens, both client previews; failing pipeline through real Bubblewrap | Shell-suffix tests pass (2), shared ask previews pass (2), digest/golden checks pass; real S02 tracked in PR #2 |
 | B1/m9-02a: reviewed edit design | ADR with limits, repeated-path semantics, complete preflight, partial commit, recovery, persistence and versioning | ADR 0034 records the implementation and its non-atomic commit boundary |
@@ -37,7 +37,9 @@ No fallback, relaxed namespace policy or successful-skip claim is used. The
 existing GitHub `Host sandbox security (S02)` gate is the verification path.
 
 Live-provider credentials are not present in this workspace. Their absence
-is not a provider failure or evidence of compatibility. Historical M8 cells
+is not a provider failure or evidence of compatibility. The owner requested
+that live runs remain recorded as pending on 2026-11-06; this is not a waiver
+of live acceptance or evidence that a provider passed. Historical M8 cells
 remain historical and do not stand in for M9 measurements.
 
 ## Current local verification
