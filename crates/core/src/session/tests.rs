@@ -703,7 +703,7 @@ fn j01_invalid_complete_records_fail_closed_without_losing_valid_prefix() {
                     json!("reasoning_summary")
             }),
         ),
-        ("version", Box::new(|r| r[8]["version"] = json!(5))),
+        ("version", Box::new(|r| r[8]["version"] = json!(6))),
         ("sequence", Box::new(|r| r[8]["seq"] = json!(100))),
         ("unknown_field", Box::new(|r| r[8]["extra"] = json!(true))),
         (
@@ -1353,6 +1353,7 @@ fn recovery_blocks_navigation_and_never_reexecutes_uncertain_intents() {
                         artifacts: vec![],
                         code: None,
                         file_effect: None,
+                        file_paths: Vec::new(),
                     },
                 },
             }),
@@ -1505,6 +1506,7 @@ fn tool_result(
                         artifacts: vec![],
                         code: code_for(status, provenance),
                         file_effect: None,
+                        file_paths: Vec::new(),
                     },
                 },
             }),
