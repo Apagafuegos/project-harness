@@ -672,6 +672,7 @@ impl Journal {
                                 artifacts: vec![],
                                 code: Some("tools_unavailable".into()),
                                 file_effect: None,
+                                file_paths: Vec::new(),
                             },
                         },
                     }),
@@ -1734,7 +1735,7 @@ fn media_blocks_use_flat_estimates() {
 /// v2 added fields the model never sees: the same entries written as v1 or
 /// as v2 build byte-identical reports, fingerprints and items.
 #[test]
-fn entries_written_before_v4_project_identically() {
+fn entries_written_before_v5_project_identically() {
     let mut journal = Journal::new();
     journal.user(vec![text("use tools")]);
     let first = CallId::new();
@@ -1750,17 +1751,25 @@ fn entries_written_before_v4_project_identically() {
         .path()
         .join("sessions")
         .join(format!("{session}.jsonl"));
-    let v3: Vec<Value> = fs::read(path)
+    let current: Vec<Value> = fs::read(path)
         .unwrap()
         .split(|b| *b == b'\n')
         .filter(|l| !l.is_empty())
         .map(|l| serde_json::from_slice::<Value>(l).unwrap()["record"].clone())
         .collect();
-    assert!(v3.iter().all(|r| r["version"] == 4));
+    assert!(current.iter().all(|r| r["version"] == 5));
     // Give the responses a fingerprint too, so every v2 field is set.
-    let mut with_fingerprints = v3.clone();
-    let mut v1 = v3.clone();
-    let mut v2 = v3.clone();
+    let mut v4 = current.clone();
+    for record in &mut v4 {
+        record["version"] = json!(4);
+    }
+    let mut v3 = current.clone();
+    for record in &mut v3 {
+        record["version"] = json!(3);
+    }
+    let mut with_fingerprints = current.clone();
+    let mut v1 = current.clone();
+    let mut v2 = current.clone();
     for record in &mut v2 {
         record["version"] = json!(2);
         // v2 predates the v4 image and effect fields.
@@ -1863,7 +1872,7 @@ fn entries_written_before_v4_project_identically() {
             .unwrap()
     };
     let built = journal.build();
-    for records in [&v3, &v2, &with_fingerprints, &v1] {
+    for records in [&v4, &v3, &v2, &with_fingerprints, &v1] {
         let rebuilt = build(records);
         assert_eq!(
             serde_json::to_string_pretty(&rebuilt.report).unwrap(),
