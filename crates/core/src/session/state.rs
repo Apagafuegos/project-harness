@@ -765,6 +765,47 @@ impl State {
                                 "undo_image_binding",
                             )?;
                         }
+                        if record.version < 5 {
+                            require(result.metadata.file_paths.is_empty(), "undo_image_binding")?;
+                        } else if !result.metadata.file_paths.is_empty() {
+                            let image = invocation
+                                .image()
+                                .ok_or(StoreError::Invalid("undo_image_binding"))?;
+                            let targets: Vec<_> = image.targets().collect();
+                            require(
+                                targets.len() == result.metadata.file_paths.len()
+                                    && targets.iter().zip(&result.metadata.file_paths).all(
+                                        |(target, effect)| target.path == effect.path.as_str(),
+                                    )
+                                    && result
+                                        .metadata
+                                        .file_paths
+                                        .windows(2)
+                                        .all(|pair| pair[0].path < pair[1].path),
+                                "undo_image_binding",
+                            )?;
+                            let aggregate = if result
+                                .metadata
+                                .file_paths
+                                .iter()
+                                .any(|entry| entry.effect == FileEffect::Unknown)
+                            {
+                                FileEffect::Unknown
+                            } else if result
+                                .metadata
+                                .file_paths
+                                .iter()
+                                .any(|entry| entry.effect == FileEffect::Applied)
+                            {
+                                FileEffect::Applied
+                            } else {
+                                FileEffect::NotApplied
+                            };
+                            require(
+                                result.metadata.file_effect == Some(aggregate),
+                                "undo_image_binding",
+                            )?;
+                        }
                     }
                     require(
                         if result.status == ToolStatus::Uncertain {
@@ -1648,24 +1689,69 @@ impl State {
         {
             return Ok(UndoSelection::Legacy(turn.clone()));
         }
-        let mut applied: Vec<(&Invocation, FileImage)> = Vec::new();
+        let mut applied: Vec<(&Invocation, FileImageTarget)> = Vec::new();
         for invocation in mutations {
             let image = invocation
                 .intent
                 .file_image
                 .clone()
                 .ok_or(StoreError::Invalid("undo_image_binding"))?;
-            match self.file_effect(invocation) {
-                Some(FileEffect::Applied) => applied.push((invocation, image)),
-                Some(FileEffect::NotApplied) => {}
-                Some(FileEffect::Unknown) | None => {
+            let per_path = self.file_paths(invocation);
+            if per_path.is_empty() {
+                match self.file_effect(invocation) {
+                    Some(FileEffect::Applied) => {
+                        applied.extend(image.targets().map(|target| {
+                            (
+                                *invocation,
+                                FileImageTarget {
+                                    path: target.path.to_owned(),
+                                    pre_image: target.pre_image.to_owned(),
+                                    pre_mode: target.pre_mode,
+                                    post_image: target.post_image.clone(),
+                                },
+                            )
+                        }));
+                    }
+                    Some(FileEffect::NotApplied) => {}
+                    Some(FileEffect::Unknown) | None => {
+                        return Ok(UndoSelection::UnknownEffect(turn.clone()));
+                    }
+                }
+            } else {
+                let paths: BTreeSet<&str> = image.targets().map(|target| target.path).collect();
+                if per_path.len() != paths.len()
+                    || per_path
+                        .iter()
+                        .any(|effect| !paths.contains(effect.path.as_str()))
+                {
                     return Ok(UndoSelection::UnknownEffect(turn.clone()));
+                }
+                for target in image.targets() {
+                    match per_path
+                        .iter()
+                        .find(|effect| effect.path == target.path)
+                        .map(|effect| effect.effect)
+                    {
+                        Some(FileEffect::Applied) => applied.push((
+                            *invocation,
+                            FileImageTarget {
+                                path: target.path.to_owned(),
+                                pre_image: target.pre_image.to_owned(),
+                                pre_mode: target.pre_mode,
+                                post_image: target.post_image.clone(),
+                            },
+                        )),
+                        Some(FileEffect::NotApplied) => {}
+                        Some(FileEffect::Unknown) | None => {
+                            return Ok(UndoSelection::UnknownEffect(turn.clone()));
+                        }
+                    }
                 }
             }
         }
         let mut targets: Vec<UndoTarget> = Vec::new();
         let mut conflicts: Vec<UndoConflict> = Vec::new();
-        let mut by_path: BTreeMap<&str, Vec<(&Invocation, &FileImage)>> = BTreeMap::new();
+        let mut by_path: BTreeMap<&str, Vec<(&Invocation, &FileImageTarget)>> = BTreeMap::new();
         for (invocation, image) in &applied {
             by_path
                 .entry(image.path.as_str())
@@ -1800,6 +1886,19 @@ impl State {
             return None;
         };
         result.result.metadata.file_effect
+    }
+
+    fn file_paths(&self, invocation: &Invocation) -> &[FilePathEffect] {
+        let Some(id) = invocation.result.as_ref() else {
+            return &[];
+        };
+        let Some(stored) = self.entries.get(id) else {
+            return &[];
+        };
+        let EntryPayload::ToolResult(result) = &stored.entry.payload else {
+            return &[];
+        };
+        &result.result.metadata.file_paths
     }
 
     /// The effective non-default mode of every controlled turn reachable from
