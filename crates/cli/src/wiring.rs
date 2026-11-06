@@ -348,7 +348,7 @@ pub fn continuation_switch(o: &SessionOptions) -> Option<(ModelRef, Portability)
 }
 
 fn policy_json(summary: Option<&ModelRef>, strategy: StrategyId) -> Value {
-    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash","list","glob","grep"],
+    json!({"policy_revision":"ask-v1", "enabled_tools":["read","write","edit","bash","list","glob","grep","multi_edit"],
         "workspace_read":"ask", "workspace_mutation":"ask", "process":"ask", "network":"deny",
         "protected_paths":[], "allowances":[],
         "compaction":{"strategy":strategy.as_str(),"summary_model":summary,"automatic":summary.is_some()}})
@@ -363,15 +363,30 @@ pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
     if value["name"] != "bash" {
         return Vec::new();
     }
+    let mut rows = Vec::new();
+    if let Some(pipefail) = value
+        .get("shell")
+        .and_then(|s| s.get("pipefail"))
+        .and_then(Value::as_bool)
+    {
+        rows.push(format!(
+            "bash pipefail: {}",
+            if pipefail {
+                "enabled (rightmost failing pipeline status)"
+            } else {
+                "disabled (last pipeline status)"
+            }
+        ));
+    }
     let Some(sandbox) = value.get("sandbox") else {
-        return Vec::new();
+        return rows;
     };
     let Ok(settings) =
         serde_json::from_value::<harness_core::tools::sandbox::ToolchainSettings>(sandbox.clone())
     else {
-        return Vec::new();
+        return rows;
     };
-    let mut rows = vec!["sandbox: network denied; private per-command caches".into()];
+    rows.push("sandbox: network denied; private per-command caches".into());
     rows.extend(
         settings
             .toolchain_paths
@@ -389,6 +404,46 @@ pub fn sandbox_summary(plan: &[u8]) -> Vec<String> {
         "sandbox env keys: {}",
         settings.env.keys().cloned().collect::<Vec<_>>().join(", ")
     ));
+    rows
+}
+
+/// Per-file scope from a bound batch plan; JSON quoting escapes terminal controls.
+pub fn file_scope_summary(plan: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<Value>(plan) else {
+        return Vec::new();
+    };
+    let arguments = &value["arguments"];
+    let mut rows = Vec::new();
+    if value["name"] == "multi_edit" {
+        for file in arguments["files"].as_array().into_iter().flatten() {
+            rows.push(format!("file (mutation): {}", file["path"]));
+            for (index, edit) in file["edits"].as_array().into_iter().flatten().enumerate() {
+                rows.push(format!(
+                    "replacement {}: {} => {}",
+                    index + 1,
+                    edit["old_text"],
+                    edit["new_text"]
+                ));
+            }
+        }
+    } else if value["name"] == "read" {
+        if let Some(paths) = arguments["paths"].as_array() {
+            for path in paths {
+                rows.push(format!(
+                    "file (read-only): {} · range {}",
+                    path["path"], path["range"]
+                ));
+            }
+        } else if arguments.get("start_line").is_some() {
+            rows.push(format!(
+                "file (read-only): {} · lines {}+{} · max_bytes {}",
+                arguments["path"],
+                arguments["start_line"],
+                arguments["line_count"],
+                arguments["max_bytes"]
+            ));
+        }
+    }
     rows
 }
 

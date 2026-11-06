@@ -150,6 +150,8 @@ pub(super) fn call(
             string(arguments, "new_text").unwrap_or_default(),
             DIFF_LINES,
         ));
+    } else if name == "multi_edit" {
+        rows.extend(multi_edit_preview(arguments));
     }
     rows
 }
@@ -167,6 +169,16 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
                 400,
             )),
             code,
+        )],
+        "read" if arguments.get("paths").is_some() => vec![Span::styled(
+            format!(
+                "{} files",
+                arguments
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len)
+            ),
+            plain,
         )],
         "read" => {
             let mut spans = vec![Span::styled(
@@ -211,6 +223,28 @@ fn summary(name: &str, arguments: &Map<String, Value>) -> Vec<Span<'static>> {
             bounded(string(arguments, "path").unwrap_or("?"), 120),
             plain,
         )],
+        "multi_edit" => {
+            let edits = arguments
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let paths = arguments
+                .get("edits")
+                .and_then(Value::as_array)
+                .map(|edits| {
+                    edits
+                        .iter()
+                        .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+                        .map(display_path)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                })
+                .unwrap_or(0);
+            vec![Span::styled(
+                format!("{edits} replacements across {paths} files"),
+                plain,
+            )]
+        }
         _ => vec![Span::styled(code_style_json(arguments), dim)],
     }
 }
@@ -279,7 +313,7 @@ pub(super) fn approval(
         }
         return rows;
     }
-    if raw || !matches!(name, "bash" | "edit" | "write" | "read") {
+    if raw || !matches!(name, "bash" | "edit" | "multi_edit" | "write" | "read") {
         let mut rows = Vec::new();
         if !matches!(name, "bash" | "edit" | "write" | "read") {
             rows.push(Line::from(vec![
@@ -330,6 +364,10 @@ pub(super) fn approval(
             ));
             rows
         }
+        "read" if arguments.get("paths").is_some() || arguments.get("start_line").is_some() => {
+            read_preview(arguments)
+        }
+        "multi_edit" => multi_edit_preview(arguments),
         "write" => {
             let text = string(arguments, "text").unwrap_or_default();
             let mut rows = vec![
@@ -383,6 +421,100 @@ pub(super) fn approval(
     }
 }
 
+fn read_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
+    let files = arguments
+        .get("paths")
+        .and_then(Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_object)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![arguments]);
+    let mut rows = vec![Line::raw(format!("{} files · read-only", files.len()))];
+    for file in files {
+        rows.push(Line::raw(format!(
+            "path {}",
+            bounded(&display_path(string(file, "path").unwrap_or("?")), 120)
+        )));
+        let max = number(file, "max_bytes").unwrap_or(1024 * 1024);
+        if file.get("start_line").is_some() {
+            rows.push(Line::raw(format!(
+                "lines {}+{} · max_bytes {max}",
+                number(file, "start_line").unwrap_or(1),
+                number(file, "line_count").unwrap_or(0)
+            )));
+        } else {
+            let offset = number(file, "offset_bytes").unwrap_or(0);
+            rows.push(Line::raw(format!(
+                "bytes {offset}-{}",
+                offset.saturating_add(max)
+            )));
+        }
+    }
+    rows
+}
+
+// Display grouping only; validation and authorization remain in the engine.
+fn display_path(path: &str) -> String {
+    if path.is_empty() || path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return path.to_owned();
+    }
+    let path = path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if path.is_empty() { ".".into() } else { path }
+}
+
+fn multi_edit_preview(arguments: &Map<String, Value>) -> Vec<Line<'static>> {
+    let edits = arguments
+        .get("edits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut grouped = std::collections::BTreeMap::<String, Vec<(String, String)>>::new();
+    for edit in edits {
+        let Some(path) = edit.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let old = edit
+            .get("old_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let new = edit
+            .get("new_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        grouped
+            .entry(display_path(path))
+            .or_default()
+            .push((old.to_owned(), new.to_owned()));
+    }
+    let theme = Theme::default();
+    let label = theme.style(Role::Strong);
+    let mut rows = vec![Line::styled(
+        format!("{} files · exact replacements", grouped.len()),
+        theme.style(Role::Dim),
+    )];
+    for (path, replacements) in grouped {
+        rows.push(Line::from(vec![
+            Span::styled("path ", label),
+            Span::raw(bounded(&path, 120)),
+        ]));
+        for (index, (old, new)) in replacements.iter().enumerate() {
+            rows.push(Line::styled(
+                format!("replacement {} of {}", index + 1, replacements.len()),
+                theme.style(Role::Dim),
+            ));
+            rows.extend(diff(old, new, usize::MAX));
+        }
+    }
+    rows
+}
+
 /// Toolchain scope is taken from the exact plan, not client configuration.
 pub(super) fn sandbox_summary(plan: &[u8]) -> Vec<Line<'static>> {
     crate::wiring::sandbox_summary(plan)
@@ -404,7 +536,16 @@ fn string<'a>(arguments: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
 }
 
 fn number(arguments: &Map<String, Value>, key: &str) -> Option<u64> {
-    arguments.get(key).and_then(Value::as_u64)
+    arguments.get(key).and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|number| {
+                    *number >= 0.0 && number.fract() == 0.0 && *number < u64::MAX as f64
+                })
+                .map(|number| number as u64)
+        })
+    })
 }
 
 fn boolean(arguments: &Map<String, Value>, key: &str) -> bool {
@@ -835,5 +976,49 @@ mod tests {
         ));
         assert!(raw.contains("\"command\": \"cargo test\""), "{raw}");
         assert!(!raw.contains("network: denied"), "{raw}");
+    }
+
+    #[test]
+    fn multi_edit_approval_shows_each_path_and_replacement() {
+        let arguments = arguments(serde_json::json!({"edits":[
+            {"path":"z.txt","old_text":"one","new_text":"two"},
+            {"path":"a.txt","old_text":"left","new_text":"right"},
+            {"path":"./z.txt","old_text":"two","new_text":"three"}
+        ]}));
+        let preview = text(&approval(
+            Path::new("/work"),
+            "multi_edit",
+            &arguments,
+            false,
+        ));
+        assert!(
+            preview.contains("2 files · exact replacements"),
+            "{preview}"
+        );
+        assert!(preview.find("path a.txt").unwrap() < preview.find("path z.txt").unwrap());
+        assert!(preview.contains("- left\n+ right"), "{preview}");
+        assert!(
+            preview.contains("replacement 2 of 2\n- two\n+ three"),
+            "{preview}"
+        );
+    }
+    #[test]
+    fn batched_and_line_read_previews_show_every_path_and_range() {
+        let batch = arguments(serde_json::json!({"paths":[
+            {"path":"./a.rs","start_line":2.0,"line_count":3.0},
+            {"path":"b.rs","offset_bytes":4,"max_bytes":20}
+        ]}));
+        let preview = text(&approval(Path::new("/work"), "read", &batch, false));
+        for expected in [
+            "2 files · read-only",
+            "path a.rs",
+            "lines 2+3",
+            "path b.rs",
+            "bytes 4-24",
+        ] {
+            assert!(preview.contains(expected), "{preview}");
+        }
+        let single = arguments(serde_json::json!({"path":"c.rs","start_line":5,"line_count":2}));
+        assert!(text(&approval(Path::new("/work"), "read", &single, false)).contains("lines 5+2"));
     }
 }

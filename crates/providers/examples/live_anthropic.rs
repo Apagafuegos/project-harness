@@ -400,6 +400,7 @@ async fn tool_round_trip(adapter: &AnthropicMessages, model: &str) -> Result<Str
                 artifacts: Vec::new(),
                 code: None,
                 file_effect: None,
+                file_paths: Vec::new(),
             },
         },
     });

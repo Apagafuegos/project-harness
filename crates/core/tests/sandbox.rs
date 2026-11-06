@@ -918,6 +918,8 @@ fn s02_unknown_non_cloexec_descriptor_fails_before_execution() {
 #[ignore = "S02 real Linux sandbox"]
 fn s02_exact_shell_bytes_cwd_and_recorded_tasksmax_fallback() {
     let f = Fixture::new();
+    // The hard-linked support binary intentionally makes change scans unavailable.
+    fs::remove_file(f.root().join("payload")).unwrap();
     fs::create_dir(f.root().join("sub dir")).unwrap();
     let plan = f.plan_at(
         "printf '%s\\n' '$literal' \"$HOME\"; pwd; test -n \"$$\"",
@@ -1006,4 +1008,50 @@ fn s02_setup_failures_never_fall_back_to_host() {
         ResultCode::SandboxUnavailable,
     );
     assert!(!f.root().join("command-ran").exists());
+}
+
+#[test]
+#[ignore = "S02 real Linux sandbox"]
+fn s02_pipeline_failure_survives_output_filtering() {
+    let fixture = Fixture::new();
+    for (command, code) in [
+        ("(exit 7) | cat", 7),
+        ("true | cat", 0),
+        ("(exit 7) | (exit 4) | cat", 4),
+    ] {
+        let outcome = fixture.run(command);
+        assert_eq!(outcome.exit_code, Some(code), "{outcome:?}");
+    }
+}
+
+#[test]
+#[ignore = "S02 real Linux sandbox"]
+fn s02_bash_change_feedback_preserves_output_status_and_undo_boundary() {
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.root().join("payload")).unwrap();
+    let clean = fixture.run("printf unchanged");
+    succeeded(&clean);
+    assert_eq!(text(&clean), "unchanged");
+
+    let changed = fixture.run("printf visible; printf changed > new-file");
+    succeeded(&changed);
+    assert_eq!(changed.exit_code, Some(0));
+    assert!(
+        text(&changed).contains("1 workspace changes"),
+        "{changed:?}"
+    );
+    assert!(text(&changed).contains("outside undo"));
+    assert!(text(&changed).ends_with("visible"));
+    assert_eq!(changed.file_effect, None);
+    assert!(changed.file_paths.is_empty());
+
+    fs::hard_link(
+        fixture.root().join("new-file"),
+        fixture.root().join("alias"),
+    )
+    .unwrap();
+    let unavailable = fixture.run("printf still-visible");
+    succeeded(&unavailable);
+    assert!(text(&unavailable).contains("Detection unavailable"));
+    assert!(text(&unavailable).ends_with("still-visible"));
 }

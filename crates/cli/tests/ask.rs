@@ -333,11 +333,16 @@ async fn approve_read_only_uses_registry_but_never_auto_approves_mutation() {
         proposal("glob", json!({"pattern":"*"})),
         proposal("grep", json!({"pattern":"hello"})),
         proposal("write", json!({"path":"new","text":"no"})),
+        proposal(
+            "multi_edit",
+            json!({"edits":[{"path":"note","old_text":"hello","new_text":"no"}]}),
+        ),
         reply("done"),
     ]));
     let (code, _, err) = f.run(p, Some(&mut tty)).await;
     assert_eq!(code, 0, "{err}");
-    assert_eq!(tty.proposals.len(), 1);
+    assert_eq!(tty.proposals.len(), 2);
+    assert!(tty.proposals[1].contains("multi_edit"));
     assert!(tty.proposals[0].contains("write"));
     let snapshot = f.snapshot(&err);
     let statuses: Vec<_> = snapshot
@@ -354,12 +359,22 @@ async fn approve_read_only_uses_registry_but_never_auto_approves_mutation() {
             ToolStatus::Succeeded,
             ToolStatus::Succeeded,
             ToolStatus::Succeeded,
+            ToolStatus::Denied,
             ToolStatus::Denied
         ]
     );
     assert_eq!(
         recorded_configuration(&f, &err)["enabled_tools"],
-        json!(["read", "write", "edit", "bash", "list", "glob", "grep"])
+        json!([
+            "read",
+            "write",
+            "edit",
+            "bash",
+            "list",
+            "glob",
+            "grep",
+            "multi_edit"
+        ])
     );
 }
 
@@ -1035,12 +1050,12 @@ async fn pre_search_session_keeps_recorded_tools_and_rejects_new_tools() {
     assert!(journal_bytes(&f, &session).starts_with(&before));
     assert_eq!(configuration_changes(&journal_bytes(&f, &session)), 0);
     assert!(provider.streams().iter().all(|stream| {
-        stream
-            .request
-            .input
-            .tools
-            .iter()
-            .all(|definition| !matches!(definition.name.as_str(), "list" | "glob" | "grep"))
+        stream.request.input.tools.iter().all(|definition| {
+            !matches!(
+                definition.name.as_str(),
+                "list" | "glob" | "grep" | "multi_edit"
+            )
+        })
     }));
     assert!(f.snapshot(&err).entries().any(|(_, entry)| matches!(&entry.entry.payload,
         EntryPayload::ToolResult(result) if result.result.metadata.code.as_deref() == Some("tool_disabled"))));

@@ -139,3 +139,15 @@ connect-style error; the in-sandbox Rust payload still requires connection
 refusal and checks DNS, external TCP and the loopback-only interface list.
 `./scripts/test-loopback-probes.sh` explicitly enables repeated registry-driven
 side probes; it is not part of the default gate (see `docs/providers.md`).
+
+## Bash pipeline status (M9)
+
+New process plans bind `shell.pipefail = true` and execute bash with
+`--noprofile --norc -o pipefail -c`. A pipeline's status is its rightmost
+nonzero component status, not necessarily the output filter's status. Both
+approval clients show the bound option. This is not `errexit`, a test-results
+parser, or a guarantee that every command succeeded; explicit command handling
+and later commands can still affect the shell's final status. Legacy plans
+without the field retain their bytes and last-component semantics. Recovery
+still never re-executes an uncertain process. See
+[ADR 0036](../decisions/0036-bash-pipeline-status.md).

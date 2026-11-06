@@ -8,7 +8,8 @@ compaction and headless ask (Milestone 4), the Ratatui terminal client
 bounded experiments (Milestone 6), v0.1 documentation/release readiness
 (Milestone 7) and the daily-driver features of Milestone 8 are implemented
 within their recorded scope. `v0.1.0`, `v0.2.0` and `v0.2.1` are released, and
-`v0.2.1` is the current published release. Anthropic live compatibility and live
+`v0.2.1` is the current published release. Milestone 9 is in progress on the
+unreleased v0.3.0 workspace. Anthropic live compatibility and live
 cross-provider switching remain partial (no key supplied). M7-01's successful
 Codex and DeepSeek TUI answer/restoration evidence supersedes the historical
 M5 quota limit; it does not claim a live coding/tool workflow.
@@ -342,6 +343,18 @@ to the implementation, its tests and recorded evidence. Partial or deferred:
   post-v0.2.0 candidate on this evidence.
 - Undo covers trusted `write`/`edit` effects only; a mutation performed through
   `bash` (seen in the rerun, F07) is reported as not reversible.
+
+## 9. Reliable edits, honest results, cheaper context — in progress
+
+Implementation was authorized on 2026-11-05. The [M9 plan](milestone-9-plan.md) covers
+honest `bash` exit status (pipelines currently report only the last command's
+status), a trusted multi-file edit plus result feedback so mutations stay
+reviewable and undoable (F07), line-addressed and multi-path `read` (F08), a
+conditional Anthropic live check, and a dogfood baseline and rerun on the same
+method, targeting v0.3.0 readiness. Work builds on the v0.2.1 changes now on
+`main`; the recommended options A1, B1+B2, C1+C2 and D–F are the implementation
+baseline. This is not a completion or release record. Live measurements and the
+required real-sandbox gates need their own evidence.
 
 ## Outside v0.2
 

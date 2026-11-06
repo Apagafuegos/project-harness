@@ -3,6 +3,51 @@
 Notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - Unreleased
+
+Milestone 9 implementation is in progress. See `docs/milestone-9-acceptance.md`
+for the verification state; live baseline/rerun measurements are not yet available.
+No release or published-asset claim is made here.
+
+### Added
+
+- Trusted `multi_edit`: up to 64 exact replacements across existing UTF-8 files,
+  with at most 1 MiB of aggregate JSON arguments. Repeated-file replacements
+  retain their order; distinct files are preflighted and staged before the first
+  rename and committed in lexical path order. One approval shows every edit.
+  Per-path effects distinguish applied, not-applied and unknown changes; undo
+  captures and restores the affected paths. Independent file renames are not an
+  atomic multi-file transaction (ADR 0034).
+- Line-addressed `read` and up to eight per-path byte/line ranges in one sequential
+  call. All targets pass policy and metadata checks before content inspection.
+  Results have an aggregate 32 KiB wire bound, UTF-8-safe clipping and explicit
+  per-file truncation and offsets; legacy byte-read plans stay unchanged
+  (ADR 0035).
+- Bounded descriptor-rooted before/after bash change detection. Reliable content,
+  mode or ownership differences produce an outside-undo warning; unavailable or
+  incomplete detection is stated explicitly. Protected mounts, `.git` and fixed
+  credential names are excluded. Scanning is not a checkpoint or causal proof
+  that bash alone made the observed changes.
+- A separate T6 three-file rename dogfood task with an exact oracle and actual
+  journal/undo metrics. T1–T5 remain the unchanged comparison set.
+
+### Changed
+
+- New bash plans bind `shell.pipefail = true`; both approval clients show the
+  option. Pipelines return their rightmost failing status rather than hiding
+  it behind a successful output filter. This does not enable `errexit` or parse
+  test reports; legacy plan bytes and replay stay unchanged (ADR 0036).
+- Writers emit journal record version 5 for multi-path pre-images and effects;
+  readers accept versions 1–5. Opening never migrates or rewrites old records.
+  **v0.2.1 and older binaries refuse a journal after its first v5 append.**
+
+### Fixed
+
+- JSON escaping is included in trusted read output budgeting, so control-heavy
+  file contents cannot turn a bounded read into an executor-contract failure.
+- Advisory bash scans do not consume the command timeout, and cancellation is
+  rechecked before dispatch. Overall tool duration includes scan overhead.
+
 ## [0.2.1] - 2026-11-06
 
 Fixes from the v0.2.0 post-release review, plus the two measurement defects it

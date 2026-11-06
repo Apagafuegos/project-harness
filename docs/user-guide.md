@@ -10,8 +10,8 @@ The repository is public and licensed `MIT OR Apache-2.0`. v0.2.1 assets are
 built and published from the `v0.2.1` tag by the release workflow; see the
 [GitHub Release](https://github.com/Apagafuegos/project-harness/releases). A
 missing archive means that release run has not finished yet. `v0.2.1` is the
-latest published release; `v0.2.0` and `v0.1.0` remain available. No Rust
-toolchain is needed to run a prebuilt binary.
+latest published release; `v0.2.0` and `v0.1.0` remain available. The v0.3.0
+workspace is unreleased. No Rust toolchain is needed to run a prebuilt binary.
 
 Choose `x86_64-unknown-linux-musl` for Linux x86_64 (`uname -m`: `x86_64`), or
 `aarch64-unknown-linux-musl` for Linux ARM64 (`aarch64`). Download the matching
@@ -531,3 +531,44 @@ and [M8 acceptance](https://github.com/Apagafuegos/project-harness/blob/main/doc
 Subagents, MCP/plugins, remote workspaces, semantic memory, filesystem checkpoints
 and constrained shell networking are planned beyond v0.2. A parallel read-only
 tool executor is deferred, not planned.
+
+### Pipeline exit status (M9)
+
+New bash approvals show `bash pipefail: enabled`. Pipelines report the
+rightmost failing component's status, so a successful `tail` no longer masks a
+failing test command. This does not stop command lists at the first failure or
+parse test output. An intentionally early-ending filter can cause SIGPIPE;
+handle that explicitly when it is expected. Old plan artifacts keep their
+recorded behavior, and uncertain commands are never replayed on reopen.
+
+### Batched tools (M9, unreleased)
+
+Ask the agent to use `multi_edit` for a mechanical change across existing files.
+One approval shows each path and literal replacement, and Ctrl-Z can undo the
+trusted changes. Every target is checked and staged first, but a later rename or
+sync can fail after an earlier file changed. The result records per-file effects;
+uncertainty still requires explicit resolution. There is no remembered grant for
+this batch and no promise of a cross-file atomic commit or bash rollback.
+The headless approval lists every planned file and literal replacement below
+the bounded argument line. Arguments are an `edits` array of `{path, old_text, new_text}` objects (up to 64
+replacements, at most 1 MiB of aggregate JSON).
+
+`read` still accepts `path`, `offset_bytes` and `max_bytes`. For line ranges use
+both `start_line` (one-based) and `line_count` (1–10,000), without `offset_bytes`.
+For several files use `paths`, an array of up to eight objects containing a
+`path` and that file's optional range. `path` and `paths` are mutually exclusive;
+per-file ranges go inside each array item. Results index the input array and
+state actual byte intervals, `more` and `output_truncated`. The entire result is
+bounded to 32 KiB including JSON escaping; omitted data is never silently treated
+as a full file. The same read-only authorization applies; execution stays sequential.
+
+Bash results warn when bounded before/after scans detect changes outside undo.
+A scan is limited to 16,384 entries, depth 64, 64 MiB of content and three seconds
+per pass. Protected mounts, `.git` and fixed credential names are excluded.
+Incomplete scans say detection is unavailable, not that nothing changed.
+Scans do not prove which process caused a change, detect every external effect,
+or create a checkpoint. Use `edit`/`multi_edit` for reversible file mutations.
+
+**Journal compatibility:** the unreleased v0.3.0 reads versions 1–5 and writes
+v5; v0.2.1 and older refuse the first v5 append. Opening an old session does not
+migrate its history, but continuing it appends v5 records.

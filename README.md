@@ -13,8 +13,8 @@ headlessly and support other clients later.
 **Status: v0.2.1, Milestones 1–8 implemented within their recorded scope.**
 The public [v0.2.1 release](https://github.com/Apagafuegos/project-harness/releases/tag/v0.2.1)
 carries prebuilt Linux x86_64/aarch64 musl archives and their checksums. It fixes
-defects found in v0.2.0, so prefer it. Binaries since v0.2.0 write record version
-4, which v0.1.0 refuses. Start with the [user guide](docs/user-guide.md) for
+defects found in v0.2.0, so prefer it. v0.2.0 and v0.2.1 binaries write record
+version 4, which v0.1.0 refuses. Start with the [user guide](docs/user-guide.md) for
 installation, authentication, configuration, TUI keys and maintenance. [M8
 acceptance](docs/milestone-8-acceptance.md), [M7
 acceptance](docs/milestone-7-acceptance.md) and the [security
@@ -188,3 +188,11 @@ Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at you
 Copyright (c) 2026 Apagafuegos.
 
 Created in [T3 Code](https://t3.codes).
+
+### Milestone 9 (unreleased, in progress)
+
+The v0.3.0 workspace adds trusted batched edits with per-file undo, bounded
+line/multi-path reads, explicit bash pipeline status and outside-undo feedback.
+Writers emit journal v5 and retain v1–v4 readers; older binaries refuse a session
+after its first v5 append. The [M9 acceptance checklist](docs/milestone-9-acceptance.md)
+separates implementation from verification and pending live measurements.

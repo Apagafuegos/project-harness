@@ -307,6 +307,7 @@ fn tool_result(store: &mut JournalStore, spec: ResultSpec<'_>) {
                             artifacts,
                             code: code.map(str::to_owned),
                             file_effect: None,
+                            file_paths: Vec::new(),
                         },
                     },
                 }),

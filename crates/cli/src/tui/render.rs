@@ -94,6 +94,7 @@ pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
     if let Some((title, content)) = modal_content(app) {
         let hints = match app.modal {
             Modal::Approval { .. } => "v raw · a allow · d deny · r remember · Esc deny",
+            Modal::UndoConfirm { .. } => "y undo · Enter / n / Esc cancel",
             Modal::Uncertain { .. } => "↑↓ invocation · ←→ choice · Enter submit · PgUp/PgDn",
             Modal::UndoResolve { focus, .. } => match focus {
                 super::UndoFocus::Note => "typing goes to the note · Tab files · Enter submit",
@@ -121,6 +122,8 @@ fn hint_text(app: &App) -> &'static str {
         "↑↓ scroll · PgUp/PgDn page · Esc close"
     } else if matches!(app.modal, Modal::Approval { .. }) {
         "v raw args · a allow · d deny · r remember · Esc deny"
+    } else if matches!(app.modal, Modal::UndoConfirm { .. }) {
+        "y undo · Enter / n / Esc cancel"
     } else if !matches!(app.modal, Modal::None)
         || app.navigation_captures_input()
         || app.inspector_captures()

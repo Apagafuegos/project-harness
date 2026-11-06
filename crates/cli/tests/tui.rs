@@ -2680,5 +2680,12 @@ async fn the_undo_modal_lists_every_omitted_call() {
         "{screen}"
     );
     assert!(screen.contains("cargo test"), "{screen}");
+    assert!(screen.contains("y undo"), "{screen}");
+    assert!(screen.contains("Enter / n / Esc cancel"), "{screen}");
+    assert!(!screen.contains("Enter quit"), "{screen}");
+    assert!(
+        app.on_key(key(KeyCode::Enter)).is_empty(),
+        "Enter cancels undo"
+    );
     recorded.shutdown().await;
 }
