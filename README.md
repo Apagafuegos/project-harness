@@ -187,3 +187,11 @@ Licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at you
 Copyright (c) 2026 Apagafuegos.
 
 Created in [T3 Code](https://t3.codes).
+
+### Milestone 9 (unreleased, in progress)
+
+The v0.3.0 workspace adds trusted batched edits with per-file undo, bounded
+line/multi-path reads, explicit bash pipeline status and outside-undo feedback.
+Writers emit journal v5 and retain v1–v4 readers; older binaries refuse a session
+after its first v5 append. The [M9 acceptance checklist](docs/milestone-9-acceptance.md)
+separates implementation from verification and pending live measurements.

@@ -1,7 +1,8 @@
 # Documentation
 
-v0.2.0 is the current published release, with Milestones 1–8 implemented; the
-`CHANGELOG.md` entry for v0.2.1 is prepared and unreleased. Start with the
+v0.2.0 is the current published release, with Milestones 1–8 implemented.
+v0.2.1 fixes are integrated; the v0.3.0 workspace is unreleased and Milestone 9
+is in progress. Start with the
 [user guide](user-guide.md) for
 installation and daily use. A design document alone is not evidence of
 implementation; acceptance documents separate behavioral tests, historical live
@@ -15,8 +16,13 @@ Key current documents:
 - [M8 acceptance](milestone-8-acceptance.md): decisions 1–16, the daily-driver
   features, their tests, offline/S02 evidence, the dogfood baseline and rerun,
   and v0.2.0 readiness with its partials and deferred item.
-- [M9 plan](milestone-9-plan.md): the **proposed**, unaccepted Milestone 9
-  steps and the owner's open decisions A–F; nothing in it is implemented.
+- [M9 acceptance checklist](milestone-9-acceptance.md): current implementation,
+  checks and pending live evidence; not a completion claim.
+- [Batched edits](decisions/0034-trusted-multi-edit.md),
+  [bounded reads](decisions/0035-bounded-batched-reads.md) and
+  [bash pipeline status](decisions/0036-bash-pipeline-status.md): M9 decisions.
+- [M9 plan](milestone-9-plan.md): the authorized Milestone 9 scope, currently
+  **in progress**. Implementation, live measurements and acceptance are distinct.
 - [M7 acceptance](milestone-7-acceptance.md): decisions 1–17, the v0.1 features,
   full offline/S02 evidence, release dry runs, audit and the release record.
 - [Security audit](security/v0.1-audit.md): accepted findings, fixes and residual risks.
@@ -30,6 +36,8 @@ Key current documents:
   in-process `list`/`glob`/`grep`, walk rules, limits and read-only policy.
 - [Undo](decisions/0032-undo-agent-edits.md): turn-scoped, all-or-nothing undo of
   trusted `write`/`edit` effects and record version 4.
+- [Trusted multi-edit](decisions/0034-trusted-multi-edit.md): a bounded exact
+  edit batch, per-file approval preview, path-specific effects and v5 undo images.
 - [Sandbox toolchains](decisions/0033-sandbox-toolchains.md): opt-in read-only
   toolchain mounts, a fixed sandbox environment, masking and the offline Rust
   recipe.

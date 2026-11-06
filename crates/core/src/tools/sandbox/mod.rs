@@ -4,11 +4,20 @@
 //! must authorize the exact plan before calling [`Sandbox::run`].
 
 mod args;
+mod change_scan;
 mod output;
 mod probe;
 mod process;
 mod settings;
 pub use settings::{ToolchainSettings, credential_name};
+
+/// Shell semantics bound into each new bash plan. Absent in legacy plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShellOptions {
+    /// Use the rightmost failing pipeline component's status.
+    pub pipefail: bool,
+}
 
 use super::{AuthorizedOperation, CancelToken, ExecutionOutcome, Executor, Plan};
 use crate::session::{ContentBlock, ExecutionBackend, ResultCode, ToolStatus};
@@ -117,6 +126,39 @@ pub(super) fn unavailable(start: Instant, reason: &str, cap: usize) -> Execution
         output_truncated,
         artifacts: Vec::new(),
         file_effect: None,
+        file_paths: Vec::new(),
+    }
+}
+
+pub(super) fn stopped_before_dispatch(
+    start: Instant,
+    timed_out: bool,
+    cap: usize,
+) -> ExecutionOutcome {
+    let (status, code, text) = if timed_out {
+        (
+            ToolStatus::TimedOut,
+            ResultCode::Timeout,
+            "timeout: deadline exceeded before dispatch",
+        )
+    } else {
+        (
+            ToolStatus::Cancelled,
+            ResultCode::Cancelled,
+            "cancelled: cancelled before dispatch",
+        )
+    };
+    let (content, output_truncated) = output::content(text.as_bytes(), cap);
+    ExecutionOutcome {
+        status,
+        code: Some(code),
+        content,
+        exit_code: None,
+        duration_ms: Some(start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)),
+        output_truncated,
+        artifacts: Vec::new(),
+        file_effect: None,
+        file_paths: Vec::new(),
     }
 }
 
@@ -232,18 +274,7 @@ impl Sandbox {
             return outcome;
         }
         if cancel.is_cancelled() {
-            return ExecutionOutcome {
-                status: ToolStatus::Cancelled,
-                code: Some(ResultCode::Cancelled),
-                content: vec![ContentBlock::Text {
-                    text: "cancelled: cancelled before dispatch".into(),
-                }],
-                exit_code: None,
-                duration_ms: Some(0),
-                output_truncated: false,
-                artifacts: Vec::new(),
-                file_effect: None,
-            };
+            return stopped_before_dispatch(start, false, self.config.model_text_limit);
         }
         let spec = match args::build(&self.config, plan, workspace_root) {
             Ok(spec) => spec,
@@ -251,7 +282,18 @@ impl Sandbox {
                 return unavailable(start, &error.to_string(), self.config.model_text_limit);
             }
         };
-        process::run(self, spec, cancel, start)
+        let scan = change_scan::ScanSession::begin(workspace_root, plan.bytes(), cancel);
+        if cancel.is_cancelled() {
+            return stopped_before_dispatch(start, false, self.config.model_text_limit);
+        }
+        // Advisory scans do not consume the approved command timeout.
+        let mut outcome = process::run(self, spec, cancel, Instant::now());
+        let feedback = scan.map_or(change_scan::Feedback::Unavailable, |scan| {
+            scan.finish(cancel)
+        });
+        change_scan::add_result_feedback(&mut outcome, feedback, self.config.model_text_limit);
+        outcome.duration_ms = Some(start.elapsed().as_millis().try_into().unwrap_or(u64::MAX));
+        outcome
     }
 }
 

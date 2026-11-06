@@ -144,9 +144,12 @@ impl Allowance {
                 cwd: cwd.clone(),
             })),
             Operation::Read { .. }
+            | Operation::ReadLines { .. }
+            | Operation::ReadMany { .. }
             | Operation::List { .. }
             | Operation::Glob { .. }
-            | Operation::Grep { .. } => None,
+            | Operation::Grep { .. }
+            | Operation::MultiEdit { .. } => None,
         }
     }
 
@@ -396,6 +399,8 @@ pub fn decide(plan: &Plan, facts: &PlanFacts, policy: &PolicySnapshot) -> Author
     };
     match plan.operation() {
         Operation::Read { .. }
+        | Operation::ReadLines { .. }
+        | Operation::ReadMany { .. }
         | Operation::List { .. }
         | Operation::Glob { .. }
         | Operation::Grep { .. } => match policy.workspace_read {

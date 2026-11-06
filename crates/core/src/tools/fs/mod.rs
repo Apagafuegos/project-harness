@@ -5,6 +5,9 @@
 //! Temporary creation and replacement use the verified, pinned parent.
 
 pub(super) mod execute;
+mod read_many;
+#[cfg(test)]
+mod read_many_tests;
 mod resolve;
 #[cfg(test)]
 mod search_tests;
