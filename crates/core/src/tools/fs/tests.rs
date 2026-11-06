@@ -29,6 +29,10 @@ fn workspace(root: &TempDir) -> FsWorkspace {
 fn policy() -> PolicySnapshot {
     let mut config: Value = serde_json::from_slice(include_bytes!("../../../../../docs/rfcs/001/examples/artifacts/7e66535a506e1c533025006e25e2fced162ef19d026d0db999154218ae7a30ea")).unwrap();
     config["protected_paths"] = json!([]);
+    config["enabled_tools"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("multi_edit"));
     let bytes = serde_json::to_vec(&config).unwrap();
     PolicySnapshot::parse(
         ArtifactRef {
@@ -78,6 +82,99 @@ fn assert_no_temp(root: &TempDir) {
             .starts_with(".harness-")),
         "temporary file leaked"
     );
+}
+
+#[test]
+fn multi_edit_commits_in_path_order_and_reports_partial_rename_failure() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("a"), "first").unwrap();
+    fs::write(root.path().join("b"), "second").unwrap();
+    let view = workspace(&root);
+    let plan = plan(
+        &view,
+        "multi_edit",
+        json!({"edits":[
+            {"path":"b","old_text":"second","new_text":"done-b"},
+            {"path":"a","old_text":"first","new_text":"done-a"}
+        ]}),
+    )
+    .unwrap();
+
+    let outcome = execute(&view, &plan);
+    assert_eq!(outcome.status, ToolStatus::Succeeded);
+    assert_eq!(
+        outcome.file_effect,
+        Some(crate::session::FileEffect::Applied)
+    );
+    assert_eq!(
+        outcome.file_paths,
+        [
+            crate::session::FilePathEffect {
+                path: "a".into(),
+                effect: crate::session::FileEffect::Applied,
+            },
+            crate::session::FilePathEffect {
+                path: "b".into(),
+                effect: crate::session::FileEffect::Applied,
+            }
+        ]
+    );
+    assert_eq!(fs::read_to_string(root.path().join("a")).unwrap(), "done-a");
+    assert_eq!(fs::read_to_string(root.path().join("b")).unwrap(), "done-b");
+    assert_no_temp(&root);
+
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("a"), "first").unwrap();
+    fs::write(root.path().join("b"), "second").unwrap();
+    let view = workspace(&root);
+    let plan = plan(
+        &view,
+        "multi_edit",
+        json!({"edits":[
+            {"path":"b","old_text":"second","new_text":"done-b"},
+            {"path":"a","old_text":"first","new_text":"done-a"}
+        ]}),
+    )
+    .unwrap();
+    let mut renames = 0;
+    let outcome = view.execute_hooked(
+        &plan,
+        &CancelToken::new(),
+        &mut |step| {
+            if step == Step::Rename {
+                renames += 1;
+                if renames == 2 {
+                    return Err(Refusal::new(
+                        ResultCode::InfrastructureFailure,
+                        "injected rename failure",
+                    ));
+                }
+            }
+            Ok(())
+        },
+        None,
+        None,
+    );
+    assert_eq!(outcome.status, ToolStatus::InfrastructureFailure);
+    assert_eq!(
+        outcome.file_effect,
+        Some(crate::session::FileEffect::Applied)
+    );
+    assert_eq!(
+        outcome
+            .file_paths
+            .iter()
+            .map(|row| (row.path.as_str(), row.effect))
+            .collect::<Vec<_>>(),
+        [
+            ("a", crate::session::FileEffect::Applied),
+            ("b", crate::session::FileEffect::NotApplied)
+        ]
+    );
+    assert!(text(&outcome).contains("per-file effects: a=applied, b=not_applied"));
+    assert_eq!(fs::read_to_string(root.path().join("a")).unwrap(), "done-a");
+    assert_eq!(fs::read_to_string(root.path().join("b")).unwrap(), "second");
+    assert_no_temp(&root);
 }
 
 #[test]
