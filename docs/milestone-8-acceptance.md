@@ -9,8 +9,11 @@ rerun. Workspace version is **0.2.0**; `publish = false`, the toolchain and the
 dependency set are unchanged in this step.
 
 The orchestrator has since tagged and published v0.2.0 (see [Release
-record](#release-record) below); `CHANGELOG.md`'s `[0.2.0]` section is dated
-2026-11-05.
+record](#release-record) below) and v0.2.1 (see [its
+record](#v021-release-record)); `CHANGELOG.md` dates those sections 2026-11-05
+and 2026-11-06. Rows and decisions below keep what they recorded at acceptance;
+where a later measured result changes what they say, a dated pointer links it
+instead of rewriting the row.
 
 **Met** means implemented with cited source tests or recorded evidence.
 **Partial** is an explicit limitation, never a pass inferred from fixtures.
@@ -124,6 +127,16 @@ Two measurements with the same fixture, tasks, oracles, deadline and providers:
   148.6 s wall, 2.72% tool time, 0% decision-7 share; **cargo ran in the sandbox
   in all 4 attempts and succeeded once (T2) with 16/16 tests passing**; DeepSeek
   `not_run`.
+
+The rerun's DeepSeek cells were measured **after** v0.2.0 was published, on
+2026-11-05 and on the same v0.2.0 product code (`82f1908`): 4/5 oracles, with T5
+failing on the same `Cargo.lock` no-change oracle defect as OpenAI, 15 prompts
+with no read-only prompt, 29 read-only auto-approvals, and a decision-7 share of
+0.40%. See the [rerun
+addendum](dogfood/m8-rerun.md#addendum-deepseek-half-added-2026-11-05-after-v020-was-published).
+That still supports no comparison: one run per task on each provider, no v0.1
+DeepSeek baseline, and token counts are not comparable across providers. The
+`not_run` wording above is what acceptance recorded.
 
 F01–F05 (baseline friction) are resolved or improved and evidenced in the rerun
 report: F01 resolved (cargo reachable; T2 and T5 verified with tests), F02
