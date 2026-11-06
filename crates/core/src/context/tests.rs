@@ -672,6 +672,7 @@ impl Journal {
                                 artifacts: vec![],
                                 code: Some("tools_unavailable".into()),
                                 file_effect: None,
+                                file_paths: Vec::new(),
                             },
                         },
                     }),
