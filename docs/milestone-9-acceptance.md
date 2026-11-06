@@ -49,8 +49,11 @@ remain historical and do not stand in for M9 measurements.
   all files restored, a durable successful three-path undo result and restored
   termios. Fresh terminal captures were inspected; they use the debug-only
   scripted provider, not a live-provider compatibility claim.
-- Release-packaging regressions passed before the final version bump; final
-  packaging verification is still required.
+- Final-version release-packaging regressions pass (wrong-tag refusal,
+  reproducible archives, dependency notices and required-guide checks).
+- Feature-enabled client Clippy, core conformance Clippy and workspace rustdoc
+  with warnings denied pass. Read-many tests pass (16), sandbox helper tests
+  pass (44), and v1–v4 context/continuation compatibility checks pass.
 - `./scripts/check.sh` has been run and is not claimed green locally. This
   sandbox executes tools as uid 0, so the existing chmod-based interrupted-undo
   test can still remove a directory entry and fails its expected permission
