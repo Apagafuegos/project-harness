@@ -463,6 +463,20 @@ impl WorkspaceView for FsWorkspace {
 }
 
 impl FsWorkspace {
+    /// Resolve every requested read target before the caller hashes or reads any member.
+    pub(super) fn resolve_read_files(
+        &self,
+        paths: &[WorkspacePath],
+        control: &mut Control<'_>,
+    ) -> Result<Vec<(OwnedFd, Stat)>, Refusal> {
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let resolved = self.resolve(path, control)?;
+            files.push(self.regular(&resolved, false, control)?);
+        }
+        Ok(files)
+    }
+
     // Linux st_nlink is u32 on aarch64 and u64 on x86_64.
     #[allow(clippy::useless_conversion)]
     pub(super) fn inspect_controlled(
